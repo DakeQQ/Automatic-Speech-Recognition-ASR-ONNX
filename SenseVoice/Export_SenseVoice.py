@@ -118,6 +118,8 @@ with torch.inference_mode():
     del sense_voice
     del audio
     del language_idx
+    del CMVN_VARS
+    del CMVN_MEANS
     gc.collect()
 print('\nExport done!\n\nStart to run SenseVoice by ONNX Runtime.\n\nNow, loading the model...')
 
