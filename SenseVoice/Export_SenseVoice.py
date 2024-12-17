@@ -30,7 +30,7 @@ LFR_M = 7                                                   # The model paramete
 LFR_N = 6                                                   # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
 TARGET_LANGUAGE = 0                                         # Choose one of indices ['auto' = 0, 'zh' = 1, 'en' = 2, 'yue' = 3, 'ja' = 4, 'ko' = 5, 'nospeech' = 6]
-SLIDING_WINDOW = 0                                          # Set the sliding window size for test audio reading; use 0 to disable.
+SLIDING_WINDOW = 0                                          # Set the sliding window step for test audio reading; use 0 to disable.
 
 
 STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
