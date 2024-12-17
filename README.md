@@ -20,5 +20,5 @@ Utilizes ONNX Runtime to transcribe audio into text.
 | Ubuntu-24.04 | Laptop | CPU<br>i5-7300HQ | SenseVoiceSmall<br>q8f32 | 0.075 |
 
 # Coming Up ...
- - Paraformer-small-zh
- - Whisper-large
+ - [Paraformer-small-zh](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1)
+ - [Whisper-large-v3](https://huggingface.co/openai/whisper-large-v3)
