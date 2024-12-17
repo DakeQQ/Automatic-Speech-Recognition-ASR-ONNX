@@ -1,7 +1,7 @@
 # Automatic-Speech-Recognition-ASR-ONNX
 Utilizes ONNX Runtime to transcribe audio into text.
 1. Now support:
-   - [SenseVoiceSmall](https://modelscope.cn/models/iic/SenseVoiceSmall)
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)
 2. This end-to-end version includes internal `STFT` processing. Input audio; output is ASR result.
 3. It is recommended to work with the [VAD](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX) and the [denoised](https://github.com/DakeQQ/Audio-Denoiser-ONNX) model.
 4. See more -> https://dakeqq.github.io/overview/
