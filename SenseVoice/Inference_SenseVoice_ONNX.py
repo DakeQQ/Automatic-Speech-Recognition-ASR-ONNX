@@ -14,7 +14,7 @@ ORT_Accelerate_Providers = []           # If you have accelerate devices for : [
                                         # else keep empty.
 SAMPLE_RATE = 16000                     # The model parameter, do not edit the value.
 TARGET_LANGUAGE = 2                     # Choose one of indices ['auto' = 0, 'zh' = 1, 'en' = 2, 'yue' = 3, 'ja' = 4, 'ko' = 5, 'nospeech' = 6]
-SLIDING_WINDOW = 0                      # Set the sliding window size for test audio reading; use 0 to disable.
+SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
 
 
 model = AutoModel(
