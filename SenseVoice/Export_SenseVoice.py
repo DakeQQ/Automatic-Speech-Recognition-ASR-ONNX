@@ -68,7 +68,7 @@ class SENSE_VOICE(torch.nn.Module):
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         audio -= torch.mean(audio)  # Remove DC Offset
         real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = torch.matmul(self.fbank, torch.sqrt(real_part * real_part + imag_part * imag_part)).transpose(1, 2).clamp(min=1e-5).log()
+        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
         left_padding = mel_features[:, [0], :].repeat(1, self.lfr_m_factor, 1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
         mel_features = padded_inputs[:, self.indices_mel].reshape(1, self.T_lfr, -1)  # Merge time and feature dims
