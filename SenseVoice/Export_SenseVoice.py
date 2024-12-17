@@ -33,7 +33,7 @@ TARGET_LANGUAGE = 0                                         # Choose one of indi
 SLIDING_WINDOW = 0                                          # Set the sliding window size for test audio reading; use 0 to disable.
 
 
-STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # Reference audio length after STFT processed
+STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
 LFR_LENGTH = (STFT_SIGNAL_LENGTH + LFR_N - 1) // LFR_N
 if NFFT > INPUT_AUDIO_LENGTH:
     NFFT = INPUT_AUDIO_LENGTH
