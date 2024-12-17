@@ -19,6 +19,6 @@ Utilizes ONNX Runtime to transcribe audio into text.
 | Ubuntu-24.04 | Laptop | CPU<br>i5-7300HQ | SenseVoiceSmall<br>f32 | 0.037 |
 | Ubuntu-24.04 | Laptop | CPU<br>i5-7300HQ | SenseVoiceSmall<br>q8f32 | 0.075 |
 
-# Coming Up...
+# Coming Up ...
  - Paraformer-small-zh
  - Whisper-large
