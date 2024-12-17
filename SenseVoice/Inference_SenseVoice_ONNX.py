@@ -57,7 +57,6 @@ out_name_A0 = out_name_A[0].name
 print(f"\nTest Input Audio: {test_audio}")
 audio = np.array(AudioSegment.from_file(test_audio).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples())
 audio_len = len(audio)
-inv_audio_len = float(100.0 / audio_len)
 if "int16" not in model_type:
     audio = audio.astype(np.float32) / 32768.0
     if "float16" in model_type:
