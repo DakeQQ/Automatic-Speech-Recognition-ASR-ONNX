@@ -151,7 +151,6 @@ for language_idx, test in enumerate(test_audio):
     print(f"\nTest Input Audio: {test}")
     audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples())
     audio_len = len(audio)
-    inv_audio_len = float(100.0 / audio_len)
     if "int16" not in model_type:
         audio = audio.astype(np.float32) / 32768.0
         if "float16" in model_type:
