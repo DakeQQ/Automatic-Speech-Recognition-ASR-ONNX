@@ -6,7 +6,7 @@ from funasr import AutoModel
 
 
 model_path = "/home/DakeQQ/Downloads/SenseVoiceSmall"                                    # The SenseVoice download path.
-onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoice_ONNX.ort"         # The exported onnx model path.
+onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoice.ort"              # The exported onnx model path.
 test_audio = "./test_sample.wav"                                                         # The test audio path.
 
 
