@@ -23,8 +23,8 @@ USE_PCM_INT16 = False                                       # Enable it, if the 
 INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 89439  # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, set the limit to 89439 due to ONNX Runtime bugs.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT = 400                                                  # Number of FFT components for the STFT process, edit it carefully.
-HOP_LENGTH = 180                                            # Number of samples between successive frames in the STFT, edit it carefully.
+NFFT = 512                                                  # Number of FFT components for the STFT process, edit it carefully.
+HOP_LENGTH = 150                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 LFR_M = 7                                                   # The model parameter, do not edit the value.
 LFR_N = 6                                                   # The model parameter, do not edit the value.
@@ -55,7 +55,7 @@ class SENSE_VOICE(torch.nn.Module):
         self.blank_id = model.model.blank_id
         self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
         self.inv_int16 = 1.0 / 32768.0
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, 20000, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
+        self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, 8000, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=ref_len + self.lfr_m_factor - 1)
