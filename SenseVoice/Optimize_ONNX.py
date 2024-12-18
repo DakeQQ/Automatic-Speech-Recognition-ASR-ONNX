@@ -11,8 +11,8 @@ from onnxslim import slim
 # Path Setting
 original_folder_path = "/home/DakeQQ/Downloads/SenseVoice_ONNX"                           # The fp32 saved folder.
 optimized_folder_path = "/home/DakeQQ/Downloads/SenseVoice_Optimized"                     # The optimized folder.
-model_path = os.path.join(original_folder_path, "SenseVoice_ONNX.onnx")                   # The original fp32 model name.
-optimized_model_path = os.path.join(optimized_folder_path, "SenseVoice_ONNX.onnx")        # The optimized model name.
+model_path = os.path.join(original_folder_path, "SenseVoice.onnx")                        # The original fp32 model name.
+optimized_model_path = os.path.join(optimized_folder_path, "SenseVoice.onnx")             # The optimized model name.
 do_quantize = False                                                                       # Use dynamic quant the model to int8 format.
 use_gpu_fp16 = False                                                                      # If true, the transformers.optimizer will remain the FP16 processes.
 provider = 'CPUExecutionProvider'                                                         # ['CPUExecutionProvider', 'CUDAExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider']
