@@ -52,7 +52,7 @@ class SENSE_VOICE(torch.nn.Module):
         self.cmvn_means = cmvn_means
         self.cmvn_vars = cmvn_vars
         self.T_lfr = lfr_len
-        self.blank_id = model.model.blank_id
+        self.blank_id = sense_voice.blank_id
         self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
         self.inv_int16 = 1.0 / 32768.0
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, 8000, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
