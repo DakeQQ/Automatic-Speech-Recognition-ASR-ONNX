@@ -46,6 +46,7 @@ session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
 ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers)
 print(f"\nUsable Providers: {ort_session_A.get_providers()}")
 model_type = ort_session_A._inputs_meta[0].type
+shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
 out_name_A = ort_session_A.get_outputs()
 in_name_A0 = in_name_A[0].name
@@ -62,7 +63,6 @@ if "int16" not in model_type:
     if "float16" in model_type:
         audio = audio.astype(np.float16)
 audio = audio.reshape(1, 1, -1)
-shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 if isinstance(shape_value_in, str):
     INPUT_AUDIO_LENGTH = min(89439, audio_len)  # If using DYNAMIC_AXES, set the limit to 89439 due to ONNX Runtime bugs.
 else:
