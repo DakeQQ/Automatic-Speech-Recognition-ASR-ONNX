@@ -64,7 +64,7 @@ if "int16" not in model_type:
         audio = audio.astype(np.float16)
 audio = audio.reshape(1, 1, -1)
 if isinstance(shape_value_in, str):
-    INPUT_AUDIO_LENGTH = min(89439, audio_len)  # If using DYNAMIC_AXES, set the limit to 89439 due to ONNX Runtime bugs.
+    INPUT_AUDIO_LENGTH = min(64000, audio_len)  # If using DYNAMIC_AXES, set the limit to 64000 due to ONNX Runtime bugs.
 else:
     INPUT_AUDIO_LENGTH = shape_value_in
 if SLIDING_WINDOW <= 0:
