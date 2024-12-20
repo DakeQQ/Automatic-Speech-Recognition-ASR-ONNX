@@ -180,10 +180,10 @@ out_name_A3 = out_name_A[3].name
 
 num_speakers = np.array([1], dtype=np.int64)  # At least 1.
 if isinstance(shape_value_in, str):
-    saved_embed = np.zeros((2, HIDDEN_SIZE), dtype=np.float32)
-    empty_space = np.zeros((1, HIDDEN_SIZE), dtype=np.float32)
+    saved_embed = np.zeros((2, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)  # At least 2.
+    empty_space = np.zeros((1, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)
 else:
-    saved_embed = np.zeros((MAX_SPEAKERS, HIDDEN_SIZE), dtype=np.float32)
+    saved_embed = np.zeros((ort_session_A._inputs_meta[2].shape[0], ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)
     empty_space = None
 if "float16" in model_type:
     saved_embed = saved_embed.astype(np.float16)
