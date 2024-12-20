@@ -129,7 +129,7 @@ while slice_end <= aligned_len:
         speaker_id = num_speakers[0]
         print(f"\nIt's an unknown speaker. Assign it a new ID = {speaker_id}")
         num_speakers += 1
-        if isinstance(shape_value_in, str):
+        if dynamic_axes:
             saved_embed = np.concatenate((saved_embed, empty_space), axis=0)
     text = tokenizer.decode(token_ids.tolist())[0]
     print(f"\nSpeaker_ID_{speaker_id}: {text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
