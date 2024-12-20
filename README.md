@@ -7,7 +7,7 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 1. **Single Model**:  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)  
 
-2. **Combined Models**:  
+2. **Combined Models (ASR + Speaker Identify)**:  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)  
 
@@ -49,7 +49,7 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 1. **单模型**：  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)  
 
-2. **组合模型**：  
+2. **组合模型 (ASR + 讲话者识别)**：  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)  
 
