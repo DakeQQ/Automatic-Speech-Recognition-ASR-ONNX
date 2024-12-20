@@ -20,8 +20,6 @@ SIMILARITY_THRESHOLD = 0.4              # Threshold to determine the speaker's i
 
 model = AutoModel(
         model=model_path,
-        trust_remote_code=True,
-        remote_code="./modeling_modified/model.py",
         disable_update=True,
         device="cpu",
         LFR_LENGTH=1,                   # Not important here.
