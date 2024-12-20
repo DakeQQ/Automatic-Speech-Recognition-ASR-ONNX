@@ -1,31 +1,67 @@
-# Automatic-Speech-Recognition-ASR-ONNX
-Utilizes ONNX Runtime to transcribe audio into text.
-1. Now support:
-   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)
-   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary) or [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)
-2. This end-to-end version includes internal `STFT` processing. Input audio; output is ASR result.
-3. It is recommended to work with the [VAD](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX) and the [denoised](https://github.com/DakeQQ/Audio-Denoiser-ONNX) model.
-4. See more -> https://dakeqq.github.io/overview/
+---
 
-# Automatic-Speech-Recognition-ASR-ONNX
-1. 现在支持:
-   - [SenseVoiceSmall](https://modelscope.cn/models/iic/SenseVoiceSmall)
-   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary) or [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)
-2. 这个端到端版本包括内部的 `STFT` 处理。输入为音频，输出为 ASR 结果。
-3. 建议与 [VAD](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX) 和 [去噪模型](https://github.com/DakeQQ/Audio-Denoiser-ONNX) 一起使用。.
-4. See more -> https://dakeqq.github.io/overview/
+## Automatic-Speech-Recognition-ASR-ONNX  
+Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 
-# 性能 Performance
-| OS | Device | Backend | Model | Real-Time Factor<br>( Chunk_Size: 128000 or 8s ) |
-|:-------:|:-------:|:-------:|:-------:|:-------:|
-| Ubuntu-24.04 | Laptop | CPU<br>i5-7300HQ | SenseVoiceSmall<br>f32 | 0.037 |
-| Ubuntu-24.04 | Laptop | CPU<br>i5-7300HQ | SenseVoiceSmall<br>q8f32 | 0.075 |
-| Ubuntu-24.04 | Desktop | CPU<br>i3-12300 | SenseVoiceSmall<br>f32 | 0.019 |
-| Ubuntu-24.04 | Desktop | CPU<br>i3-12300 | SenseVoiceSmall<br>q8f32 | 0.022 |
-| Ubuntu-24.04 | Desktop | CPU<br>i3-12300 | SenseVoiceSmall + <br>ERes2NetV2_w24s4ep4<br>f32 | 0.1 |
+### Supported Models  
+1. **Single Model**:  
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)  
 
+2. **Combined Models**:  
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)  
 
+### Features  
+- End-to-end speech recognition with built-in `STFT` processing.  
+  **Input**: Audio file  
+  **Output**: Transcription result  
+- Seamlessly integrate with these additional tools for improved performance:  
+  - [Voice Activity Detection (VAD)](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX)  
+  - [Audio Denoiser](https://github.com/DakeQQ/Audio-Denoiser-ONNX)  
 
-# Coming Up ...
- - [Paraformer-small-zh](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1)
- - [Whisper-large-v3](https://huggingface.co/openai/whisper-large-v3)
+### Learn More  
+- Visit the [project overview](https://dakeqq.github.io/overview/) for further details.
+
+---
+
+## 性能 Performance  
+
+| **OS**          | **Device** | **Backend**           | **Model**                                      | **Real-Time Factor**<br>(Chunk Size: 128000 or 8s) |
+|:----------------:|:----------:|:---------------------:|:---------------------------------------------:|:--------------------------------------------------:|
+| Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | SenseVoiceSmall<br>f32                       | 0.037                                              |
+| Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | SenseVoiceSmall<br>q8f32                     | 0.075                                              |
+| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall<br>f32                       | 0.019                                              |
+| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall<br>q8f32                     | 0.022                                              |
+| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall + <br>ERes2NetV2_w24s4ep4<br>f32 | 0.1                                            |
+
+---
+
+## Coming Soon 🚀  
+- [Paraformer-small-zh](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1)  
+- [Whisper-large-v3](https://huggingface.co/openai/whisper-large-v3)
+
+---
+
+### 自动语音识别（ASR）ONNX  
+利用 ONNX Runtime 实现音频到文本的高效转录。
+
+### 支持模型  
+1. **单模型**：  
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)  
+
+2. **组合模型**：  
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)  
+
+### 功能特点  
+- 端到端语音识别，内置 `STFT` 处理。  
+  **输入**：音频文件  
+  **输出**：转录结果  
+- 推荐搭配以下工具，提升性能：  
+  - [语音活动检测 (VAD)](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX)  
+  - [音频去噪](https://github.com/DakeQQ/Audio-Denoiser-ONNX)  
+
+### 了解更多  
+- 访问[项目概览](https://dakeqq.github.io/overview/)获取更多信息。
+
+---
