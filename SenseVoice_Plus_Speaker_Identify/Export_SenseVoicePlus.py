@@ -241,15 +241,17 @@ for language_idx, test in enumerate(test_audio):
         end_time = time.time()
         if speaker_score >= SIMILARITY_THRESHOLD:
             saved_embed[target_speaker_id] = (saved_embed[target_speaker_id] + speaker_embed) * 0.5
-            print(f"\nLocate the identified speaker with ID = {target_speaker_id}, Similarity = {speaker_score:.3f}")
+            speaker_id = target_speaker_id
+            print(f"\nLocate the identified speaker with ID = {speaker_id}, Similarity = {speaker_score:.3f}")
         else:
             saved_embed[num_speakers] = speaker_embed
-            print(f"\nIt's an unknown speaker. Assign it a new ID = {num_speakers[0]}")
+            speaker_id = num_speakers[0]
+            print(f"\nIt's an unknown speaker. Assign it a new ID = {speaker_id}")
             num_speakers += 1
             if isinstance(shape_value_in, str):
                 saved_embed = np.concatenate((saved_embed, empty_space), axis=0)
         text = tokenizer.decode(token_ids.tolist())[0]
-        print(f"\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
+        print(f"\nSpeaker_ID_{speaker_id}: {text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
         print("----------------------------------------------------------------------------------------------------------")
