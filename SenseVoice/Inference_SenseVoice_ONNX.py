@@ -19,8 +19,6 @@ SLIDING_WINDOW = 0                      # Set the sliding window step for test a
 
 model = AutoModel(
         model=model_path,
-        trust_remote_code=True,
-        remote_code="./modeling_modified/model.py",
         disable_update=True,
         device="cpu",
         LFR_LENGTH=1,                   # Not important here.
