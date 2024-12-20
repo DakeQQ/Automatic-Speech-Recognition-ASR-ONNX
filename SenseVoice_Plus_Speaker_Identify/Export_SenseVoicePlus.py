@@ -172,8 +172,10 @@ in_name_A1 = in_name_A[1].name
 in_name_A2 = in_name_A[2].name
 if isinstance(shape_value_in, int):
     in_name_A3 = in_name_A[3].name
+    dynamic_axes = False
 else:
     in_name_A3 = None
+    dynamic_axes = True
 out_name_A0 = out_name_A[0].name
 out_name_A1 = out_name_A[1].name
 out_name_A2 = out_name_A[2].name
@@ -181,7 +183,7 @@ out_name_A3 = out_name_A[3].name
 
 
 num_speakers = np.array([1], dtype=np.int64)  # At least 1.
-if isinstance(shape_value_in, str):
+if dynamic_axes:
     saved_embed = np.zeros((2, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)  # At least 2.
     empty_space = np.zeros((1, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)
 else:
@@ -189,7 +191,7 @@ else:
     empty_space = None
 if "float16" in model_type:
     saved_embed = saved_embed.astype(np.float16)
-    if isinstance(shape_value_in, str):
+    if dynamic_axes:
         empty_space = empty_space.astype(np.float16)
 
 
@@ -204,7 +206,7 @@ for language_idx, test in enumerate(test_audio):
         if "float16" in model_type:
             audio = audio.astype(np.float16)
     audio = audio.reshape(1, 1, -1)
-    if isinstance(shape_value_in, str):
+    if dynamic_axes:
         INPUT_AUDIO_LENGTH = min(64000, audio_len)  # If using DYNAMIC_AXES, set the limit to 64000 due to ONNX Runtime bugs.
     else:
         INPUT_AUDIO_LENGTH = shape_value_in
@@ -235,7 +237,7 @@ for language_idx, test in enumerate(test_audio):
                     in_name_A1: language_idx,
                     in_name_A2: saved_embed
                 }
-        if isinstance(shape_value_in, int):
+        if not dynamic_axes:
             input_feed[in_name_A3] = num_speakers
         token_ids, target_speaker_id, speaker_score, speaker_embed = ort_session_A.run([out_name_A0, out_name_A1, out_name_A2, out_name_A3], input_feed)
         end_time = time.time()
