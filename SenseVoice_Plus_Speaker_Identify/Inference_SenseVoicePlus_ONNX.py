@@ -55,7 +55,8 @@ out_name_A = ort_session_A.get_outputs()
 in_name_A0 = in_name_A[0].name
 in_name_A1 = in_name_A[1].name
 in_name_A2 = in_name_A[2].name
-in_name_A3 = in_name_A[3].name
+if isinstance(shape_value_in, int):
+    in_name_A3 = in_name_A[3].name
 out_name_A0 = out_name_A[0].name
 out_name_A1 = out_name_A[1].name
 out_name_A2 = out_name_A[2].name
