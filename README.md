@@ -2,6 +2,7 @@
 Utilizes ONNX Runtime to transcribe audio into text.
 1. Now support:
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary) or [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)
 2. This end-to-end version includes internal `STFT` processing. Input audio; output is ASR result.
 3. It is recommended to work with the [VAD](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX) and the [denoised](https://github.com/DakeQQ/Audio-Denoiser-ONNX) model.
 4. See more -> https://dakeqq.github.io/overview/
@@ -9,6 +10,7 @@ Utilizes ONNX Runtime to transcribe audio into text.
 # Automatic-Speech-Recognition-ASR-ONNX
 1. 现在支持:
    - [SenseVoiceSmall](https://modelscope.cn/models/iic/SenseVoiceSmall)
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary) or [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)
 2. 这个端到端版本包括内部的 `STFT` 处理。输入为音频，输出为 ASR 结果。
 3. 建议与 [VAD](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX) 和 [去噪模型](https://github.com/DakeQQ/Audio-Denoiser-ONNX) 一起使用。.
 4. See more -> https://dakeqq.github.io/overview/
@@ -20,6 +22,8 @@ Utilizes ONNX Runtime to transcribe audio into text.
 | Ubuntu-24.04 | Laptop | CPU<br>i5-7300HQ | SenseVoiceSmall<br>q8f32 | 0.075 |
 | Ubuntu-24.04 | Desktop | CPU<br>i3-12300 | SenseVoiceSmall<br>f32 | 0.019 |
 | Ubuntu-24.04 | Desktop | CPU<br>i3-12300 | SenseVoiceSmall<br>q8f32 | 0.022 |
+| Ubuntu-24.04 | Desktop | CPU<br>i3-12300 | SenseVoiceSmallPlus<br>ERes2NetV2_w24s4ep4<br>f32 | 0.1 |
+
 
 
 # Coming Up ...
