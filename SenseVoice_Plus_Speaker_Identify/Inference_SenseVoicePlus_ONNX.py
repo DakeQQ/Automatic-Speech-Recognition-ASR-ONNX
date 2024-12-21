@@ -83,6 +83,7 @@ audio_len = len(audio)
 audio = audio.reshape(1, 1, -1)
 if dynamic_axes:
     INPUT_AUDIO_LENGTH = min(163840, audio_len)  # You can adjust it.
+else:
     INPUT_AUDIO_LENGTH = shape_value_in
 if SLIDING_WINDOW <= 0:
     stride_step = INPUT_AUDIO_LENGTH
