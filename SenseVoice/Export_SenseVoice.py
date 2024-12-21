@@ -31,6 +31,7 @@ LFR_N = 6                                                   # The model paramete
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
 TARGET_LANGUAGE = 0                                         # Choose one of indices ['auto' = 0, 'zh' = 1, 'en' = 2, 'yue' = 3, 'ja' = 4, 'ko' = 5, 'nospeech' = 6]
 SLIDING_WINDOW = 0                                          # Set the sliding window step for test audio reading; use 0 to disable.
+USE_EMOTION = False                                         # Output the emotion tag or not.
 
 
 STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
@@ -59,7 +60,7 @@ class SENSE_VOICE(torch.nn.Module):
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=ref_len + self.lfr_m_factor - 1)
-        self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0)
+        self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
 
     def forward(self, audio, language_idx):
