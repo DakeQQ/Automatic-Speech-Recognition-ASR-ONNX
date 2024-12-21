@@ -20,11 +20,11 @@ ORT_Accelerate_Providers = []                               # If you have accele
                                                             # else keep empty.
 DYNAMIC_AXES = False                                        # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
 USE_PCM_INT16 = False                                       # Enable it, if the audio input is PCM wav data with dtype int16 (short).
-INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 64000  # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, set the limit to 64000 due to ONNX Runtime bugs.
+INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 163840  # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, default to 163840, you can adjust it.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT = 512                                                  # Number of FFT components for the STFT process, edit it carefully.
-HOP_LENGTH = 150                                            # Number of samples between successive frames in the STFT, edit it carefully.
+HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 LFR_M = 7                                                   # The model parameter, do not edit the value.
 LFR_N = 6                                                   # The model parameter, do not edit the value.
@@ -71,7 +71,7 @@ class SENSE_VOICE(torch.nn.Module):
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
         left_padding = mel_features[:, [0], :].repeat(1, self.lfr_m_factor, 1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
-        mel_features = padded_inputs[:, self.indices_mel].reshape(1, self.T_lfr, -1)  # Merge time and feature dims
+        mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
         mel_features = torch.cat((self.language_embed[:, language_idx].float(), self.system_embed, mel_features), dim=1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
         token_ids = self.ctc_lo(encoder_out).argmax(dim=-1).int()
@@ -160,7 +160,7 @@ for language_idx, test in enumerate(test_audio):
             audio = audio.astype(np.float16)
     audio = audio.reshape(1, 1, -1)
     if isinstance(shape_value_in, str):
-        INPUT_AUDIO_LENGTH = min(64000, audio_len)  # If using DYNAMIC_AXES, set the limit to 64000 due to ONNX Runtime bugs.
+        INPUT_AUDIO_LENGTH = min(163840, audio_len)  # You can adjust it.
     else:
         INPUT_AUDIO_LENGTH = shape_value_in
     if SLIDING_WINDOW <= 0:
