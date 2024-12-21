@@ -44,7 +44,7 @@ session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
 
 ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers)
 print(f"\nUsable Providers: {ort_session_A.get_providers()}")
-model_type = ort_session_A._inputs_meta[0].type
+model_type = ort_session_A._inputs_meta[2].type
 shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
 out_name_A = ort_session_A.get_outputs()
@@ -80,10 +80,6 @@ if "float16" in model_type:
 print(f"\nTest Input Audio: {test_audio}")
 audio = np.array(AudioSegment.from_file(test_audio).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples())
 audio_len = len(audio)
-if "int16" not in model_type:
-    audio = audio.astype(np.float32) / 32768.0
-    if "float16" in model_type:
-        audio = audio.astype(np.float16)
 audio = audio.reshape(1, 1, -1)
 if dynamic_axes:
     INPUT_AUDIO_LENGTH = min(163840, audio_len)  # You can adjust it.
@@ -134,4 +130,3 @@ while slice_end <= aligned_len:
     print(f"\nSpeaker_ID_{speaker_id}: {text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
     slice_start += stride_step
     slice_end = slice_start + INPUT_AUDIO_LENGTH
-
