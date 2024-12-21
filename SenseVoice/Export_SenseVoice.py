@@ -10,17 +10,16 @@ from funasr import AutoModel
 
 from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported in ONNX format.
 
-model_path = "/home/DakeQQ/Downloads/SenseVoiceSmall"                                     # The SenseVoice download path.
-onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_ONNX/SenseVoice.onnx"                   # The exported onnx model path.
+model_path = "/home/iamj/Downloads/SenseVoiceSmall"                                     # The SenseVoice download path.
+onnx_model_A = "/home/iamj/Downloads/SenseVoice_ONNX/SenseVoice.onnx"                   # The exported onnx model path.
 modified_path = './modeling_modified/'
 test_audio = [model_path + "/example/zh.mp3", model_path + "/example/en.mp3", model_path + "/example/yue.mp3", model_path + "/example/ja.mp3", model_path + "/example/ko.mp3"]   # The test audio list.
 
 
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                                             # else keep empty.
-DYNAMIC_AXES = False                                        # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-USE_PCM_INT16 = False                                       # Enable it, if the audio input is PCM wav data with dtype int16 (short).
-INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 163840  # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, default to 163840, you can adjust it.
+DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
+INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 163840 # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, default to 163840, you can adjust it.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT = 512                                                  # Number of FFT components for the STFT process, edit it carefully.
@@ -31,7 +30,7 @@ LFR_N = 6                                                   # The model paramete
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
 TARGET_LANGUAGE = 0                                         # Choose one of indices ['auto' = 0, 'zh' = 1, 'en' = 2, 'yue' = 3, 'ja' = 4, 'ko' = 5, 'nospeech' = 6]
 SLIDING_WINDOW = 0                                          # Set the sliding window step for test audio reading; use 0 to disable.
-USE_EMOTION = False                                         # Output the emotion tag or not.
+USE_EMOTION = True                                          # Output the emotion tag or not.
 
 
 STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
@@ -43,13 +42,12 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
 
 
 class SENSE_VOICE(torch.nn.Module):
-    def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, use_emo, use_pcm_int16):
+    def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, use_emo):
         super(SENSE_VOICE, self).__init__()
         self.embed_sys = sense_voice.embed
         self.encoder = sense_voice.encoder
         self.ctc_lo = sense_voice.ctc.ctc_lo
         self.stft_model = stft_model
-        self.use_pcm_int16 = use_pcm_int16
         self.cmvn_means = cmvn_means
         self.cmvn_vars = cmvn_vars
         self.T_lfr = lfr_len
@@ -64,10 +62,9 @@ class SENSE_VOICE(torch.nn.Module):
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
 
     def forward(self, audio, language_idx):
-        if self.use_pcm_int16:
-            audio = self.inv_int16 * audio.float()
-        audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
+        audio = audio.float()
         audio -= torch.mean(audio)  # Remove DC Offset
+        audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
         left_padding = mel_features[:, [0], :].repeat(1, self.lfr_m_factor, 1)
@@ -100,8 +97,8 @@ with torch.inference_mode():
     CMVN_MEANS = model.kwargs['frontend'].cmvn[0].repeat(1, 1, 1)
     CMVN_VARS = (model.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
     tokenizer = model.kwargs['tokenizer']
-    sense_voice = SENSE_VOICE(model.model.eval(), custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, USE_EMOTION, USE_PCM_INT16)
-    audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16 if USE_PCM_INT16 else torch.float32)
+    sense_voice = SENSE_VOICE(model.model.eval(), custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, USE_EMOTION)
+    audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     language_idx = torch.tensor([0], dtype=torch.int32)
     torch.onnx.export(
         sense_voice,
@@ -156,10 +153,6 @@ for language_idx, test in enumerate(test_audio):
     print(f"\nTest Input Audio: {test}")
     audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples())
     audio_len = len(audio)
-    if "int16" not in model_type:
-        audio = audio.astype(np.float32) / 32768.0
-        if "float16" in model_type:
-            audio = audio.astype(np.float16)
     audio = audio.reshape(1, 1, -1)
     if isinstance(shape_value_in, str):
         INPUT_AUDIO_LENGTH = min(163840, audio_len)  # You can adjust it.
