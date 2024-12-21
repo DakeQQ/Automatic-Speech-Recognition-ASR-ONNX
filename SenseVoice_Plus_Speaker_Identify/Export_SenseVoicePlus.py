@@ -36,7 +36,7 @@ TARGET_LANGUAGE = 0                                         # Choose one of indi
 SLIDING_WINDOW = 0                                          # Set the sliding window step for test audio reading; use 0 to disable.
 MAX_SPEAKERS = 10                                           # Maximum number of saved speaker features.
 HIDDEN_SIZE = 192                                           # Model hidden size. Do not edit it.
-SIMILARITY_THRESHOLD = 0.4                                  # Threshold to determine the speaker's identity. You can adjust it.
+SIMILARITY_THRESHOLD = 0.5                                  # Threshold to determine the speaker's identity. You can adjust it.
 
 
 STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
