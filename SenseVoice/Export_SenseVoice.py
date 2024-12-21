@@ -53,7 +53,6 @@ class SENSE_VOICE(torch.nn.Module):
         self.T_lfr = lfr_len
         self.blank_id = sense_voice.blank_id
         self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
-        self.inv_int16 = 1.0 / 32768.0
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, 8000, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
@@ -138,7 +137,6 @@ session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
 
 ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers)
 print(f"\nUsable Providers: {ort_session_A.get_providers()}")
-model_type = ort_session_A._inputs_meta[0].type
 shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
 out_name_A = ort_session_A.get_outputs()
