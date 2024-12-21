@@ -37,6 +37,7 @@ SLIDING_WINDOW = 0                                          # Set the sliding wi
 MAX_SPEAKERS = 10                                           # Maximum number of saved speaker features.
 HIDDEN_SIZE = 192                                           # Model hidden size. Do not edit it.
 SIMILARITY_THRESHOLD = 0.5                                  # Threshold to determine the speaker's identity. You can adjust it.
+USE_EMOTION = False                                         # Output the emotion tag or not.
 
 
 STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
@@ -51,7 +52,7 @@ shutil.copyfile('./modeling_modified/ERes2NetV2.py', python_modelscope_eres2netv
 
 
 class SENSE_VOICE_PLUS(torch.nn.Module):
-    def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, eres2netv2, use_pcm_int16):
+    def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, eres2netv2, use_emo, use_pcm_int16):
         super(SENSE_VOICE_PLUS, self).__init__()
         self.eres2netv2 = eres2netv2
         self.cos_similarity = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
@@ -70,7 +71,7 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=ref_len + self.lfr_m_factor - 1)
-        self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0)
+        self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
 
     def forward(self, audio, language_idx, saved_embed, num_speakers):
@@ -106,7 +107,8 @@ with torch.inference_mode():
         remote_code="./modeling_modified/model.py",
         device="cpu",
         LFR_LENGTH=LFR_LENGTH,
-        FEATURE_SIZE=560  # The model parameter, do not edit the value.
+        FEATURE_SIZE=560,  # The model parameter, do not edit the value.
+        USE_EMOTION=USE_EMOTION
     )
     encoder_output_size_factor = (model_asr.model.encoder.output_size()) ** 0.5
     model_asr.model.embed.weight.data *= encoder_output_size_factor
@@ -118,7 +120,7 @@ with torch.inference_mode():
         disable_update=True,
         device="cpu",
     ).embedding_model.eval()
-    sense_voice_plus = SENSE_VOICE_PLUS(model_asr.model.eval(), custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, model_speaker, USE_PCM_INT16)
+    sense_voice_plus = SENSE_VOICE_PLUS(model_asr.model.eval(), custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, model_speaker, USE_EMOTION, USE_PCM_INT16)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16 if USE_PCM_INT16 else torch.float32)
     language_idx = torch.tensor([0], dtype=torch.int32)
     saved_embed = torch.randn((MAX_SPEAKERS, HIDDEN_SIZE), dtype=torch.float32)
