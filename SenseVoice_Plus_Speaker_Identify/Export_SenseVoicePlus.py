@@ -64,7 +64,6 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.T_lfr = lfr_len
         self.blank_id = sense_voice.blank_id
         self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
-        self.inv_int16 = 1.0 / 32768.0
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, 8000, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
