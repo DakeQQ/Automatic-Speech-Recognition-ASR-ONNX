@@ -297,6 +297,7 @@ class SenseVoiceEncoderSmall(nn.Module):
             selfattention_layer_type: str = "sanm",
             LFR_LENGTH: int = 100,
             FEATURE_SIZE: int = 560,
+            USE_EMOTION: bool = True,
             **kwargs,
     ):
         super().__init__()
@@ -373,7 +374,7 @@ class SenseVoiceEncoderSmall(nn.Module):
 
         self.tp_norm = LayerNorm(output_size)
 
-        positions = torch.arange(1, LFR_LENGTH + 5, device='cpu')[None, :].type(torch.float32)
+        positions = torch.arange(1, LFR_LENGTH + 5, device='cpu')[None, :].type(torch.float32) if USE_EMOTION else torch.arange(1, LFR_LENGTH + 4, device='cpu')[None, :].type(torch.float32)
         log_timescale_increment = torch.log(torch.tensor([10000], dtype=torch.float32, device='cpu')) / (FEATURE_SIZE / 2 - 1)
         inv_timescales = torch.exp(torch.arange(FEATURE_SIZE / 2, device='cpu').type(torch.float32) * (-log_timescale_increment))
         inv_timescales = torch.reshape(inv_timescales, [1, -1])
@@ -425,7 +426,7 @@ class SenseVoiceSmall(nn.Module):
             normalize_class = tables.normalize_classes.get(normalize)
             normalize = normalize_class(**normalize_conf)
         encoder_class = tables.encoder_classes.get(encoder)
-        encoder = encoder_class(input_size=input_size, LFR_LENGTH=kwargs['LFR_LENGTH'], FEATURE_SIZE=kwargs['FEATURE_SIZE'], **encoder_conf)
+        encoder = encoder_class(input_size=input_size, LFR_LENGTH=kwargs['LFR_LENGTH'], FEATURE_SIZE=kwargs['FEATURE_SIZE'], USE_EMOTION=kwargs['USE_EMOTION'], **encoder_conf)
         encoder_output_size = encoder.output_size()
 
         if ctc_conf is None:
