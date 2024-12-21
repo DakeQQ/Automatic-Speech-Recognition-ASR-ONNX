@@ -43,7 +43,7 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
 
 
 class SENSE_VOICE(torch.nn.Module):
-    def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, use_pcm_int16):
+    def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, use_emo, use_pcm_int16):
         super(SENSE_VOICE, self).__init__()
         self.embed_sys = sense_voice.embed
         self.encoder = sense_voice.encoder
@@ -100,7 +100,7 @@ with torch.inference_mode():
     CMVN_MEANS = model.kwargs['frontend'].cmvn[0].repeat(1, 1, 1)
     CMVN_VARS = (model.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
     tokenizer = model.kwargs['tokenizer']
-    sense_voice = SENSE_VOICE(model.model.eval(), custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, USE_PCM_INT16)
+    sense_voice = SENSE_VOICE(model.model.eval(), custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, USE_EMOTION, USE_PCM_INT16)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16 if USE_PCM_INT16 else torch.float32)
     language_idx = torch.tensor([0], dtype=torch.int32)
     torch.onnx.export(
