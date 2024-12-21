@@ -92,7 +92,8 @@ with torch.inference_mode():
         remote_code="./modeling_modified/model.py",
         device="cpu",
         LFR_LENGTH=LFR_LENGTH,
-        FEATURE_SIZE=560  # The model parameter, do not edit the value.
+        FEATURE_SIZE=560,  # The model parameter, do not edit the value.
+        USE_EMOTION=USE_EMOTION
     )
     encoder_output_size_factor = (model.model.encoder.output_size()) ** 0.5
     model.model.embed.weight.data *= encoder_output_size_factor
