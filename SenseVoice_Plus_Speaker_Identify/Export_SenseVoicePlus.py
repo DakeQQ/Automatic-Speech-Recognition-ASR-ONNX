@@ -33,7 +33,7 @@ LFR_N = 6                                                   # The model paramete
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
 TARGET_LANGUAGE = 0                                         # Choose one of indices ['auto' = 0, 'zh' = 1, 'en' = 2, 'yue' = 3, 'ja' = 4, 'ko' = 5, 'nospeech' = 6]
 SLIDING_WINDOW = 0                                          # Set the sliding window step for test audio reading; use 0 to disable.
-MAX_SPEAKERS = 10                                           # Maximum number of saved speaker features.
+MAX_SPEAKERS = 50                                           # Maximum number of saved speaker features.
 HIDDEN_SIZE = 192                                           # Model hidden size. Do not edit it.
 SIMILARITY_THRESHOLD = 0.5                                  # Threshold to determine the speaker's identity. You can adjust it.
 USE_EMOTION = True                                          # Output the emotion tag or not.
