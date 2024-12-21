@@ -15,7 +15,7 @@ ORT_Accelerate_Providers = []           # If you have accelerate devices for : [
 SAMPLE_RATE = 16000                     # The model parameter, do not edit the value.
 TARGET_LANGUAGE = 2                     # Choose one of indices ['auto' = 0, 'zh' = 1, 'en' = 2, 'yue' = 3, 'ja' = 4, 'ko' = 5, 'nospeech' = 6]
 SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
-SIMILARITY_THRESHOLD = 0.4              # Threshold to determine the speaker's identity. You can adjust it.
+SIMILARITY_THRESHOLD = 0.5              # Threshold to determine the speaker's identity. You can adjust it.
 
 
 model = AutoModel(
@@ -86,8 +86,7 @@ if "int16" not in model_type:
         audio = audio.astype(np.float16)
 audio = audio.reshape(1, 1, -1)
 if dynamic_axes:
-    INPUT_AUDIO_LENGTH = min(64000, audio_len)  # If using DYNAMIC_AXES, set the limit to 64000 due to ONNX Runtime bugs.
-else:
+    INPUT_AUDIO_LENGTH = min(163840, audio_len)  # You can adjust it.
     INPUT_AUDIO_LENGTH = shape_value_in
 if SLIDING_WINDOW <= 0:
     stride_step = INPUT_AUDIO_LENGTH
