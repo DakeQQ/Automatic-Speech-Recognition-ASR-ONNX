@@ -21,8 +21,7 @@ test_audio = [model_path_asr + "/example/zh.mp3", model_path_asr + "/example/en.
 
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                                             # else keep empty.
-DYNAMIC_AXES = False                                        # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-USE_PCM_INT16 = False                                       # Enable it, if the audio input is PCM wav data with dtype int16 (short).
+DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
 INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 163840 # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, default to 163840, you can adjust it.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
@@ -37,7 +36,7 @@ SLIDING_WINDOW = 0                                          # Set the sliding wi
 MAX_SPEAKERS = 10                                           # Maximum number of saved speaker features.
 HIDDEN_SIZE = 192                                           # Model hidden size. Do not edit it.
 SIMILARITY_THRESHOLD = 0.5                                  # Threshold to determine the speaker's identity. You can adjust it.
-USE_EMOTION = False                                         # Output the emotion tag or not.
+USE_EMOTION = True                                          # Output the emotion tag or not.
 
 
 STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
@@ -52,7 +51,7 @@ shutil.copyfile('./modeling_modified/ERes2NetV2.py', python_modelscope_eres2netv
 
 
 class SENSE_VOICE_PLUS(torch.nn.Module):
-    def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, eres2netv2, use_emo, use_pcm_int16):
+    def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, eres2netv2, use_emo):
         super(SENSE_VOICE_PLUS, self).__init__()
         self.eres2netv2 = eres2netv2
         self.cos_similarity = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
@@ -60,7 +59,6 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.encoder = sense_voice.encoder
         self.ctc_lo = sense_voice.ctc.ctc_lo
         self.stft_model = stft_model
-        self.use_pcm_int16 = use_pcm_int16
         self.cmvn_means = cmvn_means
         self.cmvn_vars = cmvn_vars
         self.T_lfr = lfr_len
@@ -75,10 +73,9 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
 
     def forward(self, audio, language_idx, saved_embed, num_speakers):
-        if self.use_pcm_int16:
-            audio = self.inv_int16 * audio.float()
-        audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
+        audio = audio.float()
         audio -= torch.mean(audio)  # Remove DC Offset
+        audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-5).log()
         speaker_embed = self.eres2netv2.forward(mel_features - mel_features.mean(dim=1, keepdim=True))
@@ -120,8 +117,8 @@ with torch.inference_mode():
         disable_update=True,
         device="cpu",
     ).embedding_model.eval()
-    sense_voice_plus = SENSE_VOICE_PLUS(model_asr.model.eval(), custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, model_speaker, USE_EMOTION, USE_PCM_INT16)
-    audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16 if USE_PCM_INT16 else torch.float32)
+    sense_voice_plus = SENSE_VOICE_PLUS(model_asr.model.eval(), custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, model_speaker, USE_EMOTION)
+    audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     language_idx = torch.tensor([0], dtype=torch.int32)
     saved_embed = torch.randn((MAX_SPEAKERS, HIDDEN_SIZE), dtype=torch.float32)
     num_speakers = torch.tensor([1], dtype=torch.int64)
@@ -165,7 +162,7 @@ session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
 
 ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers)
 print(f"\nUsable Providers: {ort_session_A.get_providers()}")
-model_type = ort_session_A._inputs_meta[0].type
+model_type = ort_session_A._inputs_meta[2].type
 shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
 out_name_A = ort_session_A.get_outputs()
@@ -203,10 +200,6 @@ for language_idx, test in enumerate(test_audio):
     print(f"\nTest Input Audio: {test}")
     audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples())
     audio_len = len(audio)
-    if "int16" not in model_type:
-        audio = audio.astype(np.float32) / 32768.0
-        if "float16" in model_type:
-            audio = audio.astype(np.float16)
     audio = audio.reshape(1, 1, -1)
     if dynamic_axes:
         INPUT_AUDIO_LENGTH = min(163840, audio_len)  # You can adjust it.
@@ -259,3 +252,4 @@ for language_idx, test in enumerate(test_audio):
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
         print("----------------------------------------------------------------------------------------------------------")
+      
