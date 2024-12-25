@@ -3,11 +3,12 @@ import numpy as np
 import onnxruntime
 from pydub import AudioSegment
 from funasr import AutoModel
+from sentencepiece import SentencePieceProcessor
 
 
-model_path = "/home/DakeQQ/Downloads/SenseVoiceSmall"                                    # The SenseVoice download path.
-onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoice.ort"              # The exported onnx model path.
-test_audio = "./test_sample.wav"                                                         # The test audio path.
+tokenizer_path = "/home/DakeQQ/Downloads/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model"   # The SenseVoice download path.
+onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoice.ort"                      # The exported onnx model path.
+test_audio = "./test_sample.wav"                                                                 # The test audio path.
 
 
 ORT_Accelerate_Providers = []           # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
@@ -17,15 +18,8 @@ TARGET_LANGUAGE = 2                     # Choose one of indices ['auto' = 0, 'zh
 SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
 
 
-model = AutoModel(
-        model=model_path,
-        disable_update=True,
-        device="cpu",
-        LFR_LENGTH=1,                   # Not important here.
-        FEATURE_SIZE=560                # Not important here.
-    )
-tokenizer = model.kwargs['tokenizer']
-del model
+tokenizer = SentencePieceProcessor()
+tokenizer.Load(tokenizer_path)
 
 
 # ONNX Runtime settings
