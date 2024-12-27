@@ -50,7 +50,10 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 
 ### 支持模型  
 1. **单模型**：  
-   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)  
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)
+   - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3)
+   - [Whisper-Large-V3-Turbo](https://huggingface.co/openai/whisper-large-v3-turbo)
+   - [自定义微调 Whisper, 例如: kotoba-Japanese](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0)
 
 2. **组合模型 (ASR + 讲话者识别)**：  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
