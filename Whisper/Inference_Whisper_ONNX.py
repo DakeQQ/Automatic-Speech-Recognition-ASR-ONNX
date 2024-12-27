@@ -5,7 +5,7 @@ from pydub import AudioSegment
 from transformers import AutoTokenizer
 
 
-download_path = "/home/DakeQQ/Downloads/Whisper_Large_V3"                                         #  The whisper model download path.
+download_path = "/home/DakeQQ/Downloads/whisper-large-v3"                                         # The whisper model download path.
 onnx_model_A = "/home/DakeQQ/Downloads/Whisper_Optimized/Whisper_Encoder.ort"                     # The exported onnx model path.
 onnx_model_B = "/home/DakeQQ/Downloads/Whisper_Optimized/Whisper_Decoder.ort"                     # The exported onnx model path.
 test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./example/ko.mp3"]     # The test audio list.
