@@ -20,7 +20,8 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
   **Output**: Transcription result  
 - Seamlessly integrate with these additional tools for improved performance:  
   - [Voice Activity Detection (VAD)](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX)  
-  - [Audio Denoiser](https://github.com/DakeQQ/Audio-Denoiser-ONNX)  
+  - [Audio Denoiser](https://github.com/DakeQQ/Audio-Denoiser-ONNX)
+- This Whisper does not support automatic language detection. Please specify a target language.
 
 ### Learn More  
 - Visit the [project overview](https://dakeqq.github.io/overview/) for further details.
@@ -65,7 +66,8 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
   **输出**：转录结果  
 - 推荐搭配以下工具，提升性能：  
   - [语音活动检测 (VAD)](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX)  
-  - [音频去噪](https://github.com/DakeQQ/Audio-Denoiser-ONNX)  
+  - [音频去噪](https://github.com/DakeQQ/Audio-Denoiser-ONNX)
+- 此 Whisper 不支持自动语言检测。请指定目标语言。
 
 ### 了解更多  
 - 访问[项目概览](https://dakeqq.github.io/overview/)获取更多信息。
