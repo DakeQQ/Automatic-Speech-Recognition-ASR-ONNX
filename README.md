@@ -5,7 +5,10 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 
 ### Supported Models  
 1. **Single Model**:  
-   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)  
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)
+   - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3)
+   - [Whisper-Large-V3-Turbo](https://huggingface.co/openai/whisper-large-v3-turbo)
+   - [Custom Fine tune Whisper, such as: kotoba-Japanese](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0)
 
 2. **Combined Models (ASR + Speaker Identify)**:  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
@@ -28,12 +31,13 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 
 | **OS**          | **Device** | **Backend**           | **Model**                                      | **Real-Time Factor**<br>(Chunk Size: 128000 or 8s) |
 |:----------------:|:----------:|:---------------------:|:---------------------------------------------:|:--------------------------------------------------:|
-| Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | SenseVoiceSmall<br>f32                       | 0.037                                              |
-| Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | SenseVoiceSmall<br>q8f32                     | 0.075                                              |
-| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall<br>f32                       | 0.019                                              |
-| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall<br>q8f32                     | 0.022                                              |
-| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall + <br>ERes2NetV2_w24s4ep4<br>f32 | 0.1                                            |
-
+| Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | SenseVoiceSmall<br>f32                           | 0.037                                              |
+| Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | SenseVoiceSmall<br>q8f32                         | 0.075                                              |
+| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall<br>f32                           | 0.019                                              |
+| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall<br>q8f32                         | 0.022                                              |
+| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall + <br>ERes2NetV2_w24s4ep4<br>f32 | 0.1                                                |
+| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | Whisper-Large-v3-en<br>q8f32                     | 0.15                                               |
+| Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | Whisper-Large-v3-Turboen<br>q8f32                | 0.073                                              |
 ---
 
 ## Coming Soon 🚀  
