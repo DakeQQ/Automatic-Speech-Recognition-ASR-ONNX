@@ -42,7 +42,6 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 
 ## Coming Soon 🚀  
 - [Paraformer-small-zh](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1)  
-- [Whisper-large-v3](https://huggingface.co/openai/whisper-large-v3)
 
 ---
 
