@@ -18,7 +18,7 @@ SAMPLE_RATE = 16000                     # The model parameter, do not edit the v
 TARGET_LANGUAGE = "en"                  # Choose a language listed in the get_language_id function's language_map.
 TASK = 'transcribe'                     # Choose one of : ['transcribe', 'translate']
 SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
-MAX_SEQ_LEN = 64                        # It should less than 448.
+MAX_SEQ_LEN = 64                        # It should keep the same with exported model.
 STOP_TOKEN = 50257                      # 50257 is the end token for common Whisper series model.
 
 def get_language_id(language_input):
