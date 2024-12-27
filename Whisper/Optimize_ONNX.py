@@ -12,7 +12,7 @@ from transformers import AutoModelForSpeechSeq2Seq
 
 
 # Path Setting
-download_path = "/home/DakeQQ/Downloads/Whisper_Large_V3"                                 #  The whisper model download path.
+download_path = "/home/DakeQQ/Downloads/whisper-large-v3"                                 # The whisper model download path.
 original_folder_path = "/home/DakeQQ/Downloads/Whisper_ONNX"                              # The fp32 saved folder.
 optimized_folder_path = "/home/DakeQQ/Downloads/Whisper_Optimized"                        # The optimized folder.
 model_path = os.path.join(original_folder_path, "Whisper_Encoder.onnx")                   # The original fp32 model name.
