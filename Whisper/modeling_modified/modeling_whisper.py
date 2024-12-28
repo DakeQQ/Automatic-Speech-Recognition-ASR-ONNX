@@ -331,7 +331,7 @@ class WhisperSdpaAttention(WhisperAttention):
         value_states = self._shape(self.v_proj(hidden_states), -1, 1)
         key_states = torch.cat((past_key_de, key_states), dim=-2)
         value_states = torch.cat((past_value_de, value_states), dim=-2)
-        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states.transpose(2, 3)) + attention_mask, dim=-1), value_states).transpose(1, 2).reshape(1, -1, self.embed_dim)), key_states.half(), value_states.half()
+        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states.transpose(2, 3)) + attention_mask, dim=-1), value_states).transpose(1, 2).reshape(1, -1, self.embed_dim)), key_states, value_states
 
 
 WHISPER_ATTENTION_CLASSES = {
@@ -447,7 +447,7 @@ class WhisperDecoderLayer(nn.Module):
             key_value_states=None
         )
         hidden_states_attn_en += hidden_states_attn
-        return hidden_states_attn_en + self.fc2(self.activation_fn(self.fc1(self.final_layer_norm(hidden_states_attn_en)))), past_key_de, past_value_de
+        return hidden_states_attn_en + self.fc2(self.activation_fn(self.fc1(self.final_layer_norm(hidden_states_attn_en)))), past_key_de.half(), past_value_de.half()
 
 
 class WhisperPreTrainedModel(PreTrainedModel):
