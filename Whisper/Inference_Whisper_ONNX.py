@@ -195,8 +195,8 @@ for language_idx, test in enumerate(test_audio):
     input_ids = np.array([50258, get_language_id(language), get_task_id(TASK), 50364], dtype=np.int32)
     ids_len = np.array([input_ids.shape[0]], dtype=np.int64)
     history_len = np.array([0], dtype=np.int64)
-    past_key_de = np.zeros((ort_session_B._inputs_meta[3].shape[0], 1, ort_session_B._inputs_meta[3].shape[2], history_len[0], ort_session_B._inputs_meta[3].shape[-1]), dtype=np.float16)
-    past_value_de = np.zeros((ort_session_B._inputs_meta[4].shape[0], 1, ort_session_B._inputs_meta[4].shape[2], history_len[0], ort_session_B._inputs_meta[4].shape[-1]), dtype=np.float16)
+    past_key_de = np.zeros((ort_session_B._inputs_meta[3].shape[0], ort_session_B._inputs_meta[3].shape[1], history_len[0], ort_session_B._inputs_meta[3].shape[-1]), dtype=np.float16)
+    past_value_de = np.zeros((ort_session_B._inputs_meta[4].shape[0], ort_session_B._inputs_meta[4].shape[1], history_len[0], ort_session_B._inputs_meta[4].shape[-1]), dtype=np.float16)
     if 'float16' in model_type:
         attention_mask = np.array([-65504.0], dtype=np.float16)
     else:
