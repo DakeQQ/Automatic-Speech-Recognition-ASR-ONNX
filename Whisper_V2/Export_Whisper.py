@@ -377,7 +377,7 @@ for language_idx, test in enumerate(test_audio):
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
-    save_token_array = remove_repeated_parts(save_token, 3)  # To handle "over-talking".
+    save_token_array = remove_repeated_parts(save_token, 3)  # To handle "over-talking". It an optional process in V2.
     text, _ = tokenizer._decode_asr(
         [{
             "tokens": save_token_array
