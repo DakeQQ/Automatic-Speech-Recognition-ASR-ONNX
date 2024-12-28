@@ -6,13 +6,12 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 ### Supported Models  
 1. **Single Model**:  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)
-   - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3)
-   - [Whisper-Large-V3-Turbo](https://huggingface.co/openai/whisper-large-v3-turbo)
-   - [Custom Fine tune Whisper, such as: kotoba-Japanese](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0)
+   - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3), [Whisper-Large-V3-Turbo](https://huggingface.co/openai/whisper-large-v3-turbo), [Fine-Tune-Whisper-V3-Japanese](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0)...
+   - [Whisper-Large-V2](https://huggingface.co/openai/whisper-large-v2), [Fine-Tune-Whisper-V2-Japanese](https://huggingface.co/clu-ling/whisper-large-v2-japanese-5k-steps)...
 
 2. **Combined Models (ASR + Speaker Identify)**:  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
-   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)  
+   - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)
 
 ### Features  
 - End-to-end speech recognition with built-in `STFT` processing.  
@@ -55,6 +54,8 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
    - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3)
    - [Whisper-Large-V3-Turbo](https://huggingface.co/openai/whisper-large-v3-turbo)
    - [自定义微调 Whisper, 例如: kotoba-Japanese](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0)
+   - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3), [Whisper-Large-V3-Turbo](https://huggingface.co/openai/whisper-large-v3-turbo), [微调-Whisper-V3-Japanese](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0)...
+   - [Whisper-Large-V2](https://huggingface.co/openai/whisper-large-v2), [微调-Whisper-V2-Japanese](https://huggingface.co/clu-ling/whisper-large-v2-japanese-5k-steps)...
 
 2. **组合模型 (ASR + 讲话者识别)**：  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
