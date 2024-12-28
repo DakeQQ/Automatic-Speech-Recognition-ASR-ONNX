@@ -110,13 +110,20 @@ def get_language_id(language_input):
     return language_map.get(language_input)
 
 
-def get_task_id(task_input):
+def get_task_id(task_input, use_v3):
     task_input = task_input.lower()
-    task_map = {
-        'translate': 50358,
-        'transcribe':  50359
-    }
-    return task_map[task_input]
+    if use_v3:
+        task_map = {
+            'translate': 50359,
+            'transcribe':  50360
+        }
+        return task_map[task_input], 50363, 50364
+    else:
+        task_map = {
+            'translate': 50358,
+            'transcribe': 50359
+        }
+        return task_map[task_input], 50362, 50363
 
 
 def remove_repeated_parts(ids, repeat_words_threshold):
@@ -225,7 +232,7 @@ with torch.inference_mode():
     gc.collect()
 
     whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN)
-    input_ids = torch.tensor([50258, get_language_id(TARGET_LANGUAGE), get_task_id(TASK), 50362, 50363], dtype=torch.int32)
+    input_ids = torch.tensor([50258, get_language_id(TARGET_LANGUAGE), get_task_id(TASK, False)[0]], dtype=torch.int32)
     save_encoder_key = torch.zeros((NUM_LAYER_DE, NUM_HEAD_EN, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float16)
     save_encoder_value = torch.zeros((NUM_LAYER_DE, NUM_HEAD_EN, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float16)
     past_key_de = torch.zeros((NUM_LAYER_DE, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
@@ -338,7 +345,7 @@ for language_idx, test in enumerate(test_audio):
     # Start to run Whisper_V2
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = np.array([50258, get_language_id(language), get_task_id(TASK), 50362, 50363], dtype=np.int32)
+    input_ids = np.array([50258, get_language_id(language), get_task_id(TASK, False)[0]], dtype=np.int32)
     ids_len = np.array([input_ids.shape[0]], dtype=np.int64)
     history_len = np.array([0], dtype=np.int64)
     past_key_de = np.zeros((ort_session_B._inputs_meta[3].shape[0], ort_session_B._inputs_meta[3].shape[1], history_len[0], ort_session_B._inputs_meta[3].shape[-1]), dtype=np.float16)
