@@ -265,7 +265,7 @@ class WhisperAttention(nn.Module):
 
     # Copied from transformers.models.bart.modeling_bart.BartAttention._shape with BART->whisper
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return tensor.view(seq_len, self.num_heads, self.head_dim).transpose(0, 1).contiguous()
 
     def forward(
         self,
@@ -280,7 +280,7 @@ class WhisperAttention(nn.Module):
         query_states = self._shape(self.q_proj(hidden_states) * self.scaling, -1, 1)
         key_states = self._shape(self.k_proj(hidden_states), -1, 1)
         value_states = self._shape(self.v_proj(hidden_states), -1, 1)
-        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states.transpose(2, 3)), dim=-1), value_states).transpose(1, 2).reshape(1, -1, self.embed_dim))
+        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states.transpose(1, 2)), dim=-1), value_states).transpose(0, 1).reshape(-1, self.embed_dim))
 
 
 class WhisperFlashAttention2(WhisperAttention):
@@ -311,7 +311,7 @@ class WhisperFlashAttention2(WhisperAttention):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
         query_states = self._shape(self.q_proj(hidden_states) * self.scaling, -1, 1)
-        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, past_key_en), dim=-1), past_value_en).transpose(1, 2).reshape(1, -1, self.embed_dim))
+        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, past_key_en), dim=-1), past_value_en).transpose(0, 1).reshape(-1, self.embed_dim))
 
 
 class WhisperSdpaAttention(WhisperAttention):
@@ -331,7 +331,7 @@ class WhisperSdpaAttention(WhisperAttention):
         value_states = self._shape(self.v_proj(hidden_states), -1, 1)
         key_states = torch.cat((past_key_de, key_states), dim=-2)
         value_states = torch.cat((past_value_de, value_states), dim=-2)
-        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states.transpose(2, 3)) + attention_mask, dim=-1), value_states).transpose(1, 2).reshape(1, -1, self.embed_dim)), key_states, value_states
+        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states.transpose(1, 2)) + attention_mask, dim=-1), value_states).transpose(0, 1).reshape(-1, self.embed_dim)), key_states, value_states
 
 
 WHISPER_ATTENTION_CLASSES = {
@@ -674,8 +674,8 @@ class WhisperEncoder(WhisperPreTrainedModel):
         output_hidden_states=None,
         return_dict=None,
     ):
-        hidden_states = nn.functional.gelu(self.conv2(nn.functional.gelu(self.conv1(input_features)))).transpose(1, 2)
-        hidden_states += self.embed_positions.weight[:hidden_states.shape[1]]
+        hidden_states = nn.functional.gelu(self.conv2(nn.functional.gelu(self.conv1(input_features)))).transpose(1, 2).squeeze(0)
+        hidden_states += self.embed_positions.weight[:hidden_states.shape[0]]
         for idx, encoder_layer in enumerate(self.layers):
             hidden_states = encoder_layer(
                 hidden_states,
