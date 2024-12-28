@@ -184,7 +184,7 @@ class WHISPER_DECODER(torch.nn.Module):
         hidden_states, past_key_de, past_value_de = self.decoder(hidden_states=task_embeds, attention_mask=attention_mask, past_key_de=past_key_de, past_value_de=past_value_de, past_key_en=save_encoder_key, past_value_en=save_encoder_value)
         lm_logits = self.whisper.proj_out(hidden_states[-1])
         lm_logits[self.suppress_tokens] = -65504.0
-        _, indices = torch.topk(lm_logits, k=3, dim=-1)
+        indices = torch.argmax(lm_logits, dim=-1)
         return indices.int(), past_key_de, past_value_de
 
 
@@ -229,7 +229,7 @@ with torch.inference_mode():
     generation_config = GenerationConfig.from_pretrained(model_path)
     suppress_tokens = torch.tensor(generation_config.suppress_tokens, dtype=torch.int64)
     whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN, suppress_tokens)
-    input_ids = torch.tensor([50258, get_language_id(TARGET_LANGUAGE), get_task_id(TASK), 50364], dtype=torch.int32)
+    input_ids = torch.tensor([50258, get_language_id(TARGET_LANGUAGE), get_task_id(TASK), 50363, 50364], dtype=torch.int32)
     save_encoder_key = torch.zeros((NUM_LAYER_DE, NUM_HEAD_EN, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float16)
     save_encoder_value = torch.zeros((NUM_LAYER_DE, NUM_HEAD_EN, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float16)
     past_key_de = torch.zeros((NUM_LAYER_DE, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
@@ -342,7 +342,7 @@ for language_idx, test in enumerate(test_audio):
     # Start to run Whisper
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = np.array([50258, get_language_id(language), get_task_id(TASK), 50364], dtype=np.int32)
+    input_ids = np.array([50258, get_language_id(language), get_task_id(TASK), 50363, 50364], dtype=np.int32)
     ids_len = np.array([input_ids.shape[0]], dtype=np.int64)
     history_len = np.array([0], dtype=np.int64)
     past_key_de = np.zeros((ort_session_B._inputs_meta[3].shape[0], ort_session_B._inputs_meta[3].shape[1], history_len[0], ort_session_B._inputs_meta[3].shape[-1]), dtype=np.float16)
@@ -352,13 +352,12 @@ for language_idx, test in enumerate(test_audio):
     else:
         attention_mask = np.array([-65504.0], dtype=np.float32)
     num_decode = 0
-    stop_flag = 0   # If your target language ASR struggles with 'cannot stop' over-talking, try increasing the stop_flag value to make it easier to stop.
     save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
         save_encoder_key, save_encoder_value = ort_session_A.run([out_name_A0, out_name_A1], {in_name_A0: audio[:, :, slice_start: slice_end]})
         while history_len < MAX_SEQ_LEN:
-            token_ids, past_key_de, past_value_de = ort_session_B.run([out_name_B0, out_name_B1, out_name_B2], {
+            input_ids, past_key_de, past_value_de = ort_session_B.run([out_name_B0, out_name_B1, out_name_B2], {
                 in_name_B0: input_ids,
                 in_name_B1: save_encoder_key,
                 in_name_B2: save_encoder_value,
@@ -368,12 +367,8 @@ for language_idx, test in enumerate(test_audio):
                 in_name_B6: history_len,
                 in_name_B7: attention_mask
             })
-            max_ids = token_ids[0]
-            if STOP_TOKEN in token_ids:
-                if stop_flag > 0:
-                    break
-                else:
-                    stop_flag += 1
+            if STOP_TOKEN in input_ids:
+                break
             if num_decode < 1:
                 history_len += ids_len
                 ids_len[0] = 1
@@ -381,8 +376,8 @@ for language_idx, test in enumerate(test_audio):
             else:
                 history_len += 1
             num_decode += 1
-            save_token.append(max_ids)
-            input_ids = np.array([max_ids], dtype=np.int32)
+            save_token.append(input_ids)
+            input_ids = np.array([input_ids], dtype=np.int32)
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
@@ -397,4 +392,3 @@ for language_idx, test in enumerate(test_audio):
     )
     print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
-
