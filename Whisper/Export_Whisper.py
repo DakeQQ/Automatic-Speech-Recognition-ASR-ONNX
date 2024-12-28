@@ -166,7 +166,7 @@ class WHISPER_ENCODER(torch.nn.Module):
             self.save_encoder_value[idx] = decoder_layer.encoder_attn._shape(decoder_layer.encoder_attn.v_proj(encoder_hidden_states), -1, 1).half()
         save_encoder_key = torch.stack(self.save_encoder_key, dim=0)
         save_encoder_value = torch.stack(self.save_encoder_value, dim=0)
-        return save_encoder_key.transpose(3, 4), save_encoder_value
+        return save_encoder_key.transpose(-1, -2), save_encoder_value
 
 
 class WHISPER_DECODER(torch.nn.Module):
@@ -175,14 +175,14 @@ class WHISPER_DECODER(torch.nn.Module):
         self.whisper = whisper
         self.decoder = whisper.model.decoder
         self.suppress_tokens = suppress_tokens
-        self.attention_mask = (1 - torch.tril(torch.ones([1, 1, max_seq_len, max_seq_len], dtype=torch.int8)))
+        self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8)))
 
     def forward(self, input_ids, save_encoder_key, save_encoder_value, past_key_de, past_value_de, ids_len, history_len, attention_mask):
         kv_seq_len = ids_len + history_len
-        task_embeds = (self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len: kv_seq_len]).unsqueeze(0)
-        attention_mask = self.attention_mask[:, :, :ids_len, :kv_seq_len] * attention_mask
+        task_embeds = (self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len: kv_seq_len])
+        attention_mask = self.attention_mask[:, :ids_len, :kv_seq_len] * attention_mask
         hidden_states, past_key_de, past_value_de = self.decoder(hidden_states=task_embeds, attention_mask=attention_mask, past_key_de=past_key_de, past_value_de=past_value_de, past_key_en=save_encoder_key, past_value_en=save_encoder_value)
-        lm_logits = self.whisper.proj_out(hidden_states[:, -1]).squeeze()
+        lm_logits = self.whisper.proj_out(hidden_states[-1])
         lm_logits[self.suppress_tokens] = -65504.0
         _, indices = torch.topk(lm_logits, k=3, dim=-1)
         return indices.int(), past_key_de, past_value_de
@@ -216,8 +216,8 @@ with torch.inference_mode():
         do_constant_folding=True,
         dynamic_axes={
             'audio': {2: 'audio_len'},
-            'save_encoder_key': {4: 'signal_len'},
-            'save_encoder_value': {3: 'signal_len'}
+            'save_encoder_key': {3: 'signal_len'},
+            'save_encoder_value': {2: 'signal_len'}
         } if DYNAMIC_AXES else None,
         opset_version=17
     )
@@ -230,10 +230,10 @@ with torch.inference_mode():
     suppress_tokens = torch.tensor(generation_config.suppress_tokens, dtype=torch.int64)
     whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN, suppress_tokens)
     input_ids = torch.tensor([50258, get_language_id(TARGET_LANGUAGE), get_task_id(TASK), 50364], dtype=torch.int32)
-    save_encoder_key = torch.zeros((NUM_LAYER_DE, 1, NUM_HEAD_EN, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float16)
-    save_encoder_value = torch.zeros((NUM_LAYER_DE, 1, NUM_HEAD_EN, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float16)
-    past_key_de = torch.zeros((NUM_LAYER_DE, 1, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
-    past_value_de = torch.zeros((NUM_LAYER_DE, 1, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
+    save_encoder_key = torch.zeros((NUM_LAYER_DE, NUM_HEAD_EN, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float16)
+    save_encoder_value = torch.zeros((NUM_LAYER_DE, NUM_HEAD_EN, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float16)
+    past_key_de = torch.zeros((NUM_LAYER_DE, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
+    past_value_de = torch.zeros((NUM_LAYER_DE, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
     ids_len = torch.tensor([input_ids.shape[0]], dtype=torch.int64)
     history_len = torch.tensor([past_key_de.shape[-2]], dtype=torch.int64)
     attention_mask = torch.tensor([-65504.0], dtype=torch.float32)
@@ -246,12 +246,12 @@ with torch.inference_mode():
         do_constant_folding=True,
         dynamic_axes={
             'input_ids': {0: 'ids_len'},
-            'save_encoder_key': {4: 'signal_len'},
-            'save_encoder_value': {3: 'signal_len'},
-            'past_key_de_in': {3: 'history_len'},
-            'past_value_de_in': {3: 'history_len'},
-            'past_key_de_out': {3: 'history_len'},
-            'past_value_de_out': {3: 'history_len'}
+            'save_encoder_key': {3: 'signal_len'},
+            'save_encoder_value': {2: 'signal_len'},
+            'past_key_de_in': {2: 'history_len'},
+            'past_value_de_in': {2: 'history_len'},
+            'past_key_de_out': {2: 'history_len'},
+            'past_value_de_out': {2: 'history_len'}
         } if DYNAMIC_AXES else None,
         opset_version=17
     )
@@ -345,8 +345,8 @@ for language_idx, test in enumerate(test_audio):
     input_ids = np.array([50258, get_language_id(language), get_task_id(TASK), 50364], dtype=np.int32)
     ids_len = np.array([input_ids.shape[0]], dtype=np.int64)
     history_len = np.array([0], dtype=np.int64)
-    past_key_de = np.zeros((ort_session_B._inputs_meta[3].shape[0], 1, ort_session_B._inputs_meta[3].shape[2], history_len[0], ort_session_B._inputs_meta[3].shape[-1]), dtype=np.float16)
-    past_value_de = np.zeros((ort_session_B._inputs_meta[4].shape[0], 1, ort_session_B._inputs_meta[4].shape[2], history_len[0], ort_session_B._inputs_meta[4].shape[-1]), dtype=np.float16)
+    past_key_de = np.zeros((ort_session_B._inputs_meta[3].shape[0], ort_session_B._inputs_meta[3].shape[1], history_len[0], ort_session_B._inputs_meta[3].shape[-1]), dtype=np.float16)
+    past_value_de = np.zeros((ort_session_B._inputs_meta[4].shape[0], ort_session_B._inputs_meta[4].shape[1], history_len[0], ort_session_B._inputs_meta[4].shape[-1]), dtype=np.float16)
     if 'float16' in model_type:
         attention_mask = np.array([-65504.0], dtype=np.float16)
     else:
@@ -397,3 +397,4 @@ for language_idx, test in enumerate(test_audio):
     )
     print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
+
