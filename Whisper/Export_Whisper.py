@@ -393,7 +393,7 @@ for language_idx, test in enumerate(test_audio):
         }],
         return_timestamps=None,  # Do not support return timestamps
         return_language=None,
-        time_precision=None,
+        time_precision=None
     )
     print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
