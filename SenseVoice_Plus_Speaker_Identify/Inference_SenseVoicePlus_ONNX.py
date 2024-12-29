@@ -2,7 +2,6 @@ import time
 import numpy as np
 import onnxruntime
 from pydub import AudioSegment
-from funasr import AutoModel
 from sentencepiece import SentencePieceProcessor
 
 
