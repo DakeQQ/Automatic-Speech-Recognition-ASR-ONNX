@@ -44,29 +44,36 @@ out_name_A = ort_session_A.get_outputs()
 in_name_A0 = in_name_A[0].name
 in_name_A1 = in_name_A[1].name
 in_name_A2 = in_name_A[2].name
+in_name_A3 = in_name_A[3].name
 if isinstance(shape_value_in, int):
-    in_name_A3 = in_name_A[3].name
+    in_name_A4 = in_name_A[4].name
     dynamic_axes = False
 else:
-    in_name_A3 = None
+    in_name_A4 = None
     dynamic_axes = True
 out_name_A0 = out_name_A[0].name
 out_name_A1 = out_name_A[1].name
 out_name_A2 = out_name_A[2].name
 out_name_A3 = out_name_A[3].name
-
+out_name_A4 = out_name_A[4].name
 
 num_speakers = np.array([1], dtype=np.int64)  # At least 1.
 if dynamic_axes:
-    saved_embed = np.zeros((2, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)  # At least 2.
-    empty_space = np.zeros((1, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)
+    saved_embed = np.zeros((ort_session_A._inputs_meta[2].shape[0], 2), dtype=np.float32)  # At least 2.
+    saved_dot = np.ones((1, 2), dtype=np.float32)
+    empty_embed = np.zeros((ort_session_A._inputs_meta[2].shape[0], 1), dtype=np.float32)
+    empty_dot = np.ones((1, 1), dtype=np.float32)
 else:
     saved_embed = np.zeros((ort_session_A._inputs_meta[2].shape[0], ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)
-    empty_space = None
+    saved_dot = np.ones((1, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)
+    empty_embed = None
+    empty_dot = None
 if "float16" in model_type:
     saved_embed = saved_embed.astype(np.float16)
+    saved_dot = saved_embed.astype(np.float16)
     if dynamic_axes:
-        empty_space = empty_space.astype(np.float16)
+        empty_embed = empty_embed.astype(np.float16)
+        empty_dot = empty_dot.astype(np.float16)
 
 
 # Load the input audio
@@ -99,28 +106,33 @@ slice_start = 0
 slice_end = INPUT_AUDIO_LENGTH
 language_idx = np.array([TARGET_LANGUAGE], dtype=np.int32)
 while slice_end <= aligned_len:
-    start_time = time.time()
     input_feed = {
                 in_name_A0: audio[:, :, slice_start: slice_end],
                 in_name_A1: language_idx,
-                in_name_A2: saved_embed
+                in_name_A2: saved_embed,
+                in_name_A3: saved_dot
             }
     if not dynamic_axes:
-        input_feed[in_name_A3] = num_speakers
-    token_ids, target_speaker_id, speaker_score, speaker_embed = ort_session_A.run([out_name_A0, out_name_A1, out_name_A2, out_name_A3], input_feed)
+        input_feed[in_name_A4] = num_speakers
+    start_time = time.time()
+    token_ids, target_speaker_id, speaker_score, speaker_embed, speaker_embed_dot = ort_session_A.run([out_name_A0, out_name_A1, out_name_A2, out_name_A3, out_name_A4], input_feed)
     end_time = time.time()
     if speaker_score >= SIMILARITY_THRESHOLD:
-        saved_embed[target_speaker_id] = (saved_embed[target_speaker_id] + speaker_embed) * 0.5
+        saved_embed[:, target_speaker_id] = (saved_embed[:, target_speaker_id] + speaker_embed) * 0.5
+        saved_dot[:, target_speaker_id] = (saved_dot[:, target_speaker_id] + speaker_embed_dot) * 0.5
         speaker_id = target_speaker_id
-        print(f"\nLocate the identified speaker with ID = {speaker_id}, Similarity = {speaker_score:.3f}")
+        print(f"\nLocate the identified speaker with ID = {speaker_id}, Similarity = {speaker_score[0]:.3f}")
     else:
-        saved_embed[num_speakers] = speaker_embed
+        saved_embed[:, num_speakers] = speaker_embed
+        saved_dot[:, num_speakers] = speaker_embed_dot
         speaker_id = num_speakers[0]
         print(f"\nIt's an unknown speaker. Assign it a new ID = {speaker_id}")
         num_speakers += 1
         if dynamic_axes:
-            saved_embed = np.concatenate((saved_embed, empty_space), axis=0)
+            saved_embed = np.concatenate((saved_embed, empty_embed), axis=1)
+            saved_dot = np.concatenate((saved_dot, empty_dot), axis=1)
     text = tokenizer.decode(token_ids.tolist())[0]
     print(f"\nSpeaker_ID_{speaker_id}: {text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
     slice_start += stride_step
     slice_end = slice_start + INPUT_AUDIO_LENGTH
+    print("----------------------------------------------------------------------------------------------------------")
