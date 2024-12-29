@@ -16,7 +16,7 @@ model_path_asr = "/home/DakeQQ/Downloads/SenseVoiceSmall"                       
 model_path_speaker = "/home/DakeQQ/Downloads/speech_eres2netv2_sv_zh-cn_16k-common"                                                                       # The SenseVoice download path.
 python_modelscope_eres2netv2_path = '/home/DakeQQ/anaconda3/envs/python_312/lib/python3.12/site-packages/modelscope/models/audio/sv/ERes2NetV2.py'        # The Python package path.
 onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_ONNX/SenseVoicePlus.onnx"                                                                               # The exported onnx model path.
-test_audio = [model_path_asr + "/example/zh.mp3", model_path_asr + "/example/en.mp3", model_path_asr + "/example/yue.mp3", model_path_asr + "/example/ja.mp3", model_path_asr + "/example/ko.mp3"]   # The test audio list.
+test_audio = [model_path_asr + "/example/zh.mp3", model_path_asr + "/example/en.mp3", model_path_asr + "/example/yue.mp3", model_path_asr + "/example/ja.mp3", model_path_asr + "/example/ko.mp3", model_path_asr + "/example/ko.mp3"]   # The test audio list. Duplicate the last one for Speaker Identify.
 
 
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
