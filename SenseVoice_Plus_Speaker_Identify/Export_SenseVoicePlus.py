@@ -54,7 +54,6 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
     def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, eres2netv2, use_emo):
         super(SENSE_VOICE_PLUS, self).__init__()
         self.eres2netv2 = eres2netv2
-        self.cos_similarity = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
         self.embed_sys = sense_voice.embed
         self.encoder = sense_voice.encoder
         self.ctc_lo = sense_voice.ctc.ctc_lo
@@ -71,14 +70,19 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
 
-    def forward(self, audio, language_idx, saved_embed, num_speakers):
+    def forward(self, audio, language_idx, saved_embed, saved_dot, num_speakers):
         audio = audio.float()
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-5).log()
         speaker_embed = self.eres2netv2.forward(mel_features - mel_features.mean(dim=1, keepdim=True))
-        speaker_score = self.cos_similarity(speaker_embed, saved_embed) if DYNAMIC_AXES else self.cos_similarity(speaker_embed, saved_embed[:num_speakers])
+        speaker_embed_T = speaker_embed.transpose(0, 1)
+        speaker_embed_dot = torch.matmul(speaker_embed, speaker_embed_T)
+        if not DYNAMIC_AXES:
+            saved_embed = saved_embed[:, :num_speakers]
+            saved_dot = saved_dot[:, :num_speakers]
+        speaker_score = torch.matmul(speaker_embed, saved_embed) / (torch.sqrt(speaker_embed_dot * saved_dot))
         speaker_score, target_speaker_id = torch.max(speaker_score, dim=-1)
         mel_features = mel_features.transpose(1, 2)
         left_padding = mel_features[:, [0], :].repeat(1, self.lfr_m_factor, 1)
@@ -90,7 +94,7 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         shifted_tensor = torch.roll(token_ids, shifts=-1, dims=-1)
         mask = ((token_ids != shifted_tensor) & (token_ids != self.blank_id)).to(torch.int32)
         mask[..., 0] = 1
-        return token_ids.index_select(-1, torch.nonzero(mask, as_tuple=True)[-1]), target_speaker_id.int(), speaker_score, speaker_embed
+        return token_ids.index_select(-1, torch.nonzero(mask, as_tuple=True)[-1]), target_speaker_id.int(), speaker_score, speaker_embed_T, speaker_embed_dot
 
 
 print('\nExport start ...\n')
@@ -119,18 +123,20 @@ with torch.inference_mode():
     sense_voice_plus = SENSE_VOICE_PLUS(model_asr.model.eval(), custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, model_speaker, USE_EMOTION)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     language_idx = torch.tensor([0], dtype=torch.int32)
-    saved_embed = torch.randn((MAX_SPEAKERS, HIDDEN_SIZE), dtype=torch.float32)
+    saved_embed = torch.ones((HIDDEN_SIZE, MAX_SPEAKERS), dtype=torch.float32)
+    saved_dot = torch.ones((1, MAX_SPEAKERS), dtype=torch.float32)
     num_speakers = torch.tensor([1], dtype=torch.int64)
     torch.onnx.export(
         sense_voice_plus,
-        (audio, language_idx, saved_embed, num_speakers),
+        (audio, language_idx, saved_embed, saved_dot, num_speakers),
         onnx_model_A,
-        input_names=['audio', 'language_idx', 'saved_embed', 'num_speakers'],
-        output_names=['token_ids', 'target_speaker_id', 'speaker_score', 'speaker_embed'],
+        input_names=['audio', 'language_idx', 'saved_embed', 'saved_dot', 'num_speakers'],
+        output_names=['token_ids', 'target_speaker_id', 'speaker_score', 'speaker_embed', 'speaker_embed_dot'],
         do_constant_folding=True,
         dynamic_axes={
             'audio': {2: 'audio_len'},
-            'saved_embed': {0: 'max_speakers'},
+            'saved_embed': {1: 'max_speakers'},
+            'saved_dot': {1: 'max_speakers'},
             'token_ids': {1: 'num_token'}
         } if DYNAMIC_AXES else None,
         opset_version=17
@@ -168,29 +174,36 @@ out_name_A = ort_session_A.get_outputs()
 in_name_A0 = in_name_A[0].name
 in_name_A1 = in_name_A[1].name
 in_name_A2 = in_name_A[2].name
+in_name_A3 = in_name_A[3].name
 if isinstance(shape_value_in, int):
-    in_name_A3 = in_name_A[3].name
+    in_name_A4 = in_name_A[4].name
     dynamic_axes = False
 else:
-    in_name_A3 = None
+    in_name_A4 = None
     dynamic_axes = True
 out_name_A0 = out_name_A[0].name
 out_name_A1 = out_name_A[1].name
 out_name_A2 = out_name_A[2].name
 out_name_A3 = out_name_A[3].name
-
+out_name_A4 = out_name_A[4].name
 
 num_speakers = np.array([1], dtype=np.int64)  # At least 1.
 if dynamic_axes:
-    saved_embed = np.zeros((2, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)  # At least 2.
-    empty_space = np.zeros((1, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)
+    saved_embed = np.zeros((ort_session_A._inputs_meta[2].shape[0], 2), dtype=np.float32)  # At least 2.
+    saved_dot = np.ones((1, 2), dtype=np.float32)
+    empty_embed = np.zeros((ort_session_A._inputs_meta[2].shape[0], 1), dtype=np.float32)
+    empty_dot = np.ones((1, 1), dtype=np.float32)
 else:
     saved_embed = np.zeros((ort_session_A._inputs_meta[2].shape[0], ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)
-    empty_space = None
+    saved_dot = np.ones((1, ort_session_A._inputs_meta[2].shape[1]), dtype=np.float32)
+    empty_embed = None
+    empty_dot = None
 if "float16" in model_type:
     saved_embed = saved_embed.astype(np.float16)
+    saved_dot = saved_embed.astype(np.float16)
     if dynamic_axes:
-        empty_space = empty_space.astype(np.float16)
+        empty_embed = empty_embed.astype(np.float16)
+        empty_dot = empty_dot.astype(np.float16)
 
 
 # Load the input audio
@@ -225,27 +238,31 @@ for language_idx, test in enumerate(test_audio):
     slice_end = INPUT_AUDIO_LENGTH
     language_idx = np.array([language_idx + 1], dtype=np.int32)
     while slice_end <= aligned_len:
-        start_time = time.time()
         input_feed = {
                     in_name_A0: audio[:, :, slice_start: slice_end],
                     in_name_A1: language_idx,
-                    in_name_A2: saved_embed
+                    in_name_A2: saved_embed,
+                    in_name_A3: saved_dot
                 }
         if not dynamic_axes:
-            input_feed[in_name_A3] = num_speakers
-        token_ids, target_speaker_id, speaker_score, speaker_embed = ort_session_A.run([out_name_A0, out_name_A1, out_name_A2, out_name_A3], input_feed)
+            input_feed[in_name_A4] = num_speakers
+        start_time = time.time()
+        token_ids, target_speaker_id, speaker_score, speaker_embed, speaker_embed_dot = ort_session_A.run([out_name_A0, out_name_A1, out_name_A2, out_name_A3, out_name_A4], input_feed)
         end_time = time.time()
         if speaker_score >= SIMILARITY_THRESHOLD:
-            saved_embed[target_speaker_id] = (saved_embed[target_speaker_id] + speaker_embed) * 0.5
+            saved_embed[:, target_speaker_id] = (saved_embed[:, target_speaker_id] + speaker_embed) * 0.5
+            saved_dot[:, target_speaker_id] = (saved_dot[:, target_speaker_id] + speaker_embed_dot) * 0.5
             speaker_id = target_speaker_id
-            print(f"\nLocate the identified speaker with ID = {speaker_id}, Similarity = {speaker_score:.3f}")
+            print(f"\nLocate the identified speaker with ID = {speaker_id}, Similarity = {speaker_score[0]:.3f}")
         else:
-            saved_embed[num_speakers] = speaker_embed
+            saved_embed[:, num_speakers] = speaker_embed
+            saved_dot[:, num_speakers] = speaker_embed_dot
             speaker_id = num_speakers[0]
             print(f"\nIt's an unknown speaker. Assign it a new ID = {speaker_id}")
             num_speakers += 1
             if dynamic_axes:
-                saved_embed = np.concatenate((saved_embed, empty_space), axis=0)
+                saved_embed = np.concatenate((saved_embed, empty_embed), axis=1)
+                saved_dot = np.concatenate((saved_dot, empty_dot), axis=1)
         text = tokenizer.decode(token_ids.tolist())[0]
         print(f"\nSpeaker_ID_{speaker_id}: {text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
         slice_start += stride_step
