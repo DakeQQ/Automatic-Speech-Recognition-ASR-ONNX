@@ -200,7 +200,7 @@ else:
     empty_dot = None
 if "float16" in model_type:
     saved_embed = saved_embed.astype(np.float16)
-    saved_dot = saved_embed.astype(np.float16)
+    saved_dot = saved_dot.astype(np.float16)
     if dynamic_axes:
         empty_embed = empty_embed.astype(np.float16)
         empty_dot = empty_dot.astype(np.float16)
