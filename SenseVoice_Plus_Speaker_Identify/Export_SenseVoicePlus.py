@@ -1,6 +1,7 @@
 import gc
 import time
 import shutil
+import site
 
 import numpy as np
 import onnxruntime
@@ -14,18 +15,17 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 
 model_path_asr = "/home/DakeQQ/Downloads/SenseVoiceSmall"                                                                                                 # The SenseVoice download path.
 model_path_speaker = "/home/DakeQQ/Downloads/speech_eres2netv2_sv_zh-cn_16k-common"                                                                       # The SenseVoice download path.
-python_modelscope_eres2netv2_path = '/home/DakeQQ/anaconda3/envs/python_312/lib/python3.12/site-packages/modelscope/models/audio/sv/ERes2NetV2.py'        # The Python package path.
-onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_ONNX/SenseVoicePlus.onnx"                                                                               # The exported onnx model path.
+onnx_model_A = "/home/iamj/Downloads/SenseVoice_ONNX/SenseVoiceSmallPlus.onnx"                                                                          # The exported onnx model path.
 test_audio = [model_path_asr + "/example/zh.mp3", model_path_asr + "/example/en.mp3", model_path_asr + "/example/yue.mp3", model_path_asr + "/example/ja.mp3", model_path_asr + "/example/ko.mp3", model_path_asr + "/example/ko.mp3"]   # The test audio list. Duplicate the last one for Speaker Identify.
 
 
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                                             # else keep empty.
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 163840 # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, default to 163840, you can adjust it.
+INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 320000 # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, default to 320000, you can adjust it.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT = 512                                                  # Number of FFT components for the STFT process, edit it carefully.
+NFFT = 400                                                  # Number of FFT components for the STFT process, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 LFR_M = 7                                                   # The model parameter, do not edit the value.
@@ -36,7 +36,7 @@ SLIDING_WINDOW = 0                                          # Set the sliding wi
 MAX_SPEAKERS = 50                                           # Maximum number of saved speaker features.
 HIDDEN_SIZE = 192                                           # Model hidden size. Do not edit it.
 SIMILARITY_THRESHOLD = 0.5                                  # Threshold to determine the speaker's identity. You can adjust it.
-USE_EMOTION = True                                          # Output the emotion tag or not.
+USE_EMOTION = False                                          # Output the emotion tag or not.
 
 
 STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
@@ -47,7 +47,7 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
 
 
-shutil.copyfile('./modeling_modified/ERes2NetV2.py', python_modelscope_eres2netv2_path)
+shutil.copyfile('./modeling_modified/ERes2NetV2.py', site.getsitepackages()[0] + "/modelscope/models/audio/sv/ERes2NetV2.py")
 
 
 class SENSE_VOICE_PLUS(torch.nn.Module):
@@ -74,15 +74,15 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         audio = audio.float()
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
-        real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-5).log()
+        real_part = self.stft_model(audio, 'constant')
+        mel_features = torch.matmul(self.fbank, real_part * real_part).clamp(min=1e-5).log()
         speaker_embed = self.eres2netv2.forward(mel_features - mel_features.mean(dim=1, keepdim=True))
         speaker_embed_T = speaker_embed.transpose(0, 1)
         speaker_embed_dot = torch.matmul(speaker_embed, speaker_embed_T)
         if not DYNAMIC_AXES:
             saved_embed = saved_embed[:, :num_speakers]
             saved_dot = saved_dot[:, :num_speakers]
-        speaker_score = torch.matmul(speaker_embed, saved_embed) / (torch.sqrt(speaker_embed_dot * saved_dot))
+        speaker_score = torch.matmul(speaker_embed, saved_embed) / torch.sqrt(speaker_embed_dot * saved_dot)
         speaker_score, target_speaker_id = torch.max(speaker_score, dim=-1)
         mel_features = mel_features.transpose(1, 2)
         left_padding = mel_features[:, [0], :].repeat(1, self.lfr_m_factor, 1)
@@ -99,7 +99,7 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
 
 print('\nExport start ...\n')
 with torch.inference_mode():
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
+    custom_stft = STFT_Process(model_type='stft_A', n_fft=NFFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     model_asr = AutoModel(
         model=model_path_asr,
         trust_remote_code=True,
