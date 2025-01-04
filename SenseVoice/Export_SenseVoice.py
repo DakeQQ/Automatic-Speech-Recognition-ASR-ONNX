@@ -11,7 +11,7 @@ from funasr import AutoModel
 from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported in ONNX format.
 
 model_path = "/home/DakeQQ/Downloads/SenseVoiceSmall"                                     # The SenseVoice download path.
-onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_ONNX/SenseVoice.onnx"                   # The exported onnx model path.
+onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_ONNX/SenseVoiceSmall.onnx"              # The exported onnx model path.
 modified_path = './modeling_modified/'
 test_audio = [model_path + "/example/zh.mp3", model_path + "/example/en.mp3", model_path + "/example/yue.mp3", model_path + "/example/ja.mp3", model_path + "/example/ko.mp3"]   # The test audio list.
 
@@ -19,10 +19,10 @@ test_audio = [model_path + "/example/zh.mp3", model_path + "/example/en.mp3", mo
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                                             # else keep empty.
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 163840 # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, default to 163840, you can adjust it.
+INPUT_AUDIO_LENGTH = 128000 if not DYNAMIC_AXES else 320000 # Set for static axis export: the length of the audio input signal (in samples). If using DYNAMIC_AXES, default to 320000, you can adjust it.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT = 512                                                  # Number of FFT components for the STFT process, edit it carefully.
+NFFT = 400                                                  # Number of FFT components for the STFT process, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 LFR_M = 7                                                   # The model parameter, do not edit the value.
@@ -64,8 +64,8 @@ class SENSE_VOICE(torch.nn.Module):
         audio = audio.float()
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
-        real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
+        real_part = self.stft_model(audio, 'constant')
+        mel_features = torch.matmul(self.fbank, real_part * real_part).transpose(1, 2).clamp(min=1e-5).log()
         left_padding = mel_features[:, [0], :].repeat(1, self.lfr_m_factor, 1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
@@ -80,7 +80,7 @@ class SENSE_VOICE(torch.nn.Module):
 
 print('\nExport start ...\n')
 with torch.inference_mode():
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
+    custom_stft = STFT_Process(model_type='stft_A', n_fft=NFFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     model = AutoModel(
         model=model_path,
         trust_remote_code=True,
@@ -153,7 +153,7 @@ for language_idx, test in enumerate(test_audio):
     audio_len = len(audio)
     audio = audio.reshape(1, 1, -1)
     if isinstance(shape_value_in, str):
-        INPUT_AUDIO_LENGTH = min(163840, audio_len)  # You can adjust it.
+        INPUT_AUDIO_LENGTH = min(320000, audio_len)  # You can adjust it.
     else:
         INPUT_AUDIO_LENGTH = shape_value_in
     if SLIDING_WINDOW <= 0:
