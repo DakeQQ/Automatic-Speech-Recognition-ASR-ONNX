@@ -5,9 +5,9 @@ from pydub import AudioSegment
 from sentencepiece import SentencePieceProcessor
 
 
-tokenizer_path = "/home/DakeQQ/Downloads/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model"   # The SenseVoice download path.
-onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoicePlus.ort"                  # The exported onnx model path.
-test_audio = "./test_sample.wav"                                                                 # The test audio path.
+tokenizer_path = "/home/DakeQQ/Downloads/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model"     # The SenseVoice download path.
+onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoiceSmallPlus.ort"               # The exported onnx model path.
+test_audio = "./test_sample.wav"                                                                   # The test audio path.
 
 
 ORT_Accelerate_Providers = []           # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
@@ -82,7 +82,7 @@ audio = np.array(AudioSegment.from_file(test_audio).set_channels(1).set_frame_ra
 audio_len = len(audio)
 audio = audio.reshape(1, 1, -1)
 if dynamic_axes:
-    INPUT_AUDIO_LENGTH = min(163840, audio_len)  # You can adjust it.
+    INPUT_AUDIO_LENGTH = min(320000, audio_len)  # You can adjust it.
 else:
     INPUT_AUDIO_LENGTH = shape_value_in
 if SLIDING_WINDOW <= 0:
