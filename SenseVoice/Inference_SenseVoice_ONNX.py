@@ -6,7 +6,7 @@ from sentencepiece import SentencePieceProcessor
 
 
 tokenizer_path = "/home/DakeQQ/Downloads/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model"   # The SenseVoice download path.
-onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoice.ort"                      # The exported onnx model path.
+onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoiceSmall.ort"                 # The exported onnx model path.
 test_audio = "./test_sample.wav"                                                                 # The test audio path.
 
 
@@ -88,4 +88,3 @@ while slice_end <= aligned_len:
     slice_start += stride_step
     slice_end = slice_start + INPUT_AUDIO_LENGTH
     print(f"\nSenseVoice Process Complete.\n\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds")
-
