@@ -12,7 +12,6 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 
 model_path = "/home/DakeQQ/Downloads/SenseVoiceSmall"                                     # The SenseVoice download path.
 onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_ONNX/SenseVoiceSmall.onnx"              # The exported onnx model path.
-modified_path = './modeling_modified/'
 test_audio = [model_path + "/example/zh.mp3", model_path + "/example/en.mp3", model_path + "/example/yue.mp3", model_path + "/example/ja.mp3", model_path + "/example/ko.mp3"]   # The test audio list.
 
 
