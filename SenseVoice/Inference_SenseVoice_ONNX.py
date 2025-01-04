@@ -50,7 +50,7 @@ audio = np.array(AudioSegment.from_file(test_audio).set_channels(1).set_frame_ra
 audio_len = len(audio)
 audio = audio.reshape(1, 1, -1)
 if isinstance(shape_value_in, str):
-    INPUT_AUDIO_LENGTH = min(163840, audio_len)  # You can adjust it.
+    INPUT_AUDIO_LENGTH = min(320000, audio_len)  # You can adjust it.
 else:
     INPUT_AUDIO_LENGTH = shape_value_in
 if SLIDING_WINDOW <= 0:
