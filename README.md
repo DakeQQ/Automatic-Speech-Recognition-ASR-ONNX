@@ -38,8 +38,8 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 | Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | SenseVoiceSmall + <br>ERes2NetV2_w24s4ep4<br>f32 | 0.10                                               |
 | Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | Whisper-Large-v3-en<br>q8f32                     | 0.15                                               |
 | Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | Whisper-Large-v3-Turbo-en<br>q8f32               | 0.073                                              |
-| Ubuntu 24.04     | Desktop    | CPU<br>i5-7300HQ     | Paraformer-Small-Chinese<br>f32                  | 0.04                                               |
-| Ubuntu 24.04     | Desktop    | CPU<br>i5-7300HQ     | Paraformer-Large-English<br>q8f32                | 0.14                                               |
+| Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | Paraformer-Small-Chinese<br>f32                  | 0.04                                               |
+| Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | Paraformer-Large-English<br>q8f32                | 0.14                                               |
 
 ---
 
