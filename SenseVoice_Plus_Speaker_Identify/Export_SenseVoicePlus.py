@@ -47,7 +47,7 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
 
 
-shutil.copyfile('./modeling_modified/ERes2NetV2.py', site.getsitepackages()[0] + "/modelscope/models/audio/sv/ERes2NetV2.py")
+shutil.copyfile('./modeling_modified/ERes2NetV2.py', site.getsitepackages()[-1] + "/modelscope/models/audio/sv/ERes2NetV2.py")
 
 
 class SENSE_VOICE_PLUS(torch.nn.Module):
