@@ -41,7 +41,7 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
 
 
-python_package_path = site.getsitepackages()[0] + "/funasr/models"
+python_package_path = site.getsitepackages()[-1] + "/funasr/models"
 shutil.copyfile('./modeling_modified/attention.py', python_package_path + '/sanm/attention.py')
 shutil.copyfile('./modeling_modified/encoder.py', python_package_path + '/sanm/encoder.py')
 shutil.copyfile('./modeling_modified/positionwise_feed_forward.py', python_package_path + '/sanm/positionwise_feed_forward.py')
