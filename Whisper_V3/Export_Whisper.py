@@ -1,6 +1,7 @@
 import gc
 import time
 import shutil
+import site
 import numpy as np
 import onnxruntime
 import torch
@@ -14,9 +15,7 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 model_path = "/home/DakeQQ/Downloads/whisper-large-v3"                                            # The Whisper project download path.
 onnx_model_A = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Encoder.onnx"                         # The exported onnx model path.
 onnx_model_B = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Decoder.onnx"                         # The exported onnx model path.
-modified_path = './modeling_modified/modeling_whisper.py'
-transformers_whisper_path = "/home/DakeQQ/anaconda3/envs/python_312/lib/python3.12/site-packages/transformers/models/whisper/modeling_whisper.py"  # The original modeling_whisper.py path.
-test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./example/ko.mp3"]   # The test audio list.
+test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./example/ko.mp3"]     # The test audio list.
 
 
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
@@ -42,7 +41,7 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
 
 
-shutil.copyfile(modified_path, transformers_whisper_path)
+shutil.copyfile('./modeling_modified/modeling_whisper.py', site.getsitepackages()[-1] + "/transformers/models/whisper/modeling_whisper.py")
 
 
 def get_language_id(language_input):
