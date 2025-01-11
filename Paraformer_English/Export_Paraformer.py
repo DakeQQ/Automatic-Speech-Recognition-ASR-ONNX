@@ -44,9 +44,11 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
 python_package_path = site.getsitepackages()[-1] + "/funasr/models"
 shutil.copyfile('./modeling_modified/attention.py', python_package_path + '/sanm/attention.py')
 shutil.copyfile('./modeling_modified/encoder.py', python_package_path + '/sanm/encoder.py')
+shutil.copyfile('./modeling_modified/decoder.py', python_package_path + '/sanm/decoder.py')
 shutil.copyfile('./modeling_modified/positionwise_feed_forward.py', python_package_path + '/sanm/positionwise_feed_forward.py')
 shutil.copyfile('./modeling_modified/cif_predictor.py', python_package_path + '/paraformer/cif_predictor.py')
 shutil.copyfile('./modeling_modified/model.py', python_package_path + '/paraformer/model.py')
+shutil.copyfile('./modeling_modified/embedding.py', python_package_path + '/transformer/embedding.py')
 from funasr import AutoModel
 
 
