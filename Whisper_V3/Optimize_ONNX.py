@@ -4,7 +4,6 @@ import subprocess
 
 import torch
 import onnx.version_converter
-import onnxruntime
 from onnxruntime.transformers.optimizer import optimize_model
 from onnxruntime.quantization import QuantType, quantize_dynamic
 from onnxslim import slim
@@ -23,14 +22,6 @@ do_quantize = True                                                              
 use_gpu_fp16 = False                                                                      # If true, the transformers.optimizer will remain the FP16 processes.
 provider = 'CPUExecutionProvider'                                                         # ['CPUExecutionProvider', 'CUDAExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider']
 target_platform = "amd64"                                                                 # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
-
-
-# Check model
-DYNAMIC_AXES = True  # Currently, whisper model only support dynamic_axes = True.
-# if isinstance(onnxruntime.InferenceSession(model_path)._inputs_meta[0].shape[-1], str):
-#     DYNAMIC_AXES = True
-# else:
-#     DYNAMIC_AXES = False
 
 
 if do_quantize:
@@ -55,7 +46,7 @@ if do_quantize:
 slim(
     model=optimized_model_path if do_quantize else model_path,
     output_model=optimized_model_path,
-    no_shape_infer=True if DYNAMIC_AXES else False,         # True for more optimize but may get errors.
+    no_shape_infer=False,         # False for more optimize but may get errors.
     skip_fusion_patterns=False,
     no_constant_folding=False,
     save_as_external_data=False,
@@ -84,7 +75,7 @@ if use_gpu_fp16:
     model.convert_float_to_float16(
         keep_io_types=False,
         force_fp16_initializers=True,
-        use_symbolic_shape_infer=False if DYNAMIC_AXES else True,  # True for more optimize but may get errors.
+        use_symbolic_shape_infer=True,  # True for more optimize but may get errors.
         op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'Range', 'MatMulIntegerToFloat']
     )
 model.save_model_to_file(optimized_model_path, use_external_data_format=False)
@@ -96,7 +87,7 @@ gc.collect()
 slim(
     model=optimized_model_path,
     output_model=optimized_model_path,
-    no_shape_infer=True if DYNAMIC_AXES else False,   # True for more optimize but may get errors.
+    no_shape_infer=False,   # False for more optimize but may get errors.
     skip_fusion_patterns=False,
     no_constant_folding=False,
     save_as_external_data=False,
