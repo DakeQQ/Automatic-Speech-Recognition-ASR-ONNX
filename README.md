@@ -23,7 +23,7 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 - This Whisper does not support automatic language detection. Please specify a target language.
 
 ### Learn More  
-- Visit the [project overview](https://dakeqq.github.io/overview/) for further details.
+- Visit the [project overview](https://github.com/DakeQQ?tab=repositories) for further details.
 
 ---
 
@@ -75,6 +75,6 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 - 此 Whisper 不支持自动语言检测。请指定目标语言。
 
 ### 了解更多  
-- 访问[项目概览](https://dakeqq.github.io/overview/)获取更多信息。
+- 访问[项目概览](https://github.com/DakeQQ?tab=repositories)获取更多信息。
 
 ---
