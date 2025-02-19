@@ -44,7 +44,7 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 ---
 
 ## Coming Soon 🚀  
-- None
+- [FireRedASR](https://github.com/FireRedTeam/FireRedASR)
 
 ---
 
