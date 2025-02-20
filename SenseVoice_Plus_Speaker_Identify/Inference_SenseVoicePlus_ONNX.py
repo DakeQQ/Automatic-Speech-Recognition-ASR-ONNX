@@ -131,7 +131,7 @@ while slice_end <= aligned_len:
         if dynamic_axes:
             saved_embed = np.concatenate((saved_embed, empty_embed), axis=1)
             saved_dot = np.concatenate((saved_dot, empty_dot), axis=1)
-    text = tokenizer.decode(token_ids.tolist())[0]
+    text = tokenizer.decode(token_ids.tolist())
     print(f"\nSpeaker_ID_{speaker_id}: {text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
     slice_start += stride_step
     slice_end = slice_start + INPUT_AUDIO_LENGTH
