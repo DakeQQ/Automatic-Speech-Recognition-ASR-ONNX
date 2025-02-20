@@ -70,9 +70,11 @@ class SENSE_VOICE(torch.nn.Module):
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
         mel_features = torch.cat((self.language_embed[:, language_idx].float(), self.system_embed, mel_features), dim=1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
-        token_ids = self.ctc_lo(encoder_out).argmax(dim=-1)
-        token_ids = torch.unique(token_ids, sorted=False).to(torch.int32)
-        return token_ids[token_ids != self.blank_id]
+        token_ids = self.ctc_lo(encoder_out).argmax(dim=-1).int()
+        shifted_tensor = torch.roll(token_ids, shifts=-1, dims=-1)
+        mask = ((token_ids != shifted_tensor) & (token_ids != self.blank_id)).to(torch.int32)
+        mask[..., 0] = 1
+        return token_ids.index_select(-1, torch.nonzero(mask, as_tuple=True)[-1])
 
 
 print('\nExport start ...\n')
@@ -105,7 +107,7 @@ with torch.inference_mode():
         do_constant_folding=True,
         dynamic_axes={
             'audio': {2: 'audio_len'},
-            'token_ids': {0: 'num_token'}
+            'token_ids': {1: 'num_token'}
         } if DYNAMIC_AXES else None,
         opset_version=17
     )
@@ -182,7 +184,7 @@ for language_idx, test in enumerate(test_audio):
                 in_name_A1: language_idx
             })[0]
         end_time = time.time()
-        text = tokenizer.decode(token_ids.tolist())
+        text = tokenizer.decode(token_ids.tolist())[0]
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
         print(f"\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
