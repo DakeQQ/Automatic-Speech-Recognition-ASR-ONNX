@@ -70,9 +70,9 @@ class SENSE_VOICE(torch.nn.Module):
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
         mel_features = torch.cat((self.language_embed[:, language_idx].float(), self.system_embed, mel_features), dim=1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
-        token_ids = self.ctc_lo(encoder_out).argmax(dim=-1).int()
-        token_ids = torch.unique(token_ids, sorted=False)
-        return token_ids.to(torch.int32)[token_ids != self.blank_id]
+        token_ids = self.ctc_lo(encoder_out).argmax(dim=-1)
+        token_ids = torch.unique(token_ids, sorted=False).to(torch.int32)
+        return token_ids[token_ids != self.blank_id]
 
 
 print('\nExport start ...\n')
