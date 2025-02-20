@@ -90,9 +90,11 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
         mel_features = torch.cat((self.language_embed[:, language_idx].float(), self.system_embed, mel_features), dim=1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
-        token_ids = self.ctc_lo(encoder_out).argmax(dim=-1)
-        token_ids = torch.unique(token_ids, sorted=False).to(torch.int32)
-        return token_ids[token_ids != self.blank_id], target_speaker_id.int(), speaker_score, speaker_embed_T, speaker_embed_dot
+        token_ids = self.ctc_lo(encoder_out).argmax(dim=-1).int()
+        shifted_tensor = torch.roll(token_ids, shifts=-1, dims=-1)
+        mask = ((token_ids != shifted_tensor) & (token_ids != self.blank_id)).to(torch.int32)
+        mask[..., 0] = 1
+        return token_ids.index_select(-1, torch.nonzero(mask, as_tuple=True)[-1]), target_speaker_id.int(), speaker_score, speaker_embed_T, speaker_embed_dot
 
 
 print('\nExport start ...\n')
@@ -261,7 +263,7 @@ for language_idx, test in enumerate(test_audio):
             if dynamic_axes:
                 saved_embed = np.concatenate((saved_embed, empty_embed), axis=1)
                 saved_dot = np.concatenate((saved_dot, empty_dot), axis=1)
-        text = tokenizer.decode(token_ids.tolist())
+        text = tokenizer.decode(token_ids.tolist())[0]
         print(f"\nSpeaker_ID_{speaker_id}: {text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
