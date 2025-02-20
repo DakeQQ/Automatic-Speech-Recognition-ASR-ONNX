@@ -84,7 +84,7 @@ while slice_end <= aligned_len:
             in_name_A1: language_idx
         })[0]
     end_time = time.time()
-    text = tokenizer.decode(token_ids.tolist())
+    text = tokenizer.decode(token_ids.tolist())[0]
     slice_start += stride_step
     slice_end = slice_start + INPUT_AUDIO_LENGTH
     print(f"\nSenseVoice Process Complete.\n\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds")
