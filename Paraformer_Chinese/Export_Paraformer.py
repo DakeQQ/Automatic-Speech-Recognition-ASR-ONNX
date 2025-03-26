@@ -41,14 +41,14 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
 
 
-python_package_path = site.getsitepackages()[-1] + "/funasr/models"
-shutil.copyfile('./modeling_modified/attention.py', python_package_path + '/sanm/attention.py')
-shutil.copyfile('./modeling_modified/encoder.py', python_package_path + '/sanm/encoder.py')
-shutil.copyfile('./modeling_modified/decoder.py', python_package_path + '/sanm/decoder.py')
-shutil.copyfile('./modeling_modified/positionwise_feed_forward.py', python_package_path + '/sanm/positionwise_feed_forward.py')
-shutil.copyfile('./modeling_modified/cif_predictor.py', python_package_path + '/paraformer/cif_predictor.py')
-shutil.copyfile('./modeling_modified/model.py', python_package_path + '/paraformer/model.py')
-shutil.copyfile('./modeling_modified/embedding.py', python_package_path + '/transformer/embedding.py')
+python_package_path = site.getsitepackages()[-1]
+shutil.copyfile('./modeling_modified/attention.py', python_package_path + '/funasr/models/sanm/attention.py')
+shutil.copyfile('./modeling_modified/encoder.py', python_package_path + '/funasr/models/sanm/encoder.py')
+shutil.copyfile('./modeling_modified/decoder.py', python_package_path + '/funasr/models/sanm/decoder.py')
+shutil.copyfile('./modeling_modified/positionwise_feed_forward.py', python_package_path + '/funasr/models/sanm/positionwise_feed_forward.py')
+shutil.copyfile('./modeling_modified/cif_predictor.py', python_package_path + '/funasr/models/paraformer/cif_predictor.py')
+shutil.copyfile('./modeling_modified/model.py', python_package_path + '/funasr/models/paraformer/model.py')
+shutil.copyfile('./modeling_modified/embedding.py', python_package_path + '/funasr/models/transformer/embedding.py')
 from funasr import AutoModel
 
 
@@ -72,8 +72,8 @@ class PARAFORMER(torch.nn.Module):
         audio = audio.float()
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
-        real_part = self.stft_model(audio, 'constant')
-        mel_features = torch.matmul(self.fbank, real_part.abs()).transpose(1, 2).clamp(min=1e-5).log()
+        real_part, imag_part = self.stft_model(audio, 'constant')
+        mel_features = torch.matmul(self.fbank, torch.sqrt(real_part * real_part + imag_part * imag_part)).transpose(1, 2).clamp(min=1e-5).log()
         left_padding = mel_features[:, [0], :].repeat(1, self.lfr_m_factor, 1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
@@ -85,7 +85,7 @@ class PARAFORMER(torch.nn.Module):
 
 print('\nExport start ...\n')
 with torch.inference_mode():
-    custom_stft = STFT_Process(model_type='stft_A', n_fft=NFFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
+    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     model = AutoModel(
         model=model_path,
         disable_update=True,
