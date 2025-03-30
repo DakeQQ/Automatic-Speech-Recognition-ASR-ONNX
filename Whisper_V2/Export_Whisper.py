@@ -15,7 +15,7 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 model_path = "/home/DakeQQ/Downloads/whisper-large-v2"                                            # The Whisper_V2 project download path.
 onnx_model_A = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Encoder.onnx"                         # The exported onnx model path.
 onnx_model_B = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Decoder.onnx"                         # The exported onnx model path.
-test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./example/ko.mp3"]   # The test audio list.
+test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./example/ko.mp3"]     # The test audio list.
 
 
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
@@ -163,7 +163,7 @@ class WHISPER_ENCODER(torch.nn.Module):
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-10).log10()
+        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-5, max=65504.0).log10()
         mel_features = torch.maximum(mel_features, mel_features.max() - 8.0)
         mel_features = (mel_features + 4.0) * 0.25
         encoder_hidden_states = self.encoder(mel_features)
