@@ -174,7 +174,7 @@ for language_idx, test in enumerate(test_audio):
         language = test.split("/")[-1].split(".")[0]
     else:
         language = TARGET_LANGUAGE
-    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples())
+    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
     audio_len = len(audio)
     audio = audio.reshape(1, 1, -1)
     if isinstance(shape_value_in, str):
