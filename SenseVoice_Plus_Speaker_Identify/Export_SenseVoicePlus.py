@@ -36,7 +36,7 @@ SLIDING_WINDOW = 0                                          # Set the sliding wi
 MAX_SPEAKERS = 50                                           # Maximum number of saved speaker features.
 HIDDEN_SIZE = 192                                           # Model hidden size. Do not edit it.
 SIMILARITY_THRESHOLD = 0.5                                  # Threshold to determine the speaker's identity. You can adjust it.
-USE_EMOTION = False                                          # Output the emotion tag or not.
+USE_EMOTION = False                                         # Output the emotion tag or not.
 
 
 STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
@@ -63,7 +63,7 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.T_lfr = lfr_len
         self.blank_id = sense_voice.blank_id
         self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, 8000, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
+        self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=ref_len + self.lfr_m_factor - 1)
@@ -76,7 +76,7 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
-        speaker_embed = self.eres2netv2.forward(mel_features - mel_features.mean(dim=1, keepdim=True))
+        speaker_embed = self.eres2netv2.forward(mel_features - mel_features.mean(dim=-1, keepdim=True))
         speaker_embed_T = speaker_embed.transpose(0, 1)
         speaker_embed_dot = torch.matmul(speaker_embed, speaker_embed_T)
         if not DYNAMIC_AXES:
