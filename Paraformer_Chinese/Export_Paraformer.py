@@ -52,6 +52,12 @@ shutil.copyfile('./modeling_modified/embedding.py', python_package_path + '/funa
 from funasr import AutoModel
 
 
+def normalize_to_int16(audio_int64):
+    max_val = np.max(np.abs(audio_int64.astype(np.float32)))
+    scaling_factor = 32767.0 / max_val if max_val > 0 else 1.0
+    return (audio_int64 * float(scaling_factor)).astype(np.int16)
+
+
 class PARAFORMER(torch.nn.Module):
     def __init__(self, paraformer, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars):
         super(PARAFORMER, self).__init__()
@@ -63,13 +69,14 @@ class PARAFORMER(torch.nn.Module):
         self.cmvn_vars = cmvn_vars
         self.T_lfr = lfr_len
         self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, 8000, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
+        self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=ref_len + self.lfr_m_factor - 1)
+        self.inv_int16 = float(1.0 / 32768.0)
 
     def forward(self, audio):
-        audio = audio.float()
+        audio = audio.float() * self.int_inv16
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
@@ -145,7 +152,8 @@ out_name_A0 = out_name_A[0].name
 
 
 # Load the input audio
-audio = np.array(AudioSegment.from_file(test_audio).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
+audio = np.array(AudioSegment.from_file(test_audio).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int32)
+audio = normalize_to_int16(audio)
 audio_len = len(audio)
 audio = audio.reshape(1, 1, -1)
 if isinstance(shape_value_in, str):
