@@ -50,6 +50,12 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
 shutil.copyfile('./modeling_modified/ERes2NetV2.py', site.getsitepackages()[-1] + "/modelscope/models/audio/sv/ERes2NetV2.py")
 
 
+def normalize_to_int16(audio_int64):
+    max_val = np.max(np.abs(audio_int64.astype(np.float32)))
+    scaling_factor = 32767.0 / max_val if max_val > 0 else 1.0
+    return (audio_int64 * float(scaling_factor)).astype(np.int16)
+
+
 class SENSE_VOICE_PLUS(torch.nn.Module):
     def __init__(self, sense_voice, stft_model, nfft, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, eres2netv2, use_emo):
         super(SENSE_VOICE_PLUS, self).__init__()
@@ -69,9 +75,10 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.indices_mel = indices.clamp(max=ref_len + self.lfr_m_factor - 1)
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
-
+        self.inv_int16 = float(1.0 / 32768.0)
+  
     def forward(self, audio, language_idx, saved_embed, saved_dot, num_speakers):
-        audio = audio.float()
+        audio = audio.float() * self.inv_int16 
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
@@ -210,7 +217,8 @@ if "float16" in model_type:
 for language_idx, test in enumerate(test_audio):
     print("----------------------------------------------------------------------------------------------------------")
     print(f"\nTest Input Audio: {test}")
-    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples())
+    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int32)
+    audio = normalize_to_int16(audio)
     audio_len = len(audio)
     audio = audio.reshape(1, 1, -1)
     if dynamic_axes:
