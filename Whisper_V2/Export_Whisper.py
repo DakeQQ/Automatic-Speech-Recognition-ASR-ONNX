@@ -44,10 +44,10 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
 shutil.copyfile('./modeling_modified/modeling_whisper.py', site.getsitepackages()[-1] + "/transformers/models/whisper/modeling_whisper.py")
 
 
-def normalize_to_int16(audio_int64):
-    max_val = np.max(np.abs(audio_int64.astype(np.float32)))
+def normalize_to_int16(audio):
+    max_val = np.max(np.abs(audio))
     scaling_factor = 32767.0 / max_val if max_val > 0 else 1.0
-    return (audio_int64 * float(scaling_factor)).astype(np.int16)
+    return (audio * float(scaling_factor)).astype(np.int16)
   
 
 def get_language_id(language_input):
@@ -324,7 +324,7 @@ for language_idx, test in enumerate(test_audio):
         language = test.split("/")[-1].split(".")[0]
     else:
         language = TARGET_LANGUAGE
-    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int32)
+    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.float32)
     audio = normalize_to_int16(audio)
     audio_len = len(audio)
     audio = audio.reshape(1, 1, -1)
