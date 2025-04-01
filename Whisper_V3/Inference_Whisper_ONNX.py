@@ -22,6 +22,12 @@ MAX_SEQ_LEN = 64                        # It should keep the same with exported 
 STOP_TOKEN = 50257                      # 50257 is the end token for common Whisper series model.
 
 
+def normalize_to_int16(audio):
+    max_val = np.max(np.abs(audio.astype(np.float32)))
+    scaling_factor = 32767.0 / max_val if max_val > 0 else 1.0
+    return (audio * float(scaling_factor)).astype(np.int16)
+  
+
 def get_language_id(language_input):
     # Define the dictionary mapping language tags to their IDs
     language_map = {
@@ -174,7 +180,8 @@ for language_idx, test in enumerate(test_audio):
         language = test.split("/")[-1].split(".")[0]
     else:
         language = TARGET_LANGUAGE
-    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
+    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int32)
+    audio = normalize_to_int16(audio)
     audio_len = len(audio)
     audio = audio.reshape(1, 1, -1)
     if isinstance(shape_value_in, str):
