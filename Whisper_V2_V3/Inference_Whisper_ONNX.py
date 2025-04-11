@@ -6,8 +6,8 @@ from transformers import AutoTokenizer
 
 
 download_path = "/home/DkeQQ/Downloads/whisper-large-v3"                                         # The whisper model download path.
-onnx_model_A = "/home/DkeQQ/Downloads/Whisper_Optimized/Whisper_Encoder.ort"                     # The exported onnx model path.
-onnx_model_B = "/home/DkeQQ/Downloads/Whisper_Optimized/Whisper_Decoder.ort"                     # The exported onnx model path.
+onnx_model_A = "/home/DkeQQ/Downloads/Whisper_Optimized/Whisper_Encoder.onnx"                    # The exported onnx model path.
+onnx_model_B = "/home/DkeQQ/Downloads/Whisper_Optimized/Whisper_Decoder.onnx"                    # The exported onnx model path.
 test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./example/ko.mp3"]    # The test audio list.
 
 
