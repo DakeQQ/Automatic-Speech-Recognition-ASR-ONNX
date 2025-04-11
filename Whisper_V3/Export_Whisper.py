@@ -420,9 +420,9 @@ for language_idx, test in enumerate(test_audio):
         in_name_B[-1].name: attention_mask,
         in_name_B[num_layers_2].name: input_ids
     }
-    for i in range(NUM_LAYER_DE):
+    for i in range(num_layers):
         input_feed_B[in_name_B[i].name] = past_keys_B
-    for i in range(NUM_LAYER_DE, num_layers_2):
+    for i in range(num_layers, num_layers_2):
         input_feed_B[in_name_B[i].name] = past_values_B
     num_decode = 0
     save_token = []
