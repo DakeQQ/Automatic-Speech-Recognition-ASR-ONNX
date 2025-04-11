@@ -25,7 +25,7 @@ DYNAMIC_AXES = True                                         # The default dynami
 INPUT_AUDIO_LENGTH = 16000                                  # Just a dummy value here.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 # N_MELS = 80                                               # Setting by whisper model config. Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT = 512                                                  # Number of FFT components for the STFT process, edit it carefully.
+NFFT = 400                                                  # Number of FFT components for the STFT process, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
@@ -158,11 +158,12 @@ class WHISPER_ENCODER(torch.nn.Module):
         self.encoder = whisper.encoder
         self.decoder = whisper.decoder
         self.stft_model = stft_model
-        self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, 8000, n_mels, sample_rate, "slaney", 'slaney')).transpose(0, 1).unsqueeze(0)
+        self.pre_emphasis = float(pre_emphasis)
+        self.fbank = (torchaudio.functional.melscale_fbanks(nfft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, "slaney", 'slaney')).transpose(0, 1).unsqueeze(0)
         self.save_encoder_key = [None] * num_layers_de
         self.save_encoder_value = [None] * num_layers_de
-        self.inv_int16 = 1.0 / 32768.0
+        self.inv_int16 = float(1.0 / 32768.0)
+
 
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
@@ -171,33 +172,36 @@ class WHISPER_ENCODER(torch.nn.Module):
         real_part, imag_part = self.stft_model(audio, 'constant')
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-5).log10()
         mel_features = torch.maximum(mel_features, mel_features.max() - 8.0)
-        mel_features = (mel_features + 4.0) * 0.25
+        mel_features = mel_features * 0.25 + 1.0
         encoder_hidden_states = self.encoder(mel_features)
         for idx, decoder_layer in enumerate(self.decoder.layers):
-            self.save_encoder_key[idx] = decoder_layer.encoder_attn._shape(decoder_layer.encoder_attn.k_proj(encoder_hidden_states), -1, 1).half()
-            self.save_encoder_value[idx] = decoder_layer.encoder_attn._shape(decoder_layer.encoder_attn.v_proj(encoder_hidden_states), -1, 1).half()
-        save_encoder_key = torch.stack(self.save_encoder_key, dim=0)
-        save_encoder_value = torch.stack(self.save_encoder_value, dim=0)
-        return save_encoder_key.transpose(-1, -2), save_encoder_value
+            self.save_encoder_key[idx] = decoder_layer.encoder_attn._shape(decoder_layer.encoder_attn.k_proj(encoder_hidden_states), -1, 1).transpose(1, 2)
+            self.save_encoder_value[idx] = decoder_layer.encoder_attn._shape(decoder_layer.encoder_attn.v_proj(encoder_hidden_states), -1, 1)
+        return *self.save_encoder_key, *self.save_encoder_value
 
 
 class WHISPER_DECODER(torch.nn.Module):
-    def __init__(self, whisper, max_seq_len, suppress_tokens):
+    def __init__(self, whisper, max_seq_len, suppress_tokens, num_layers_de):
         super(WHISPER_DECODER, self).__init__()
         self.whisper = whisper
         self.decoder = whisper.model.decoder
         self.suppress_tokens = suppress_tokens
-        self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8)))
+        self.num_layers_de_2 = num_layers_de + num_layers_de
+        self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
 
-    def forward(self, input_ids, save_encoder_key, save_encoder_value, past_key_de, past_value_de, ids_len, history_len, attention_mask):
+    def forward(self, *all_inputs):
+        attention_mask = all_inputs[-1]
+        input_ids = all_inputs[self.num_layers_de_2]
+        ids_len = input_ids.shape[1]
+        history_len = all_inputs[0].shape[-1]
         kv_seq_len = ids_len + history_len
-        task_embeds = (self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len: kv_seq_len])
-        attention_mask = self.attention_mask[:, :ids_len, :kv_seq_len] * attention_mask
-        hidden_states, past_key_de, past_value_de = self.decoder(hidden_states=task_embeds, attention_mask=attention_mask, past_key_de=past_key_de, past_value_de=past_value_de, past_key_en=save_encoder_key, past_value_en=save_encoder_value)
-        lm_logits = self.whisper.proj_out(hidden_states[-1])
-        lm_logits[self.suppress_tokens] = -65504.0
-        indices = torch.argmax(lm_logits, dim=-1)
-        return indices.int(), past_key_de, past_value_de
+        task_embeds = (self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len:kv_seq_len])
+        attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * attention_mask).float()
+        outputs = self.decoder(*(all_inputs + tuple([task_embeds, attention_mask])))
+        lm_logits = self.whisper.proj_out(outputs[0][:, -1])
+        lm_logits[:, self.suppress_tokens] = -65504.0
+        indices = torch.argmax(lm_logits, dim=-1, keepdim=True).int()
+        return outputs[1:], indices
 
 
 print('\nExport start...\n')
@@ -211,60 +215,114 @@ with torch.inference_mode():
     NUM_HEAD_DE = model.model.config.decoder_attention_heads
     HEAD_DIM_EN = HIDDEN_SIZE // NUM_HEAD_EN
     HEAD_DIM_DE = HIDDEN_SIZE // NUM_HEAD_DE
+    NUM_LAYER_EN = model.config.encoder_layers
     NUM_LAYER_DE = model.config.decoder_layers
     N_MELS = model.config.num_mel_bins
     STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1
     if MAX_SEQ_LEN > model.config.max_target_positions:
         MAX_SEQ_LEN = model.config.max_target_positions
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
+    scaling = float(math.pow(model.model.encoder.layers._modules['0'].self_attn.head_dim, -0.5))
+    for i in model.model.encoder.layers._modules:
+        model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data * scaling
+        model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data * scaling
+    scaling = float(math.pow(model.model.decoder.layers._modules['0'].self_attn.head_dim, -0.5))
+    for i in model.model.decoder.layers._modules:
+        model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data * scaling
+        model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data * scaling
+    scaling = float(math.pow(model.model.decoder.layers._modules['0'].encoder_attn.head_dim, -0.5))
+    for i in model.model.decoder.layers._modules:
+        model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data * scaling
+        model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data * scaling
+    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
+
+    # Prepare input and output names
+    output_names = []
+    dynamic_axes = {'audio': {2: 'audio_len'}}
+    for i in range(NUM_LAYER_EN):
+        name = f'en_key_{i}'
+        output_names.append(name)
+        dynamic_axes[name] = {3: 'signal_len'}
+    for i in range(NUM_LAYER_EN):
+        name = f'en_value_{i}'
+        output_names.append(name)
+        dynamic_axes[name] = {2: 'signal_len'}
     torch.onnx.export(
         whisper_encoder,
         (audio,),
         onnx_model_A,
         input_names=['audio'],
-        output_names=['save_encoder_key', 'save_encoder_value'],
+        output_names=output_names,
+        dynamic_axes=dynamic_axes if DYNAMIC_AXES else None,
         do_constant_folding=True,
-        dynamic_axes={
-            'audio': {2: 'audio_len'},
-            'save_encoder_key': {3: 'signal_len'},
-            'save_encoder_value': {2: 'signal_len'}
-        } if DYNAMIC_AXES else None,
         opset_version=17
     )
     del whisper_encoder
     del audio
     del custom_stft
+    del name
+    del output_names
+    del dynamic_axes
     gc.collect()
 
     generation_config = GenerationConfig.from_pretrained(model_path)
     suppress_tokens = torch.tensor(generation_config.suppress_tokens, dtype=torch.int64)
-    whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN, suppress_tokens)
-    input_ids = torch.tensor([50258, get_language_id(TARGET_LANGUAGE), get_task_id(TASK, True)[0]], dtype=torch.int32)
-    save_encoder_key = torch.zeros((NUM_LAYER_DE, NUM_HEAD_EN, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float16)
-    save_encoder_value = torch.zeros((NUM_LAYER_DE, NUM_HEAD_EN, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float16)
-    past_key_de = torch.zeros((NUM_LAYER_DE, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
-    past_value_de = torch.zeros((NUM_LAYER_DE, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
-    ids_len = torch.tensor([input_ids.shape[0]], dtype=torch.int64)
-    history_len = torch.tensor([past_key_de.shape[-2]], dtype=torch.int64)
-    attention_mask = torch.tensor([-65504.0], dtype=torch.float32)
+    whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN, suppress_tokens, NUM_LAYER_DE)
+    input_ids = torch.tensor([[50258, get_language_id(TARGET_LANGUAGE), get_task_id(TASK, True)[0]]], dtype=torch.int32)
+    save_encoder_key = torch.zeros((NUM_HEAD_EN, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float32)
+    save_encoder_value = torch.zeros((NUM_HEAD_EN, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float32)
+    past_key_de = torch.zeros((NUM_HEAD_DE, HEAD_DIM_DE, 0), dtype=torch.float32)
+    past_value_de = torch.zeros((NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float32)
+    attention_mask = torch.tensor([1], dtype=torch.int8)
+
+    input_names = []
+    keys_values = []
+    output_names = []
+    dynamic_axes = {'input_ids': {1: 'ids_len'}}
+
+    for i in range(NUM_LAYER_DE):
+        name = f'in_de_key_{i}'
+        input_names.append(name)
+        keys_values.append(past_key_de)
+        dynamic_axes[name] = {2: 'history_len'}
+        name = f'out_de_key_{i}'
+        output_names.append(name)
+        dynamic_axes[name] = {2: 'history_len_plus_ids_len'}
+    for i in range(NUM_LAYER_DE):
+        name = f'in_de_value_{i}'
+        input_names.append(name)
+        keys_values.append(past_value_de)
+        dynamic_axes[name] = {1: 'history_len'}
+        name = f'out_de_value_{i}'
+        output_names.append(name)
+        dynamic_axes[name] = {1: 'history_len_plus_ids_len'}
+
+    input_names.append('input_ids')
+    keys_values.append(input_ids)
+
+    for i in range(NUM_LAYER_DE):
+        name = f'en_key_{i}'
+        input_names.append(name)
+        keys_values.append(save_encoder_key)
+        dynamic_axes[name] = {2: 'signal_len'}
+    for i in range(NUM_LAYER_DE):
+        name = f'en_value_{i}'
+        input_names.append(name)
+        keys_values.append(save_encoder_value)
+        dynamic_axes[name] = {1: 'signal_len'}
+
+    input_names.append('attention_mask')
+    output_names.append('max_logit_id')
+
     torch.onnx.export(
         whisper_decoder,
-        (input_ids, save_encoder_key, save_encoder_value, past_key_de, past_value_de, ids_len, history_len, attention_mask),
+        tuple(keys_values + [attention_mask]),
         onnx_model_B,
-        input_names=['input_ids', 'save_encoder_key', 'save_encoder_value', 'past_key_de_in', 'past_value_de_in', 'ids_len', 'history_len', 'attention_mask'],
-        output_names=['token_ids', 'past_key_de_out', 'past_value_de_out'],
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes if DYNAMIC_AXES else None,
         do_constant_folding=True,
-        dynamic_axes={
-            'input_ids': {0: 'ids_len'},
-            'save_encoder_key': {3: 'signal_len'},
-            'save_encoder_value': {2: 'signal_len'},
-            'past_key_de_in': {2: 'history_len'},
-            'past_value_de_in': {2: 'history_len'},
-            'past_key_de_out': {2: 'history_len'},
-            'past_value_de_out': {2: 'history_len'}
-        } if DYNAMIC_AXES else None,
         opset_version=17
     )
     del model
@@ -274,13 +332,11 @@ with torch.inference_mode():
     del save_encoder_value
     del past_key_de
     del past_value_de
-    del ids_len
-    del history_len
     del attention_mask
 print('\nExport done!\n\nStart to run Whisper by ONNX Runtime.\n\nNow, loading the model...')
 
 
-# # ONNX Runtime settings
+# ONNX Runtime settings
 session_opts = onnxruntime.SessionOptions()
 session_opts.log_severity_level = 3         # error level, it an adjustable value.
 session_opts.inter_op_num_threads = 0       # Run different nodes with num_threads. Set 0 for auto.
@@ -299,25 +355,25 @@ shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
 out_name_A = ort_session_A.get_outputs()
 in_name_A0 = in_name_A[0].name
-out_name_A0 = out_name_A[0].name
-out_name_A1 = out_name_A[1].name
+output_names_A = []
+for i in range(len(out_name_A)):
+    output_names_A.append(out_name_A[i].name)
 
 ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
-model_type = ort_session_B._inputs_meta[-1].type
 in_name_B = ort_session_B.get_inputs()
 out_name_B = ort_session_B.get_outputs()
-in_name_B0 = in_name_B[0].name
-in_name_B1 = in_name_B[1].name
-in_name_B2 = in_name_B[2].name
-in_name_B3 = in_name_B[3].name
-in_name_B4 = in_name_B[4].name
-in_name_B5 = in_name_B[5].name
-in_name_B6 = in_name_B[6].name
-in_name_B7 = in_name_B[7].name
-out_name_B0 = out_name_B[0].name
-out_name_B1 = out_name_B[1].name
-out_name_B2 = out_name_B[2].name
+input_names_B = []
+output_names_B = []
+amount_of_outputs = len(out_name_B)
+for i in range(len(in_name_B)):
+    input_names_B.append(in_name_B[i].name)
+for i in range(amount_of_outputs):
+    output_names_B.append(out_name_B[i].name)
 
+generate_limit = MAX_SEQ_LEN - 3  # 3 = length of input_ids
+num_layers = (amount_of_outputs - 1) // 2
+num_layers_2 = num_layers + num_layers
+num_layers_4 = num_layers_2 + num_layers_2
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 
 # Load the input audio
@@ -355,42 +411,37 @@ for language_idx, test in enumerate(test_audio):
     # Start to run Whisper
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = np.array([50258, get_language_id(language), get_task_id(TASK, True)[0]], dtype=np.int32)
-    ids_len = np.array([input_ids.shape[0]], dtype=np.int64)
-    history_len = np.array([0], dtype=np.int64)
-    past_key_de = np.zeros((ort_session_B._inputs_meta[3].shape[0], ort_session_B._inputs_meta[3].shape[1], history_len[0], ort_session_B._inputs_meta[3].shape[-1]), dtype=np.float16)
-    past_value_de = np.zeros((ort_session_B._inputs_meta[4].shape[0], ort_session_B._inputs_meta[4].shape[1], history_len[0], ort_session_B._inputs_meta[4].shape[-1]), dtype=np.float16)
-    if 'float16' in model_type:
-        attention_mask = np.array([-65504.0], dtype=np.float16)
-    else:
-        attention_mask = np.array([-65504.0], dtype=np.float32)
+    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[50258, get_language_id(language), get_task_id(TASK, True)[0]]], dtype=np.int32), 'cpu', 0)
+    attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
+    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), 'cpu', 0)
+    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), 'cpu', 0)
+    layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 1
+    input_feed_B = {
+        in_name_B[-1].name: attention_mask,
+        in_name_B[num_layers_2].name: input_ids
+    }
+    for i in range(NUM_LAYER_DE):
+        input_feed_B[in_name_B[i].name] = past_keys_B
+    for i in range(NUM_LAYER_DE, num_layers_2):
+        input_feed_B[in_name_B[i].name] = past_values_B
     num_decode = 0
     save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
-        save_encoder_key, save_encoder_value = ort_session_A.run([out_name_A0, out_name_A1], {in_name_A0: audio[:, :, slice_start: slice_end]})
-        while history_len < MAX_SEQ_LEN:
-            input_ids, past_key_de, past_value_de = ort_session_B.run([out_name_B0, out_name_B1, out_name_B2], {
-                in_name_B0: input_ids,
-                in_name_B1: save_encoder_key,
-                in_name_B2: save_encoder_value,
-                in_name_B3: past_key_de,
-                in_name_B4: past_value_de,
-                in_name_B5: ids_len,
-                in_name_B6: history_len,
-                in_name_B7: attention_mask
-            })
-            if STOP_TOKEN in input_ids:
+        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], 'cpu', 0)})
+        for i in range(num_layers_2):
+            input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
+        while num_decode < generate_limit:
+            all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
+            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])[0][0]
+            if max_logit_ids in [STOP_TOKEN]:
                 break
+            for i in range(amount_of_outputs):
+                input_feed_B[in_name_B[i].name] = all_outputs_B[i]
             if num_decode < 1:
-                history_len += ids_len
-                ids_len[0] = 1
-                attention_mask[0] = 0
-            else:
-                history_len += 1
+                input_feed_B[in_name_B[-1].name] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), 'cpu', 0)
             num_decode += 1
-            save_token.append(input_ids)
-            input_ids = np.array([input_ids], dtype=np.int32)
+            save_token.append(max_logit_ids)
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
@@ -399,9 +450,10 @@ for language_idx, test in enumerate(test_audio):
         [{
             "tokens": save_token_array
         }],
-        return_timestamps=None,  # Do not support return timestamps
+        return_timestamps=None,                                                # Do not support return timestamps
         return_language=None,
         time_precision=0
     )
     print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
+
