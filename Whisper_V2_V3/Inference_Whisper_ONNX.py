@@ -13,13 +13,44 @@ test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./exa
 
 ORT_Accelerate_Providers = []           # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                         # else keep empty.
-provider_options = []
-SAMPLE_RATE = 16000                     # The model parameter, do not edit the value.
+MAX_THREADS = 8                         # Max CPU parallel threads.
+DEVICE_ID = 0                           # The GPU id, default to 0.
 TARGET_LANGUAGE = "en"                  # Choose a language listed in the get_language_id function's language_map.
 TASK = 'transcribe'                     # Choose one of : ['transcribe', 'translate']
 SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
 MAX_SEQ_LEN = 64                        # It should keep the same with exported model.
+SAMPLE_RATE = 16000                     # The model parameter, do not edit the value.
 STOP_TOKEN = 50257                      # 50257 is the end token for common Whisper series model.
+
+if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
+    provider_options = [
+        {
+            'device_type': 'CPU',                         # [CPU, NPU, GPU, GPU.0, GPU.1]]
+            'precision': 'ACCURACY',                      # [FP32, FP16, ACCURACY]
+            'num_of_threads': MAX_THREADS,
+            'num_streams': 1,
+            'enable_opencl_throttling': True,
+            'enable_qdq_optimizer': False                 # Enable it carefully
+        }
+    ]
+elif "CUDAExecutionProvider" in ORT_Accelerate_Providers:
+    provider_options = [
+        {
+            'device_id': DEVICE_ID,
+            'gpu_mem_limit': 8 * 1024 * 1024 * 1024,      # 8 GB
+            'arena_extend_strategy': 'kNextPowerOfTwo',
+            'cudnn_conv_algo_search': 'EXHAUSTIVE',
+            'cudnn_conv_use_max_workspace': '1',
+            'do_copy_in_default_stream': '1',
+            'cudnn_conv1d_pad_to_nc1d': '1',
+            'enable_cuda_graph': '0',                     # Set to '0' to avoid potential errors when enabled.
+            'use_tf32': '0'            
+        }
+    ]
+else:
+    # Please config by yourself for others providers.
+    provider_options = None
+
 
 
 if "v3" in download_path or "V3" in download_path:
@@ -148,9 +179,17 @@ session_opts.add_session_config_entry("session.intra_op.allow_spinning", "1")
 session_opts.add_session_config_entry("session.inter_op.allow_spinning", "1")
 session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
 
-
 ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
-print(f"\nUsable Providers: {ort_session_A.get_providers()}")
+ORT_Accelerate_Providers = ort_session_A.get_providers()[0]
+print(f"\nUsable Providers: {ORT_Accelerate_Providers}")
+
+if "CUDAExecutionProvider" in ORT_Accelerate_Providers or "TensorrtExecutionProvider" in ORT_Accelerate_Providers:
+    device_type = 'cuda'
+elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
+    device_type = 'dml'
+else:
+    device_type = 'cpu'
+
 shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
 out_name_A = ort_session_A.get_outputs()
@@ -211,10 +250,10 @@ for language_idx, test in enumerate(test_audio):
     # Start to run Whisper
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[50258, get_language_id(language), get_task_id(TASK, True)[0]]], dtype=np.int32), 'cpu', 0)
+    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[50258, get_language_id(language), get_task_id(TASK, True)[0]]], dtype=np.int32), device_type, DEVICE_ID)
     attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
-    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), 'cpu', 0)
-    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), 'cpu', 0)
+    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), device_type, DEVICE_ID)
+    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), device_type, DEVICE_ID)
 
     layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 1
     input_feed_B = {
@@ -229,7 +268,7 @@ for language_idx, test in enumerate(test_audio):
     save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
-        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], 'cpu', 0)})
+        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], device_type, DEVICE_ID)})
         for i in range(num_layers_2):
             input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
         while num_decode < generate_limit:
@@ -240,7 +279,7 @@ for language_idx, test in enumerate(test_audio):
             for i in range(amount_of_outputs):
                 input_feed_B[in_name_B[i].name] = all_outputs_B[i]
             if num_decode < 1:
-                input_feed_B[in_name_B[-1].name] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), 'cpu', 0)
+                input_feed_B[in_name_B[-1].name] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
             num_decode += 1
             save_token.append(max_logit_ids)
         slice_start += stride_step
@@ -251,7 +290,7 @@ for language_idx, test in enumerate(test_audio):
         [{
             "tokens": save_token_array
         }],
-        return_timestamps=None,                                                 # Do not support return timestamps
+        return_timestamps=None,                              # Do not support return timestamps
         return_language=None,
         time_precision=0
     )
