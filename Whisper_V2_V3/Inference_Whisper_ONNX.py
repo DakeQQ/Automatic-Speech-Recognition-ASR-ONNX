@@ -180,16 +180,6 @@ session_opts.add_session_config_entry("session.inter_op.allow_spinning", "1")
 session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
 
 ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
-ORT_Accelerate_Providers = ort_session_A.get_providers()[0]
-print(f"\nUsable Providers: {ORT_Accelerate_Providers}")
-
-if "CUDAExecutionProvider" in ORT_Accelerate_Providers or "TensorrtExecutionProvider" in ORT_Accelerate_Providers:
-    device_type = 'cuda'
-elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
-    device_type = 'dml'
-else:
-    device_type = 'cpu'
-
 shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
 out_name_A = ort_session_A.get_outputs()
@@ -213,6 +203,14 @@ generate_limit = MAX_SEQ_LEN - 3  # 3 = length of input_ids
 num_layers = (amount_of_outputs - 1) // 2
 num_layers_2 = num_layers + num_layers
 num_layers_4 = num_layers_2 + num_layers_2
+ORT_Accelerate_Providers = ort_session_A.get_providers()[0]
+print(f"\nUsable Providers: {ORT_Accelerate_Providers}")
+if "CUDAExecutionProvider" in ORT_Accelerate_Providers or "TensorrtExecutionProvider" in ORT_Accelerate_Providers:
+    device_type = 'cuda'
+elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
+    device_type = 'dml'
+else:
+    device_type = 'cpu'
 tokenizer = AutoTokenizer.from_pretrained(download_path)
 
 # Load the input audio
