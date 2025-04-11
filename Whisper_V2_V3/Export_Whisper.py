@@ -17,9 +17,6 @@ onnx_model_B = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Decoder.onnx"       
 test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./example/ko.mp3"]     # The test audio list.
 
 
-ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
-                                                            # else keep empty.
-provider_options = []
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Whisper series models only support dynamic_axes due to their transformer structure.
 INPUT_AUDIO_LENGTH = 16000                                  # Just a dummy value here.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
@@ -244,10 +241,9 @@ with torch.inference_mode():
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data * scaling
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data * scaling
     whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
-    audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
 
-    # Prepare input and output names
     output_names = []
+    audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     dynamic_axes = {'audio': {2: 'audio_len'}}
     for i in range(NUM_LAYER_EN):
         name = f'en_key_{i}'
@@ -257,6 +253,7 @@ with torch.inference_mode():
         name = f'en_value_{i}'
         output_names.append(name)
         dynamic_axes[name] = {2: 'signal_len'}
+      
     torch.onnx.export(
         whisper_encoder,
         (audio,),
@@ -345,6 +342,9 @@ with torch.inference_mode():
     del past_key_de
     del past_value_de
     del attention_mask
+    del input_names
+    del output_names
+    del dynamic_axes
 print('\nExport done!\n\nStart to run Whisper by ONNX Runtime.\n\nNow, loading the model...')
 
 
@@ -361,7 +361,7 @@ session_opts.add_session_config_entry("session.inter_op.allow_spinning", "1")
 session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
 
 
-ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
+ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=['CPUExecutionProvider'])
 print(f"\nUsable Providers: {ort_session_A.get_providers()}")
 shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
@@ -371,7 +371,7 @@ output_names_A = []
 for i in range(len(out_name_A)):
     output_names_A.append(out_name_A[i].name)
 
-ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
+ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=['CPUExecutionProvider'])
 in_name_B = ort_session_B.get_inputs()
 out_name_B = ort_session_B.get_outputs()
 input_names_B = []
