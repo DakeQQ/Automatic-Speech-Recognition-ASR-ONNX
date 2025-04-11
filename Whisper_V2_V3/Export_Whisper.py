@@ -228,6 +228,7 @@ with torch.inference_mode():
     NUM_LAYER_DE = model.config.decoder_layers
     N_MELS = model.config.num_mel_bins
     STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1
+    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     if MAX_SEQ_LEN > model.config.max_target_positions:
         MAX_SEQ_LEN = model.config.max_target_positions
     scaling = float(math.pow(model.model.encoder.layers._modules['0'].self_attn.head_dim, -0.5))
@@ -242,7 +243,6 @@ with torch.inference_mode():
     for i in model.model.decoder.layers._modules:
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data * scaling
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data * scaling
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
 
