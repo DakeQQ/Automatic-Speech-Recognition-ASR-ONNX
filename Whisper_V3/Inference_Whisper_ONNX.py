@@ -245,7 +245,7 @@ for language_idx, test in enumerate(test_audio):
         [{
             "tokens": save_token_array
         }],
-        return_timestamps=None,                                                 # Do not support return timestamps
+        return_timestamps=None,                              # Do not support return timestamps
         return_language=None,
         time_precision=0
     )
