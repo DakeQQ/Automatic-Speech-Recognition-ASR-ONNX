@@ -2,10 +2,10 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
-# To export your own STFT process ONNX model, set the following values.
+# To export your own STFT process ONNX model, set the following values. 
+# Next, click the IDE Run button or Launch the cmd to run 'python STFT_Process.py'
 
 DYNAMIC_AXES = True                                 # Default dynamic axes is input audio (signal) length.
-N_MELS = 100                                        # Number of Mel bands to generate in the Mel-spectrogram
 NFFT = 1024                                         # Number of FFT components for the STFT process
 HOP_LENGTH = 256                                    # Number of samples between successive frames in the STFT
 INPUT_AUDIO_LENGTH = 16000                          # Set for static axes. Length of the audio input signal in samples.
@@ -18,121 +18,176 @@ export_path_stft = f"{STFT_TYPE}.onnx"              # The exported stft onnx mod
 export_path_istft = f"{ISTFT_TYPE}.onnx"            # The exported istft onnx model save path.
 
 
+# Precompute constants to avoid calculations at runtime
 HALF_NFFT = NFFT // 2
-STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
-if NFFT > INPUT_AUDIO_LENGTH:
-    NFFT = INPUT_AUDIO_LENGTH
-if HOP_LENGTH > INPUT_AUDIO_LENGTH:
-    HOP_LENGTH = INPUT_AUDIO_LENGTH
+STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1
 
+# Sanity checks for parameters
+NFFT = min(NFFT, INPUT_AUDIO_LENGTH)
+HOP_LENGTH = min(HOP_LENGTH, INPUT_AUDIO_LENGTH)
 
-# Initialize window
-WINDOW = {
+# Create window function lookup once
+WINDOW_FUNCTIONS = {
     'bartlett': torch.bartlett_window,
     'blackman': torch.blackman_window,
     'hamming': torch.hamming_window,
     'hann': torch.hann_window,
     'kaiser': lambda x: torch.kaiser_window(x, periodic=True, beta=12.0)
-}.get(WINDOW_TYPE, torch.hann_window)(NFFT).float()
-# Without a padding process, the window length must equal the NFFT length.
+}
+# Define default window function
+DEFAULT_WINDOW_FN = torch.hann_window
+# Initialize window - only compute once
+WINDOW = WINDOW_FUNCTIONS.get(WINDOW_TYPE, DEFAULT_WINDOW_FN)(NFFT).float()
 
 
 class STFT_Process(torch.nn.Module):
-    def __init__(self, model_type, n_fft=NFFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=MAX_SIGNAL_LENGTH, window_type=WINDOW_TYPE):
+    def __init__(self, model_type, n_fft=NFFT, hop_len=HOP_LENGTH, max_frames=MAX_SIGNAL_LENGTH, window_type=WINDOW_TYPE):
         super(STFT_Process, self).__init__()
         self.model_type = model_type
         self.n_fft = n_fft
-        self.n_mels = n_mels
         self.hop_len = hop_len
         self.max_frames = max_frames
         self.window_type = window_type
-        self.half_n_fft = self.n_fft // 2
-        window = {
-            'bartlett': torch.bartlett_window,
-            'blackman': torch.blackman_window,
-            'hamming': torch.hamming_window,
-            'hann': torch.hann_window,
-            'kaiser': lambda x: torch.kaiser_window(x, periodic=True, beta=12.0)
-        }.get(self.window_type, torch.hann_window)(self.n_fft).float()
+        self.half_n_fft = n_fft // 2  # Precompute once
+        
+        # Get window function and compute window once
+        window = WINDOW_FUNCTIONS.get(window_type, DEFAULT_WINDOW_FN)(n_fft).float()
+        
+        # Register common buffers for all model types
+        self.register_buffer('padding_zero', torch.zeros((1, 1, self.half_n_fft), dtype=torch.float32))
+        
+        # Pre-compute model-specific buffers
         if self.model_type in ['stft_A', 'stft_B']:
-            time_steps = torch.arange(self.n_fft).unsqueeze(0).float()
-            frequencies = torch.arange(self.half_n_fft + 1).unsqueeze(1).float()
-            omega = 2 * torch.pi * frequencies * time_steps / self.n_fft
-            window = window.unsqueeze(0)
-            self.register_buffer('cos_kernel', (torch.cos(omega) * window).unsqueeze(1))
-            self.register_buffer('sin_kernel', (-torch.sin(omega) * window).unsqueeze(1))
-            self.padding_zero = torch.zeros((1, 1, self.half_n_fft), dtype=torch.float32)
+            # STFT forward pass preparation
+            time_steps = torch.arange(n_fft, dtype=torch.float32).unsqueeze(0)
+            frequencies = torch.arange(self.half_n_fft + 1, dtype=torch.float32).unsqueeze(1)
+            
+            # Calculate omega matrix once
+            omega = 2 * torch.pi * frequencies * time_steps / n_fft
 
-        elif self.model_type in ['istft_A', 'istft_B']:
-            fourier_basis = torch.fft.fft(torch.eye(self.n_fft, dtype=torch.float32))
+            # Register conv kernels as buffers
+            self.register_buffer('cos_kernel', (torch.cos(omega) * window.unsqueeze(0)).unsqueeze(1))
+            self.register_buffer('sin_kernel', (-torch.sin(omega) * window.unsqueeze(0)).unsqueeze(1))
+
+        if self.model_type in ['istft_A', 'istft_B']:
+            # ISTFT forward pass preparation
+            # Pre-compute fourier basis
+            fourier_basis = torch.fft.fft(torch.eye(n_fft, dtype=torch.float32))
             fourier_basis = torch.vstack([
                 torch.real(fourier_basis[:self.half_n_fft + 1, :]),
                 torch.imag(fourier_basis[:self.half_n_fft + 1, :])
             ]).float()
-            forward_basis = window * fourier_basis[:, None, :]
-            inverse_basis = window * torch.linalg.pinv((fourier_basis * self.n_fft) / self.hop_len).T[:, None, :]
-            n = self.n_fft + self.hop_len * (self.max_frames - 1)
+            
+            # Create forward and inverse basis
+            forward_basis = window * fourier_basis.unsqueeze(1)
+            inverse_basis = window * torch.linalg.pinv((fourier_basis * n_fft) / hop_len).T.unsqueeze(1)
+            
+            # Calculate window sum for overlap-add
+            n = n_fft + hop_len * (max_frames - 1)
             window_sum = torch.zeros(n, dtype=torch.float32)
             window_normalized = window / window.abs().max()
-            total_pad = self.n_fft - window_normalized.shape[0]
-            pad_left = total_pad // 2
-            pad_right = total_pad - pad_left
-            win_sq = torch.nn.functional.pad(window_normalized ** 2, (pad_left, pad_right), mode='constant', value=0)
-
-            for i in range(self.max_frames):
-                sample = i * self.hop_len
-                window_sum[sample: min(n, sample + self.n_fft)] += win_sq[: max(0, min(self.n_fft, n - sample))]
+            
+            # Pad window if needed
+            total_pad = n_fft - window_normalized.shape[0]
+            if total_pad > 0:
+                pad_left = total_pad // 2
+                pad_right = total_pad - pad_left
+                win_sq = torch.nn.functional.pad(window_normalized ** 2, (pad_left, pad_right), mode='constant', value=0)
+            else:
+                win_sq = window_normalized ** 2
+            
+            # Calculate overlap-add weights
+            for i in range(max_frames):
+                sample = i * hop_len
+                window_sum[sample: min(n, sample + n_fft)] += win_sq[: max(0, min(n_fft, n - sample))]
+            
+            # Register buffers
             self.register_buffer("forward_basis", forward_basis)
             self.register_buffer("inverse_basis", inverse_basis)
-            self.register_buffer("window_sum_inv", self.n_fft / (window_sum * self.hop_len))
+            self.register_buffer("window_sum_inv", n_fft / (window_sum * hop_len + 1e-7))  # Add epsilon to avoid division by zero
 
     def forward(self, *args):
+        # Use direct method calls instead of if-else cascade for better ONNX export
         if self.model_type == 'stft_A':
             return self.stft_A_forward(*args)
         if self.model_type == 'stft_B':
             return self.stft_B_forward(*args)
-        elif self.model_type == 'istft_A':
+        if self.model_type == 'istft_A':
             return self.istft_A_forward(*args)
-        elif self.model_type== 'istft_B':
+        if self.model_type == 'istft_B':
             return self.istft_B_forward(*args)
+        # In case none match, raise an error
+        raise ValueError(f"Unknown model type: {self.model_type}")
 
     def stft_A_forward(self, x, pad_mode='reflect' if PAD_MODE == 'reflect' else 'constant'):
         if pad_mode == 'reflect':
-            x = torch.nn.functional.pad(x, (self.half_n_fft, self.half_n_fft), mode=pad_mode)
+            x_padded = torch.nn.functional.pad(x, (self.half_n_fft, self.half_n_fft), mode=pad_mode)
         else:
-            x = torch.cat((self.padding_zero, x, self.padding_zero), dim=-1)
-        real_part = torch.nn.functional.conv1d(x, self.cos_kernel, stride=self.hop_len)
-        return real_part
+            x_padded = torch.cat((self.padding_zero, x, self.padding_zero), dim=-1)
+        
+        # Single conv operation
+        return torch.nn.functional.conv1d(x_padded, self.cos_kernel, stride=self.hop_len)
 
     def stft_B_forward(self, x, pad_mode='reflect' if PAD_MODE == 'reflect' else 'constant'):
         if pad_mode == 'reflect':
-            x = torch.nn.functional.pad(x, (self.half_n_fft, self.half_n_fft), mode=pad_mode)
+            x_padded = torch.nn.functional.pad(x, (self.half_n_fft, self.half_n_fft), mode=pad_mode)
         else:
-            x = torch.cat((self.padding_zero, x, self.padding_zero), dim=-1)
-        real_part = torch.nn.functional.conv1d(x, self.cos_kernel, stride=self.hop_len)
-        image_part = torch.nn.functional.conv1d(x, self.sin_kernel, stride=self.hop_len)
+            x_padded = torch.cat((self.padding_zero, x, self.padding_zero), dim=-1)
+        
+        # Perform convolutions
+        real_part = torch.nn.functional.conv1d(x_padded, self.cos_kernel, stride=self.hop_len)
+        image_part = torch.nn.functional.conv1d(x_padded, self.sin_kernel, stride=self.hop_len)
+        
         return real_part, image_part
 
     def istft_A_forward(self, magnitude, phase):
+        # Pre-compute trig values
+        cos_phase = torch.cos(phase)
+        sin_phase = torch.sin(phase)
+        
+        # Prepare input for transposed convolution
+        complex_input = torch.cat((magnitude * cos_phase, magnitude * sin_phase), dim=1)
+        
+        # Perform transposed convolution
         inverse_transform = torch.nn.functional.conv_transpose1d(
-            torch.cat((magnitude * torch.cos(phase), magnitude * torch.sin(phase)), dim=1),
+            complex_input,
             self.inverse_basis,
             stride=self.hop_len,
             padding=0,
         )
-        output = inverse_transform[:, :, self.half_n_fft: -self.half_n_fft] * self.window_sum_inv[self.half_n_fft: inverse_transform.size(-1) - self.half_n_fft]
-        return output
+        
+        # Apply window correction
+        output_len = inverse_transform.size(-1)
+        start_idx = self.half_n_fft
+        end_idx = output_len - self.half_n_fft
+        
+        return inverse_transform[:, :, start_idx:end_idx] * self.window_sum_inv[start_idx:end_idx]
 
     def istft_B_forward(self, magnitude, real, imag):
+        # Calculate phase using atan2
         phase = torch.atan2(imag, real)
+        
+        # Pre-compute trig values directly instead of calling istft_A_forward
+        cos_phase = torch.cos(phase)
+        sin_phase = torch.sin(phase)
+        
+        # Prepare input for transposed convolution
+        complex_input = torch.cat((magnitude * cos_phase, magnitude * sin_phase), dim=1)
+        
+        # Perform transposed convolution
         inverse_transform = torch.nn.functional.conv_transpose1d(
-            torch.cat((magnitude * torch.cos(phase), magnitude * torch.sin(phase)), dim=1),
+            complex_input,
             self.inverse_basis,
             stride=self.hop_len,
             padding=0,
         )
-        output = inverse_transform[:, :, self.half_n_fft: -self.half_n_fft] * self.window_sum_inv[self.half_n_fft: inverse_transform.size(-1) - self.half_n_fft]
-        return output
+        
+        # Apply window correction
+        output_len = inverse_transform.size(-1)
+        start_idx = self.half_n_fft
+        end_idx = output_len - self.half_n_fft
+        
+        return inverse_transform[:, :, start_idx:end_idx] * self.window_sum_inv[start_idx:end_idx]
 
 
 def test_onnx_stft_A(input_signal):
@@ -266,6 +321,7 @@ def main():
             test_onnx_istft_A(*dummy_istft_input)
         else:
             test_onnx_istft_B(*dummy_istft_input)
+
 
 if __name__ == "__main__":
     main()
