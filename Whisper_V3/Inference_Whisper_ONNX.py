@@ -130,7 +130,7 @@ def remove_repeated_parts(ids, repeat_words_threshold):
     return np.array([ids], dtype=np.int32)
 
 
-# # ONNX Runtime settings
+# ONNX Runtime settings
 session_opts = onnxruntime.SessionOptions()
 session_opts.log_severity_level = 3         # error level, it an adjustable value.
 session_opts.inter_op_num_threads = 0       # Run different nodes with num_threads. Set 0 for auto.
@@ -149,28 +149,26 @@ shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
 out_name_A = ort_session_A.get_outputs()
 in_name_A0 = in_name_A[0].name
-out_name_A0 = out_name_A[0].name
-out_name_A1 = out_name_A[1].name
+output_names_A = []
+for i in range(len(out_name_A)):
+    output_names_A.append(out_name_A[i].name)
 
 ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
-model_type = ort_session_B._inputs_meta[-1].type
 in_name_B = ort_session_B.get_inputs()
 out_name_B = ort_session_B.get_outputs()
-in_name_B0 = in_name_B[0].name
-in_name_B1 = in_name_B[1].name
-in_name_B2 = in_name_B[2].name
-in_name_B3 = in_name_B[3].name
-in_name_B4 = in_name_B[4].name
-in_name_B5 = in_name_B[5].name
-in_name_B6 = in_name_B[6].name
-in_name_B7 = in_name_B[7].name
-out_name_B0 = out_name_B[0].name
-out_name_B1 = out_name_B[1].name
-out_name_B2 = out_name_B[2].name
+input_names_B = []
+output_names_B = []
+amount_of_outputs = len(out_name_B)
+for i in range(len(in_name_B)):
+    input_names_B.append(in_name_B[i].name)
+for i in range(amount_of_outputs):
+    output_names_B.append(out_name_B[i].name)
 
-
+generate_limit = MAX_SEQ_LEN - 3  # 3 = length of input_ids
+num_layers = (amount_of_outputs - 1) // 2
+num_layers_2 = num_layers + num_layers
+num_layers_4 = num_layers_2 + num_layers_2
 tokenizer = AutoTokenizer.from_pretrained(download_path)
-
 
 # Load the input audio
 for language_idx, test in enumerate(test_audio):
@@ -207,42 +205,38 @@ for language_idx, test in enumerate(test_audio):
     # Start to run Whisper
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = np.array([50258, get_language_id(language), get_task_id(TASK, True)[0]], dtype=np.int32)
-    ids_len = np.array([input_ids.shape[0]], dtype=np.int64)
-    history_len = np.array([0], dtype=np.int64)
-    past_key_de = np.zeros((ort_session_B._inputs_meta[3].shape[0], ort_session_B._inputs_meta[3].shape[1], history_len[0], ort_session_B._inputs_meta[3].shape[-1]), dtype=np.float16)
-    past_value_de = np.zeros((ort_session_B._inputs_meta[4].shape[0], ort_session_B._inputs_meta[4].shape[1], history_len[0], ort_session_B._inputs_meta[4].shape[-1]), dtype=np.float16)
-    if 'float16' in model_type:
-        attention_mask = np.array([-65504.0], dtype=np.float16)
-    else:
-        attention_mask = np.array([-65504.0], dtype=np.float32)
+    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[50258, get_language_id(language), get_task_id(TASK, True)[0]]], dtype=np.int32), 'cpu', 0)
+    attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
+    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), 'cpu', 0)
+    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), 'cpu', 0)
+
+    layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 1
+    input_feed_B = {
+        in_name_B[-1].name: attention_mask,
+        in_name_B[num_layers_2].name: input_ids
+    }
+    for i in range(num_layers):
+        input_feed_B[in_name_B[i].name] = past_keys_B
+    for i in range(num_layers, num_layers_2):
+        input_feed_B[in_name_B[i].name] = past_values_B
     num_decode = 0
     save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
-        save_encoder_key, save_encoder_value = ort_session_A.run([out_name_A0, out_name_A1], {in_name_A0: audio[:, :, slice_start: slice_end]})
-        while history_len < MAX_SEQ_LEN:
-            input_ids, past_key_de, past_value_de = ort_session_B.run([out_name_B0, out_name_B1, out_name_B2], {
-                in_name_B0: input_ids,
-                in_name_B1: save_encoder_key,
-                in_name_B2: save_encoder_value,
-                in_name_B3: past_key_de,
-                in_name_B4: past_value_de,
-                in_name_B5: ids_len,
-                in_name_B6: history_len,
-                in_name_B7: attention_mask
-            })
-            if STOP_TOKEN in input_ids:
+        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], 'cpu', 0)})
+        for i in range(num_layers_2):
+            input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
+        while num_decode < generate_limit:
+            all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
+            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])[0][0]
+            if max_logit_ids in [STOP_TOKEN]:
                 break
+            for i in range(amount_of_outputs):
+                input_feed_B[in_name_B[i].name] = all_outputs_B[i]
             if num_decode < 1:
-                history_len += ids_len
-                ids_len[0] = 1
-                attention_mask[0] = 0
-            else:
-                history_len += 1
+                input_feed_B[in_name_B[-1].name] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), 'cpu', 0)
             num_decode += 1
-            save_token.append(input_ids)
-            input_ids = np.array([input_ids], dtype=np.int32)
+            save_token.append(max_logit_ids)
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
@@ -251,9 +245,10 @@ for language_idx, test in enumerate(test_audio):
         [{
             "tokens": save_token_array
         }],
-        return_timestamps=None,  # Do not support return timestamps
+        return_timestamps=None,                                                 # Do not support return timestamps
         return_language=None,
         time_precision=0
     )
     print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
+    
