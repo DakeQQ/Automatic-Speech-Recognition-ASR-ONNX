@@ -197,8 +197,8 @@ class WHISPER_DECODER(torch.nn.Module):
     def forward(self, *all_inputs):
         attention_mask = all_inputs[-1]
         input_ids = all_inputs[self.num_layers_de_2]
-        ids_len = input_ids.shape[1]
-        history_len = all_inputs[0].shape[-1]
+        ids_len = input_ids.shape[1].unsqueeze(0)
+        history_len = all_inputs[0].shape[-1].unsqueeze(0)
         kv_seq_len = ids_len + history_len
         task_embeds = (self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len:kv_seq_len])
         attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * attention_mask).float()
