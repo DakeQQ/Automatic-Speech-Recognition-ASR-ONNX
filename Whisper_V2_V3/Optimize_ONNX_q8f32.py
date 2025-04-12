@@ -14,10 +14,12 @@ from transformers import AutoModelForCausalLM
 
 
 # Path Setting
-original_folder_path = r"/home/DakeQQ/Downloads/Model_ONNX"                      # The original folder.
-quanted_folder_path = r"/home/DakeQQ/Downloads/Model_Optimized"                  # The optimized folder.
-model_path = os.path.join(original_folder_path, "Model.onnx")                    # The original fp32 model path.
-quanted_model_path = os.path.join(quanted_folder_path, "Model_Optimized.onnx")   # The optimized model stored path.
+original_folder_path = r"/home/DakeQQ/Downloads/Whisper_ONNX"                    # The original folder.
+quanted_folder_path = r"/home/DakeQQ/Downloads/Whisper_Optimized"                # The optimized folder.
+model_path = os.path.join(original_folder_path, "Whisper_Encoder.onnx")          # The original fp32 model path.
+quanted_model_path = os.path.join(quanted_folder_path, "Whisper_Encoder.onnx")   # The optimized model stored path.
+# model_path = os.path.join(original_folder_path, "Whisper_Decoder.onnx")          # The original fp32 model path.
+# quanted_model_path = os.path.join(quanted_folder_path, "Whisper_Decoder.onnx")   # The optimized model stored path.
 download_path = r'/home/DakeQQ/Downloads/whisper-large-v3'                       # Set the folder path where the LLM whole project downloaded, otherwise set "NONE".
 use_gpu = False                                                                  # If true, the transformers.optimizer will remain the FP16 processes.
 provider = 'CPUExecutionProvider'                                                # ['CPUExecutionProvider', 'CUDAExecutionProvider']
