@@ -20,7 +20,7 @@ TASK = 'transcribe'                     # Choose one of : ['transcribe', 'transl
 SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
 MAX_SEQ_LEN = 64                        # It should keep the same with exported model.
 SAMPLE_RATE = 16000                     # The model parameter, do not edit the value.
-STOP_TOKEN = 50257                      # 50257 is the end token for common Whisper series model.
+STOP_TOKEN = [50257]                    # 50257 is the end token for common Whisper series model.
 
 if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
     provider_options = [
@@ -272,7 +272,7 @@ for language_idx, test in enumerate(test_audio):
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
             max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])[0][0]
-            if max_logit_ids in [STOP_TOKEN]:
+            if max_logit_ids in STOP_TOKEN:
                 break
             for i in range(amount_of_outputs):
                 input_feed_B[in_name_B[i].name] = all_outputs_B[i]
