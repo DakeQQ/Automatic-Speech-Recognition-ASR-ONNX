@@ -86,10 +86,10 @@ class PARAFORMER(torch.nn.Module):
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=ref_len + self.lfr_m_factor - 1)
-        self.int_inv16 = float(1.0 / 32768.0)
+        self.inv_int16 = float(1.0 / 32768.0)
 
     def forward(self, audio):
-        audio = audio.float() * self.int_inv16
+        audio = audio.float() * self.inv_int16
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
