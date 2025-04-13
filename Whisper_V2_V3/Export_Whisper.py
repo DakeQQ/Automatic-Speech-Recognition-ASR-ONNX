@@ -310,7 +310,10 @@ with torch.inference_mode():
     input_names.append('input_ids')
     keys_values.append(input_ids)
 
-    for i in range(NUM_LAYER_DE):
+    for i in generate_limit = MAX_SEQ_LEN - 3  # 3 = length of input_ids
+num_layers = (amount_of_outputs - 1) // 2
+num_layers_2 = num_layers + num_layers
+num_layers_4 = num_layers_2 + num_layers_2range(NUM_LAYER_DE):
         name = f'en_key_{i}'
         input_names.append(name)
         keys_values.append(save_encoder_key)
@@ -432,9 +435,9 @@ for language_idx, test in enumerate(test_audio):
         in_name_B[-1].name: attention_mask,
         in_name_B[num_layers_2].name: input_ids
     }
-    for i in range(NUM_LAYER_DE):
+    for i in range(num_layers):
         input_feed_B[in_name_B[i].name] = past_keys_B
-    for i in range(NUM_LAYER_DE, num_layers_2):
+    for i in range(num_layers, num_layers_2):
         input_feed_B[in_name_B[i].name] = past_values_B
     num_decode = 0
     save_token = []
