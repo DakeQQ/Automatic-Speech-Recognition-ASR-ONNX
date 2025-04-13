@@ -248,11 +248,11 @@ with torch.inference_mode():
     for i in range(NUM_LAYER_EN):
         name = f'en_key_{i}'
         output_names.append(name)
-        dynamic_axes[name] = {3: 'signal_len'}
+        dynamic_axes[name] = {2: 'signal_len'}
     for i in range(NUM_LAYER_EN):
         name = f'en_value_{i}'
         output_names.append(name)
-        dynamic_axes[name] = {2: 'signal_len'}
+        dynamic_axes[name] = {1: 'signal_len'}
       
     torch.onnx.export(
         whisper_encoder,
