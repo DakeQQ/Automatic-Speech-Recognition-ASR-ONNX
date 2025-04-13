@@ -203,6 +203,8 @@ class MultiHeadedAttentionSANM(nn.Module):
             left_padding = left_padding + sanm_shfit
         right_padding = kernel_size - 1 - left_padding
         self.pad_fn = nn.ConstantPad1d((left_padding, right_padding), 0.0)
+        self.scale =  self.d_k ** (-0.25)
+        self.h_d_k = self.h * self.d_k
 
     def forward_fsmn(self, inputs, mask=None, mask_shfit_chunk=None):
         if inputs.dim() == 2:
@@ -225,7 +227,7 @@ class MultiHeadedAttentionSANM(nn.Module):
     def forward_attention(self, value, scores, mask, mask_att_chunk_encoder=None):
         attn = torch.softmax(scores, dim=-1)
         attn = torch.matmul(attn, value)  # (batch, head, time1, d_k)
-        attn = attn.transpose(1, 2).contiguous().view(1, -1, self.h * self.d_k)  # (batch, time1, d_model)
+        attn = attn.transpose(1, 2).contiguous().view(1, -1, self.h_d_k)  # (batch, time1, d_model)
         return self.linear_out(attn)  # (batch, time1, d_model)
 
     def forward(self, x, mask=None, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
@@ -244,8 +246,7 @@ class MultiHeadedAttentionSANM(nn.Module):
         """
         q_h, k_h, v_h, v = self.forward_qkv(x)
         fsmn_memory = self.forward_fsmn(v, mask, mask_shfit_chunk)
-        q_h = q_h * self.d_k ** (-0.5)
-        scores = torch.matmul(q_h, k_h)
+        scores = torch.matmul(q_h * self.scale, k_h * self.scale)
         att_outs = self.forward_attention(v_h, scores, mask, mask_att_chunk_encoder)
         return att_outs + fsmn_memory
 
