@@ -18,7 +18,7 @@ test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./exa
 
 
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Whisper series models only support dynamic_axes due to their transformer structure.
-INPUT_AUDIO_LENGTH = 16000                                  # Just a dummy value here.
+INPUT_AUDIO_LENGTH = 320000                                 # Set for maximum input audio length.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 # N_MELS = 80                                               # Setting by whisper model config. Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT = 400                                                  # Number of FFT components for the STFT process, edit it carefully.
