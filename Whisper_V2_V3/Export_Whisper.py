@@ -310,10 +310,7 @@ with torch.inference_mode():
     input_names.append('input_ids')
     keys_values.append(input_ids)
 
-    for i in generate_limit = MAX_SEQ_LEN - 3  # 3 = length of input_ids
-num_layers = (amount_of_outputs - 1) // 2
-num_layers_2 = num_layers + num_layers
-num_layers_4 = num_layers_2 + num_layers_2range(NUM_LAYER_DE):
+    for i in range(NUM_LAYER_DE):
         name = f'en_key_{i}'
         input_names.append(name)
         keys_values.append(save_encoder_key)
