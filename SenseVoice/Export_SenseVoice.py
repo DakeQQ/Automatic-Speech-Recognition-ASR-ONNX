@@ -18,7 +18,7 @@ test_audio = [model_path + "/example/zh.mp3", model_path + "/example/en.mp3", mo
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                                             # else keep empty.
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-INPUT_AUDIO_LENGTH = 16000 if DYNAMIC_AXES else 160000      # Set for static axis export: the length of the audio input signal (in samples). If not using DYNAMIC_AXES, default to 160000, you can adjust it.
+INPUT_AUDIO_LENGTH = 160000                                 # Set for static axis export: the length of the audio input signal (in samples). If not using DYNAMIC_AXES, default to 160000, you can adjust it.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT = 400                                                  # Number of FFT components for the STFT process, edit it carefully.
