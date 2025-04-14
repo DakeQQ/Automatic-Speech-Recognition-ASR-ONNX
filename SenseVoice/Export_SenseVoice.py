@@ -50,7 +50,7 @@ def normalize_to_int16(audio):
 
 
 class SENSE_VOICE(torch.nn.Module):
-    def __init__(self, sense_voice, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, ref_len, cmvn_means, cmvn_vars, use_emo):
+    def __init__(self, sense_voice, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, use_emo):
         super(SENSE_VOICE, self).__init__()
         self.embed_sys = sense_voice.embed
         self.encoder = sense_voice.encoder
@@ -65,7 +65,7 @@ class SENSE_VOICE(torch.nn.Module):
         self.padding = torch.zeros((1, (nfft_fbank - nfft_stft) // 2, stft_signal_len), dtype=torch.int8)
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
-        self.indices_mel = indices.clamp(max=ref_len + self.lfr_m_factor - 1)
+        self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
         self.int_inv16 = float(1.0 / 32768.0)
@@ -110,7 +110,7 @@ with torch.inference_mode():
     CMVN_MEANS = model.kwargs['frontend'].cmvn[0].repeat(1, 1, 1)
     CMVN_VARS = (model.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
     tokenizer = model.kwargs['tokenizer']
-    sense_voice = SENSE_VOICE(model.model.eval(), custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, STFT_SIGNAL_LENGTH, CMVN_MEANS, CMVN_VARS, USE_EMOTION)
+    sense_voice = SENSE_VOICE(model.model.eval(), custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, USE_EMOTION)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     language_idx = torch.tensor([0], dtype=torch.int32)
     torch.onnx.export(
