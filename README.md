@@ -48,6 +48,8 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 
 ## Coming Soon 🚀  
 - [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
+- [CrisperWhisper](https://github.com/nyrahealth/CrisperWhisper)
+- [Distil-Whisper-large-v3.5](https://huggingface.co/distil-whisper/distil-large-v3.5)
 
 ---
 
