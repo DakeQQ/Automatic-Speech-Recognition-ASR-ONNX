@@ -47,7 +47,7 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 ---
 
 ## Coming Soon 🚀  
-- None
+- [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
 
 ---
 
