@@ -200,7 +200,7 @@ class WHISPER_DECODER(torch.nn.Module):
         ids_len = input_ids.shape[1].unsqueeze(0)
         history_len = all_inputs[0].shape[-1].unsqueeze(0)
         kv_seq_len = ids_len + history_len
-        task_embeds = (self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len:kv_seq_len])
+        task_embeds = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len:kv_seq_len]
         attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * attention_mask).float()
         outputs = self.decoder(*(all_inputs + tuple([task_embeds, attention_mask])))
         lm_logits = self.whisper.proj_out(outputs[0][:, -1])
