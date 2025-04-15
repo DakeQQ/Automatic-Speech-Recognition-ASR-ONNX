@@ -25,7 +25,7 @@ INPUT_AUDIO_LENGTH = 160000                                 # Set for maximum in
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
-NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
+NFFT_FBANK = 400                                            # Number of FFT components for the FBank process, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
@@ -68,7 +68,12 @@ class FIRE_RED_ENCODER(torch.nn.Module):
         self.model.encoder.positional_encoding.pe.data = self.model.encoder.positional_encoding.pe.data.half()
         self.pre_emphasis = float(pre_emphasis)
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_fbank // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
-        self.padding = torch.zeros((1, (nfft_fbank - nfft_stft) // 2, stft_signal_len), dtype=torch.int8)
+        self.nfft_stft = nfft_stft
+        self.nfft_fbank = nfft_fbank
+        if self.nfft_stft > self.nfft_fbank:
+            self.padding = torch.zeros((1, n_mels, (nfft_stft - nfft_fbank) // 2), dtype=torch.float32)
+        else:
+            self.padding = torch.zeros((1, (nfft_fbank - nfft_stft) // 2, stft_signal_len), dtype=torch.int8)
         self.save_en_keys = [None] * self.model.decoder.n_layers
         self.save_en_values = [None] * self.model.decoder.n_layers
         self.inv_int16 = float(1.0 / 32768.0)
@@ -79,7 +84,9 @@ class FIRE_RED_ENCODER(torch.nn.Module):
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
         power = real_part * real_part + imag_part * imag_part
-        if self.padding.shape[1] != 0:
+        if self.nfft_stft > self.nfft_fbank:
+            self.fbank = torch.cat((self.fbank, self.padding), dim=-1)
+        elif self.nfft_fbank > self.nfft_stft:
             power = torch.cat((power, self.padding[:, :, :power.shape[-1]].float()), dim=1)
         mel_features = torch.matmul(self.fbank, power).transpose(1, 2).clamp(min=1e-5).log()
         mel_features = (mel_features - self.cmvn_means) * self.cmvn_vars
@@ -139,7 +146,6 @@ with torch.inference_mode():
         HIDDEN_SIZE = model.encoder.odim
         NUM_HEAD_EN = model.encoder.layer_stack._modules['0'].mhsa.n_head
         NUM_HEAD_DE = model.decoder.layer_stack._modules['0'].self_attn.n_head
-        NUM_LAYER_EN = len(model.encoder.layer_stack)
         NUM_LAYER_DE = model.decoder.n_layers
         HEAD_DIM_EN = model.encoder.layer_stack._modules['0'].mhsa.d_k
         HEAD_DIM_DE = model.decoder.layer_stack._modules['0'].self_attn.d_k
@@ -163,11 +169,11 @@ with torch.inference_mode():
         output_names = []
         audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
         dynamic_axes = {'audio': {2: 'audio_len'}}
-        for i in range(NUM_LAYER_EN):
+        for i in range(NUM_LAYER_DE):
             name = f'en_key_{i}'
             output_names.append(name)
             dynamic_axes[name] = {2: 'signal_len'}
-        for i in range(NUM_LAYER_EN):
+        for i in range(NUM_LAYER_DE):
             name = f'en_value_{i}'
             output_names.append(name)
             dynamic_axes[name] = {1: 'signal_len'}
