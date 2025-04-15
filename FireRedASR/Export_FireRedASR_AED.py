@@ -30,7 +30,7 @@ HOP_LENGTH = 160                                            # Number of samples 
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
 MAX_SEQ_LEN = 64                                            # Set an appropriate value.
-STOP_TOKEN = [4]                                            # 4 is the end token for FireRedASR series model.
+STOP_TOKEN = [4]                                            # 4 is the end token for FireRedASR-AED series model.
 SLIDING_WINDOW = 0                                          # Set the sliding window step for test audio reading; use 0 to disable.
 
 
