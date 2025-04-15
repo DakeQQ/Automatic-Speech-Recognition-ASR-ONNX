@@ -24,8 +24,8 @@ DYNAMIC_AXES = True                                         # The default dynami
 INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
-NFFT_FBANK = 400                                            # Number of FFT components for the FBank process, edit it carefully.
+NFFT_STFT = 400                                             # Number of FFT components for the STFT process, edit it carefully.
+NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 LFR_M = 7                                                   # The model parameter, do not edit the value.
@@ -36,10 +36,6 @@ SLIDING_WINDOW = 0                                          # Set the sliding wi
 
 STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
 LFR_LENGTH = (STFT_SIGNAL_LENGTH + LFR_N - 1) // LFR_N
-if NFFT_FBANK < NFFT_STFT:
-    NFFT_FBANK = NFFT_STFT
-if NFFT_FBANK > INPUT_AUDIO_LENGTH:
-    NFFT_FBANK = INPUT_AUDIO_LENGTH
 if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
 
