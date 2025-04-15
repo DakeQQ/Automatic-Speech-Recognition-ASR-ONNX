@@ -25,8 +25,8 @@ DYNAMIC_AXES = True                                         # The default dynami
 INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT_STFT = 400                                             # Number of FFT components for the STFT process, edit it carefully.
-NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
+NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
+NFFT_FBANK = 400                                            # Number of FFT components for the FBank process, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 LFR_M = 7                                                   # The model parameter, do not edit the value.
@@ -73,7 +73,12 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.blank_id = sense_voice.blank_id
         self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_fbank // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
-        self.padding = torch.zeros((1, (nfft_fbank - nfft_stft) // 2, stft_signal_len), dtype=torch.int8)
+        self.nfft_stft = nfft_stft
+        self.nfft_fbank = nfft_fbank
+        if self.nfft_stft > self.nfft_fbank:
+            self.padding = torch.zeros((1, n_mels, (nfft_stft - nfft_fbank) // 2), dtype=torch.float32)
+        else:
+            self.padding = torch.zeros((1, (nfft_fbank - nfft_stft) // 2, stft_signal_len), dtype=torch.int8)
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
@@ -87,7 +92,9 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
         power = real_part * real_part + imag_part * imag_part
-        if self.padding.shape[1] != 0:
+        if self.nfft_stft > self.nfft_fbank:
+            self.fbank = torch.cat((self.fbank, self.padding), dim=-1)
+        elif self.nfft_fbank > self.nfft_stft:
             power = torch.cat((power, self.padding[:, :, :power.shape[-1]].float()), dim=1)
         mel_features = torch.matmul(self.fbank, power).transpose(1, 2).clamp(min=1e-5).log()
         speaker_embed = self.eres2netv2.forward(mel_features - mel_features.mean(dim=-1, keepdim=True))
