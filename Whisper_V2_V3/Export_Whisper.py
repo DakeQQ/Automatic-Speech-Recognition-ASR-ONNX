@@ -235,7 +235,6 @@ with torch.inference_mode():
     NUM_HEAD_DE = model.model.config.decoder_attention_heads
     HEAD_DIM_EN = HIDDEN_SIZE // NUM_HEAD_EN
     HEAD_DIM_DE = HIDDEN_SIZE // NUM_HEAD_DE
-    NUM_LAYER_EN = model.config.encoder_layers
     NUM_LAYER_DE = model.config.decoder_layers
     N_MELS = model.config.num_mel_bins
     STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1
@@ -261,11 +260,11 @@ with torch.inference_mode():
     output_names = []
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     dynamic_axes = {'audio': {2: 'audio_len'}}
-    for i in range(NUM_LAYER_EN):
+    for i in range(NUM_LAYER_DE):
         name = f'en_key_{i}'
         output_names.append(name)
         dynamic_axes[name] = {2: 'signal_len'}
-    for i in range(NUM_LAYER_EN):
+    for i in range(NUM_LAYER_DE):
         name = f'en_value_{i}'
         output_names.append(name)
         dynamic_axes[name] = {1: 'signal_len'}
