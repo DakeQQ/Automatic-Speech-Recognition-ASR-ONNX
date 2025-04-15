@@ -158,7 +158,7 @@ with torch.inference_mode():
             model.decoder.layer_stack._modules[i].cross_attn.w_qs.bias.data = model.decoder.layer_stack._modules[i].cross_attn.w_qs.bias.data * scaling
 
         custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
-        fire_red_encoder = FIRE_RED_ENCODER(model, feat_extractor, custom_stft,  NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE)
+        fire_red_encoder = FIRE_RED_ENCODER(model, feat_extractor, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE)
 
         output_names = []
         audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
