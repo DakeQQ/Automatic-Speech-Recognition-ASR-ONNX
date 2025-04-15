@@ -199,7 +199,7 @@ for i in range(len(in_name_B)):
 for i in range(amount_of_outputs):
     output_names_B.append(out_name_B[i].name)
 
-generate_limit = MAX_SEQ_LEN - 3  # 3 = length of input_ids
+generate_limit = MAX_SEQ_LEN - 5  # 5 = length of inital input_ids
 num_layers = (amount_of_outputs - 1) // 2
 num_layers_2 = num_layers + num_layers
 num_layers_4 = num_layers_2 + num_layers_2
