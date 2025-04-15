@@ -21,8 +21,8 @@ DYNAMIC_AXES = True                                         # The default dynami
 INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 # N_MELS = 80                                               # Setting by whisper model config. Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
-NFFT_FBANK = 400                                            # Number of FFT components for the FBank process, edit it carefully.
+NFFT_STFT = 400                                             # Number of FFT components for the STFT process, edit it carefully.
+NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
@@ -32,10 +32,7 @@ SLIDING_WINDOW = 0                                          # Set the sliding wi
 MAX_SEQ_LEN = 64                                            # It should less than 448.
 STOP_TOKEN = [50257]                                        # 50257 is the end token for common Whisper series model.
 
-if NFFT_FBANK < NFFT_STFT:
-    NFFT_FBANK = NFFT_STFT
-if NFFT_FBANK > INPUT_AUDIO_LENGTH:
-    NFFT_FBANK = INPUT_AUDIO_LENGTH
+
 if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
 
