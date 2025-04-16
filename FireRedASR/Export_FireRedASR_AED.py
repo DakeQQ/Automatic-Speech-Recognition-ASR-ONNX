@@ -63,7 +63,7 @@ class FIRE_RED_ENCODER(torch.nn.Module):
         self.cmvn_vars = torch.from_numpy(feat_extractor.cmvn.inverse_std_variences).float().view(1, 1, -1)
         self.model.encoder.positional_encoding.pe.data = self.model.encoder.positional_encoding.pe.data.half()
         self.pre_emphasis = float(pre_emphasis)
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_fbank // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
+        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_fbank // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None, 'htk')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
         self.nfft_fbank = nfft_fbank
         if self.nfft_stft > self.nfft_fbank:
