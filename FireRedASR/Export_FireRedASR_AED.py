@@ -22,10 +22,10 @@ ORT_Accelerate_Providers = []                               # If you have accele
                                                             # else keep empty.
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
 INPUT_AUDIO_LENGTH = 160000                                 # Set for maximum input audio length.
-WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
+WINDOW_TYPE = 'hamming'                                     # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
-NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
+NFFT_FBANK = 400                                            # Number of FFT components for the FBank process, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
