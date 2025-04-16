@@ -314,7 +314,7 @@ class SANMEncoder(nn.Module):
         self.tf2torch_tensor_name_prefix_torch = tf2torch_tensor_name_prefix_torch
         self.tf2torch_tensor_name_prefix_tf = tf2torch_tensor_name_prefix_tf
 
-        positions = torch.arange(1, 501, dtype=torch.int32).unsqueeze(0)   # 501 Means max audio input = 30 seconds
+        positions = torch.arange(1, 502, dtype=torch.int32).unsqueeze(0)   # 502 Means max audio input = 30 seconds
         self.position_encoding = encode(positions, 560).half()
 
     def output_size(self) -> int:
