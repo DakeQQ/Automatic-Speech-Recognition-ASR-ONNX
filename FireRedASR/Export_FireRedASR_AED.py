@@ -18,8 +18,6 @@ onnx_model_B = "/home/DakeQQ/Downloads/FireRedASR_ONNX/FireRedASR_AED_L-Decoder.
 test_audio = ["./example/zh.mp3", "./example/zh_1.wav", "./example/zh_2.wav"]              # The test audio list.
 
 
-ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
-                                                            # else keep empty.
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
 INPUT_AUDIO_LENGTH = 160000                                 # Set for maximum input audio length.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
