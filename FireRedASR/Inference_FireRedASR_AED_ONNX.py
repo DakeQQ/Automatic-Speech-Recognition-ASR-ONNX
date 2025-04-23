@@ -75,7 +75,7 @@ session_opts.add_session_config_entry("session.intra_op.allow_spinning", "1")
 session_opts.add_session_config_entry("session.inter_op.allow_spinning", "1")
 session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
 
-ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=['CPUExecutionProvider'])
+ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
 print(f"\nUsable Providers: {ort_session_A.get_providers()}")
 shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
@@ -85,7 +85,7 @@ output_names_A = []
 for i in range(len(out_name_A)):
     output_names_A.append(out_name_A[i].name)
 
-ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=['CPUExecutionProvider'])
+ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
 in_name_B = ort_session_B.get_inputs()
 out_name_B = ort_session_B.get_outputs()
 input_names_B = []
@@ -100,6 +100,15 @@ generate_limit = MAX_SEQ_LEN - 1  # 1 = length of input_ids
 num_layers = (amount_of_outputs - 1) // 2
 num_layers_2 = num_layers + num_layers
 num_layers_4 = num_layers_2 + num_layers_2
+
+ORT_Accelerate_Providers = ort_session_B.get_providers()[0]
+print(f"\nUsable Providers: {ORT_Accelerate_Providers}")
+if "CUDAExecutionProvider" in ORT_Accelerate_Providers or "TensorrtExecutionProvider" in ORT_Accelerate_Providers:
+    device_type = 'cuda'
+elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
+    device_type = 'dml'
+else:
+    device_type = 'cpu'
 
 tokenizer = ChineseCharEnglishSpmTokenizer(download_path + "/dict.txt", download_path + "/train_bpe1000.model")
 
@@ -134,10 +143,10 @@ for language_idx, test in enumerate(test_audio):
     # Start to run FireRedASR
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[3]], dtype=np.int32), 'cpu', 0)
-    attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
-    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), 'cpu', 0)
-    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), 'cpu', 0)
+    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[3]], dtype=np.int32), device_type, DEVICE_ID)
+    attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
+    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), device_type, DEVICE_ID)
+    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), device_type, DEVICE_ID)
     layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 1
     input_feed_B = {
         in_name_B[-1].name: attention_mask,
@@ -147,11 +156,12 @@ for language_idx, test in enumerate(test_audio):
         input_feed_B[in_name_B[i].name] = past_keys_B
     for i in range(num_layers, num_layers_2):
         input_feed_B[in_name_B[i].name] = past_values_B
+      
     num_decode = 0
     save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
-        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start:slice_end], 'cpu', 0)})
+        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start:slice_end], device_type, DEVICE_ID)})
         for i in range(num_layers_2):
             input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
         decode_time = time.time()
@@ -164,7 +174,7 @@ for language_idx, test in enumerate(test_audio):
             for i in range(amount_of_outputs):
                 input_feed_B[in_name_B[i].name] = all_outputs_B[i]
             if num_decode < 2:
-                input_feed_B[in_name_B[-1].name] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), 'cpu', 0)
+                input_feed_B[in_name_B[-1].name] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
             save_token.append(max_logit_ids)
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
