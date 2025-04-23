@@ -203,7 +203,8 @@ generate_limit = MAX_SEQ_LEN - 5  # 5 = length of inital input_ids
 num_layers = (amount_of_outputs - 1) // 2
 num_layers_2 = num_layers + num_layers
 num_layers_4 = num_layers_2 + num_layers_2
-ORT_Accelerate_Providers = ort_session_A.get_providers()[0]
+
+ORT_Accelerate_Providers = ort_session_B.get_providers()[0]
 print(f"\nUsable Providers: {ORT_Accelerate_Providers}")
 if "CUDAExecutionProvider" in ORT_Accelerate_Providers or "TensorrtExecutionProvider" in ORT_Accelerate_Providers:
     device_type = 'cuda'
