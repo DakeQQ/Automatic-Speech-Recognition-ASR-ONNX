@@ -107,7 +107,7 @@ class PARAFORMER(torch.nn.Module):
         left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
-        encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
+        encoder_out = self.encoder((mel_features - self.cmvn_means) * self.cmvn_vars)
         pre_acoustic_embeds = self.calc_predictor(encoder_out)
         decoder_outs = self.cal_decoder_with_predictor(encoder_out, pre_acoustic_embeds)
         return decoder_outs.argmax(dim=-1).int()
