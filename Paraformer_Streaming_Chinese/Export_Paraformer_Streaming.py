@@ -291,12 +291,12 @@ with torch.inference_mode():
     input_names.append("start_idx")
     all_inputs.append(start_idx)
     output_names.append("end_idx")
-    input_names.append("audio")
     output_names.append("encoder_out")
     output_names.append("list_frame")
-    dynamic_axes["list_frame"] = {1: 'list_frame_len'}
     output_names.append("list_frame_len")
+    input_names.append("audio")
     all_inputs.append(audio)
+    dynamic_axes["list_frame"] = {1: 'list_frame_len'}
 
     paraformer_encoder = PARAFORMER_ENCODER(model, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE, FSMN_HIDDEN_SIZE, FEATURE_SIZE, LOOK_BACK_A, LOOK_BACK_B, LOOK_BACK_ENCODER, MAX_CONTINUE_STREAMING)
     torch.onnx.export(
@@ -361,7 +361,6 @@ with torch.inference_mode():
         name = f'out_de_value_{i}'
         output_names.append(name)
         dynamic_axes[name] = {1: 'history_len_plus'}
-
     input_names.append("encoder_out")
     all_inputs.append(encoder_out)
     input_names.append("list_frame")
