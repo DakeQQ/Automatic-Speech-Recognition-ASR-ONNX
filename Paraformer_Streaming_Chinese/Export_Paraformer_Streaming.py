@@ -29,8 +29,6 @@ SAMPLE_RATE = 16000                                         # The model paramete
 LFR_M = 7                                                   # The model parameter, do not edit the value.
 LFR_N = 6                                                   # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
-LOOK_BACK_A = 5                                             # The model parameter, edit it carefully. 5 for 8800 input audio length. 10 for 8800*2 ...
-LOOK_BACK_B = 10                                            # The model parameter, edit it carefully. 10 for 8800 input audio length. 20 for 8800*2 ...
 LOOK_BACK_ENCODER = 4                                       # The model parameter, edit it carefully.
 LOOK_BACK_DECODER = 1                                       # The model parameter, edit it carefully.
 DYNAMIC_AXES = True                                         # The dynamic_axes setting. Do not turn off for the Paraformer Streaming model.
@@ -40,6 +38,10 @@ STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after S
 LFR_LENGTH = (STFT_SIGNAL_LENGTH + LFR_N - 1) // LFR_N
 if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
+
+
+LOOK_BACK_A = LFR_LENGTH // 2                               # The model parameter, edit it carefully. 5 for 8800 input audio length. 10 for 8800*2 ...
+LOOK_BACK_B = LOOK_BACK_A + LOOK_BACK_A                     # The model parameter, edit it carefully. 10 for 8800 input audio length. 20 for 8800*2 ...
 
 
 def normalize_to_int16(audio):
