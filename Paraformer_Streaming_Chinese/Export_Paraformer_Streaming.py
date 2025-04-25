@@ -525,10 +525,10 @@ while True:
         text = ''.join(text).replace("</s>", "")
         print(f"ASR: {text} / Time Cost: {end_time - start_time:.3f} Seconds")
         if slice_end > aligned_len:
-            input_feed_A, input_feed_B, slice_start, slice_end = Initialize()
+            input_feed_A, input_feed_B, slice_start, slice_end = Initialize()  # Ready for next input audio.
             break
         for i in range(amount_of_outputs_B):
             input_feed_B[in_name_B[i].name] = all_outputs_B[i]
     elif slice_end > aligned_len:
-        input_feed_A, input_feed_B, slice_start, slice_end = Initialize()
+        input_feed_A, input_feed_B, slice_start, slice_end = Initialize()      # Ready for next input audio.
         break
