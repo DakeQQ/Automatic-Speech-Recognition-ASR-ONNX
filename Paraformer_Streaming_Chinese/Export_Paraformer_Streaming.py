@@ -180,7 +180,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
 
 
 class PARAFORMER_DECODER(torch.nn.Module):
-    def __init__(self, paraformer, look_back_B, look_back_C, look_back_de, cif_hidden_size):
+    def __init__(self, paraformer, look_back_B, look_back_C, look_back_de, cif_hidden_size, cache_layer_num_de):
         super(PARAFORMER_DECODER, self).__init__()
         self.look_back_B = look_back_B
         self.look_back_C = look_back_C
@@ -188,11 +188,11 @@ class PARAFORMER_DECODER(torch.nn.Module):
         self.decoder = paraformer.decoder
         self.cif_hidden_size = cif_hidden_size
         self.fsmn_kernal_size_minus = -torch.tensor([self.decoder.decoders._modules["0"].self_attn.kernel_size - 1], dtype=torch.int64)
-        self.cache_layer_num_de = len(self.decoder.decoders)
-        self.cache_layer_num_de_2 = self.cache_layer_num_de + self.cache_layer_num_de
-        self.save_fsmn_de = [None] * self.cache_layer_num_de
-        self.save_keys_de = [None] * self.cache_layer_num_de
-        self.save_values_de = [None] * self.cache_layer_num_de
+        self.cache_layer_num_de = cache_layer_num_de
+        self.cache_layer_num_de_2 = cache_layer_num_de + cache_layer_num_de
+        self.save_fsmn_de = [None] * cache_layer_num_de
+        self.save_keys_de = [None] * cache_layer_num_de
+        self.save_values_de = [None] * cache_layer_num_de
 
     def forward(self, *all_inputs):
         encoder_out = all_inputs[-3]
@@ -370,7 +370,7 @@ with torch.inference_mode():
     output_names.append("max_logit_ids")
     dynamic_axes["max_logit_ids"] = {-1: 'token_len'}
 
-    paraformer_decoder = PARAFORMER_DECODER(model, LOOK_BACK_B, LOOK_BACK_C, LOOK_BACK_DECODER, CIF_HIDDEN_SIZE)
+    paraformer_decoder = PARAFORMER_DECODER(model, LOOK_BACK_B, LOOK_BACK_C, LOOK_BACK_DECODER, CIF_HIDDEN_SIZE, NUM_LAYER_DE)
     torch.onnx.export(
         paraformer_decoder,
         tuple(all_inputs),
