@@ -183,6 +183,7 @@ class PARAFORMER_DECODER(torch.nn.Module):
         self.cif_hidden_size = cif_hidden_size
         self.fsmn_kernal_size_minus = -torch.tensor([self.decoder.decoders._modules["0"].self_attn.kernel_size - 1], dtype=torch.int64)
         self.cache_layer_num_de = len(self.decoder.decoders)
+        self.cache_layer_num_de_2 = self.cache_layer_num_de + self.cache_layer_num_de
         self.save_fsmn_de = [None] * self.cache_layer_num_de
         self.save_keys_de = [None] * self.cache_layer_num_de
         self.save_values_de = [None] * self.cache_layer_num_de
@@ -208,9 +209,8 @@ class PARAFORMER_DECODER(torch.nn.Module):
             k, v = torch.split(k_v, self.cif_hidden_size, dim=-1)
             k = k.reshape(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).permute(1, 2, 0)
             v = v.reshape(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).transpose(0, 1)
-            indices = layer_idx + self.cache_layer_num_de
-            k = torch.cat([all_inputs[indices], k], dim=2)
-            v = torch.cat([all_inputs[indices + self.cache_layer_num_de], v], dim=1)
+            k = torch.cat([all_inputs[layer_idx + self.cache_layer_num_de], k], dim=2)
+            v = torch.cat([all_inputs[layer_idx + self.cache_layer_num_de_2], v], dim=1)
             self.save_keys_de[layer_idx] = k[:, :, -self.look_back_de:]
             self.save_values_de[layer_idx] = v[:, -self.look_back_de:]
             q = q * (decoder_layer.src_attn.d_k ** (-0.5))
