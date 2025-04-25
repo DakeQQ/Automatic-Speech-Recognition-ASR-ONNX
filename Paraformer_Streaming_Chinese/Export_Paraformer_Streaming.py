@@ -147,9 +147,9 @@ class PARAFORMER_ENCODER(torch.nn.Module):
             frames = cif_alphas * cif_hidden * condition_A + cif_hidden * condition_B
         list_frame.append(frames)
         if self.threshold != 1.0:
-            cif_alphas = cif_alphas - self.threshold * condition_B
+            cif_alphas -= self.threshold * condition_B
         else:
-            cif_alphas = cif_alphas - condition_B
+            cif_alphas -= condition_B
         frames = frames * condition_A + cif_alphas * cif_hidden * condition_B
         for i in range(self.look_back_B):
             alpha = alphas[i]
@@ -164,9 +164,9 @@ class PARAFORMER_ENCODER(torch.nn.Module):
             list_frame.append(frames)
             cif_alphas = cif_alphas + alpha
             if self.threshold != 1.0:
-                cif_alphas = cif_alphas - self.threshold * condition_B
+                cif_alphas -= self.threshold * condition_B
             else:
-                cif_alphas = cif_alphas - condition_B
+                cif_alphas -= condition_B
             frames = frames * condition_A + cif_alphas * hidden * condition_B
         list_frame = torch.cat(list_frame, dim=1)
         cif_hidden = list_frame[:, [-1]] / cif_alphas
