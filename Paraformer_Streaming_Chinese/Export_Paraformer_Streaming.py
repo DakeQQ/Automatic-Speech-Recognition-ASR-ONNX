@@ -13,7 +13,7 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 model_path = "/home/DakeQQ/Downloads/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"      # The Paraformer-Chinese-Online-Streaming download path.
 onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_ONNX/Paraformer_Streaming_Encoder.onnx"                    # The exported onnx model path.
 onnx_model_B = "/home/DakeQQ/Downloads/Paraformer_ONNX/Paraformer_Streaming_Decoder.onnx"                    # The exported onnx model path.
-test_audio = "./zh.wav"                                                                                      # The test audio list.
+test_audio = "./zh.wav"                                                                                      # The test audio.
 
 
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
