@@ -49,7 +49,6 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 ---
 
 ## Coming Soon 🚀  
-- [Paraformer-Online](https://www.modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online/summary)
 - [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
 - [CrisperWhisper](https://github.com/nyrahealth/CrisperWhisper)
 - [Distil-Whisper-large-v3.5](https://huggingface.co/distil-whisper/distil-large-v3.5)
