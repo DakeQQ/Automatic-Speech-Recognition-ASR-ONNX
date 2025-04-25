@@ -41,7 +41,8 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
 
 
 LOOK_BACK_B = LFR_LENGTH                                    # The model parameter, edit it carefully. 10 for 8800 input audio length. 20 for 8800*2 ...
-LOOK_BACK_A = LOOK_BACK_B // 2                              # The model parameter, edit it carefully. 5 for 8800 input audio length. 10 for 8800*2 ...
+LOOK_BACK_C = LOOK_BACK_B // 2                              # The model parameter, edit it carefully. 5 for 8800 input audio length. 10 for 8800*2 ...
+LOOK_BACK_A = 0                                             # The model parameter, edit it carefully. 5 for 8800 input audio length. 10 for 8800*2 ...
 
 
 def normalize_to_int16(audio):
@@ -51,13 +52,14 @@ def normalize_to_int16(audio):
 
 
 class PARAFORMER_ENCODER(torch.nn.Module):
-    def __init__(self, paraformer, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size, fsmn_hidden_size, feature_size, look_back_A, look_back_B, look_back_en, max_continue_streaming):
+    def __init__(self, paraformer, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size, fsmn_hidden_size, feature_size, look_back_A, look_back_B, look_back_C, look_back_en, max_continue_streaming):
         super(PARAFORMER_ENCODER, self).__init__()
         self.inv_int16 = float(1.0 / 32768.0)
         self.threshold = float(1.0)
         self.look_back_A = look_back_A
         self.look_back_B = look_back_B
-        self.look_back_en = -(look_back_en * look_back_B) - self.look_back_A
+        self.look_back_C = look_back_C
+        self.look_back_en = -(look_back_en * look_back_B) - self.look_back_C
         self.encoder = paraformer.encoder
         self.predictor = paraformer.predictor
         self.stft_model = stft_model
@@ -108,7 +110,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         end_idx = start_idx + mel_features.shape[1]
         mel_features = mel_features + self.position_encoding[:, start_idx:end_idx]
         x = torch.cat([previous_mel_features, mel_features], dim=1)
-        previous_mel_features = x[:, -self.look_back_A:]
+        previous_mel_features = x[:, -(self.look_back_A + self.look_back_C):]
         for layer_idx, encoder_layer in enumerate(self.total_encoders):
             if layer_idx > 0:
                 residual = x
@@ -119,8 +121,8 @@ class PARAFORMER_ENCODER(torch.nn.Module):
             v_h = v.reshape(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             k = torch.cat([all_inputs[layer_idx], k], dim=2)
             v_h = torch.cat([all_inputs[layer_idx + self.cache_layer_num_en], v_h], dim=1)
-            self.save_keys_en[layer_idx] = k[:, :, self.look_back_en:-self.look_back_A]
-            self.save_values_en[layer_idx] = v_h[:, self.look_back_en:-self.look_back_A]
+            self.save_keys_en[layer_idx] = k[:, :, self.look_back_en:-self.look_back_C]
+            self.save_values_en[layer_idx] = v_h[:, self.look_back_en:-self.look_back_C]
             v_fsmn = torch.cat([self.pad_zeros_fsmn, v.transpose(1, 2), self.pad_zeros_fsmn], dim=-1)
             v_fsmn = encoder_layer.self_attn.fsmn_block(v_fsmn).transpose(1, 2)
             v_fsmn += v
@@ -153,7 +155,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         else:
             cif_alphas -= condition_B
         frames = frames * condition_A + cif_alphas * cif_hidden * condition_B
-        for i in range(self.look_back_B):
+        for i in range(self.look_back_A, self.look_back_A + self.look_back_B):
             alpha = alphas[i]
             threshold = self.threshold - cif_alphas
             condition_A = alpha < threshold
@@ -178,9 +180,10 @@ class PARAFORMER_ENCODER(torch.nn.Module):
 
 
 class PARAFORMER_DECODER(torch.nn.Module):
-    def __init__(self, paraformer, look_back_B, look_back_de, cif_hidden_size):
+    def __init__(self, paraformer, look_back_B, look_back_C, look_back_de, cif_hidden_size):
         super(PARAFORMER_DECODER, self).__init__()
         self.look_back_B = look_back_B
+        self.look_back_C = look_back_C
         self.look_back_de = look_back_de * look_back_B
         self.decoder = paraformer.decoder
         self.cif_hidden_size = cif_hidden_size
@@ -253,7 +256,7 @@ with torch.inference_mode():
 
     key_en = torch.zeros((NUM_HEAD_EN, HEAD_DIM_EN, 0), dtype=torch.float32)
     value_en = torch.zeros((NUM_HEAD_EN, 0, HEAD_DIM_EN), dtype=torch.float32)
-    previous_mel_features = torch.zeros((1, LOOK_BACK_A, FEATURE_SIZE), dtype=torch.float32)
+    previous_mel_features = torch.zeros((1, LOOK_BACK_A + LOOK_BACK_C, FEATURE_SIZE), dtype=torch.float32)
     cif_hidden = torch.zeros((1, 1, CIF_HIDDEN_SIZE), dtype=torch.float32)
     cif_alphas = torch.zeros(1, dtype=torch.float32)
     start_idx = torch.zeros(1, dtype=torch.int64)
@@ -298,7 +301,7 @@ with torch.inference_mode():
     all_inputs.append(audio)
     dynamic_axes["list_frame"] = {1: 'list_frame_len'}
 
-    paraformer_encoder = PARAFORMER_ENCODER(model, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE, FSMN_HIDDEN_SIZE, FEATURE_SIZE, LOOK_BACK_A, LOOK_BACK_B, LOOK_BACK_ENCODER, MAX_CONTINUE_STREAMING)
+    paraformer_encoder = PARAFORMER_ENCODER(model, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE, FSMN_HIDDEN_SIZE, FEATURE_SIZE, LOOK_BACK_A, LOOK_BACK_B, LOOK_BACK_C, LOOK_BACK_ENCODER, MAX_CONTINUE_STREAMING)
     torch.onnx.export(
         paraformer_encoder,
         tuple(all_inputs),
@@ -329,7 +332,7 @@ with torch.inference_mode():
     key_de = torch.zeros((NUM_HEAD_DE, HEAD_DIM_DE, 0), dtype=torch.float32)
     value_de = torch.zeros((NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float32)
     fsmn_de = torch.zeros((1, FSMN_HIDDEN_SIZE, FSMN_DE_PAD), dtype=torch.float32)
-    encoder_out = torch.zeros((1, LOOK_BACK_A + LFR_LENGTH, CIF_HIDDEN_SIZE), dtype=torch.float32)
+    encoder_out = torch.zeros((1, LOOK_BACK_A + LOOK_BACK_C + LFR_LENGTH, CIF_HIDDEN_SIZE), dtype=torch.float32)
     list_frame = torch.zeros((1, 1, CIF_HIDDEN_SIZE), dtype=torch.float32)
     list_frame_len = torch.tensor(1, dtype=torch.int64)
 
@@ -371,7 +374,7 @@ with torch.inference_mode():
     output_names.append("max_logit_ids")
     dynamic_axes["max_logit_ids"] = {-1: 'token_len'}
 
-    paraformer_decoder = PARAFORMER_DECODER(model, LOOK_BACK_B, LOOK_BACK_DECODER, CIF_HIDDEN_SIZE)
+    paraformer_decoder = PARAFORMER_DECODER(model, LOOK_BACK_B, LOOK_BACK_C, LOOK_BACK_DECODER, CIF_HIDDEN_SIZE)
     torch.onnx.export(
         paraformer_decoder,
         tuple(all_inputs),
@@ -534,3 +537,4 @@ while True:
     elif slice_end > aligned_len:
         input_feed_A, input_feed_B, slice_start, slice_end = Initialize()      # Ready for next input audio.
         break
+
