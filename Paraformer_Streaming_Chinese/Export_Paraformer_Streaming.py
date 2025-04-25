@@ -61,6 +61,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         self.cmvn_means = cmvn_means
         self.cmvn_vars = cmvn_vars
         self.T_lfr = lfr_len
+        self.cif_hidden_size = cif_hidden_size
         self.pre_emphasis = float(pre_emphasis)
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_fbank // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
@@ -109,7 +110,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
             if layer_idx > 0:
                 residual = x
             q_k_v = encoder_layer.self_attn.linear_q_k_v(encoder_layer.norm1(x))
-            q, k, v = torch.split(q_k_v, encoder_layer.self_attn.h * encoder_layer.self_attn.d_k, dim=-1)
+            q, k, v = torch.split(q_k_v, self.cif_hidden_size, dim=-1)
             q = q.reshape(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             k = k.reshape(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
             v_h = v.reshape(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
@@ -121,7 +122,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
             v_fsmn = encoder_layer.self_attn.fsmn_block(v_fsmn).transpose(1, 2)
             v_fsmn += v
             q = q * (encoder_layer.self_attn.d_k ** (-0.5))
-            x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, encoder_layer.self_attn.h * encoder_layer.self_attn.d_k)
+            x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, self.cif_hidden_size)
             x = encoder_layer.self_attn.linear_out(x)
             x += v_fsmn
             if layer_idx > 0:
@@ -174,11 +175,12 @@ class PARAFORMER_ENCODER(torch.nn.Module):
 
 
 class PARAFORMER_DECODER(torch.nn.Module):
-    def __init__(self, paraformer, look_back_B, look_back_de):
+    def __init__(self, paraformer, look_back_B, look_back_de, cif_hidden_size):
         super(PARAFORMER_DECODER, self).__init__()
         self.look_back_B = look_back_B
         self.look_back_de = look_back_de * look_back_B
         self.decoder = paraformer.decoder
+        self.cif_hidden_size = cif_hidden_size
         self.fsmn_kernal_size_minus = -torch.tensor([self.decoder.decoders._modules["0"].self_attn.kernel_size - 1], dtype=torch.int64)
         self.cache_layer_num_de = len(self.decoder.decoders)
         self.save_fsmn_de = [None] * self.cache_layer_num_de
@@ -203,7 +205,7 @@ class PARAFORMER_DECODER(torch.nn.Module):
             q = decoder_layer.src_attn.linear_q(decoder_layer.norm3(x))
             q = q.reshape(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).transpose(0, 1)
             k_v = decoder_layer.src_attn.linear_k_v(encoder_out)
-            k, v = torch.split(k_v, decoder_layer.src_attn.h * decoder_layer.src_attn.d_k, dim=-1)
+            k, v = torch.split(k_v, self.cif_hidden_size, dim=-1)
             k = k.reshape(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).permute(1, 2, 0)
             v = v.reshape(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).transpose(0, 1)
             indices = layer_idx + self.cache_layer_num_de
@@ -212,7 +214,7 @@ class PARAFORMER_DECODER(torch.nn.Module):
             self.save_keys_de[layer_idx] = k[:, :, -self.look_back_de:]
             self.save_values_de[layer_idx] = v[:, -self.look_back_de:]
             q = q * (decoder_layer.src_attn.d_k ** (-0.5))
-            x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v).transpose(0, 1).contiguous().view(1, -1, decoder_layer.src_attn.h * decoder_layer.src_attn.d_k)
+            x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v).transpose(0, 1).contiguous().view(1, -1, self.cif_hidden_size)
             x = decoder_layer.src_attn.linear_out(x)
             list_frame = residual + x
         x = self.decoder.decoders3[0].norm1(list_frame)
@@ -220,7 +222,6 @@ class PARAFORMER_DECODER(torch.nn.Module):
         x = self.decoder.output_layer(self.decoder.after_norm(x))
         max_logit_ids = torch.argmax(x, dim=-1, keepdim=False).int()
         return *self.save_fsmn_de, *self.save_keys_de, *self.save_values_de, max_logit_ids
-
 
 
 print('\nExport Encoder Part...\n')
@@ -259,7 +260,6 @@ with torch.inference_mode():
     all_inputs = []
     output_names = []
     dynamic_axes = {}
-    # dynamic_axes = {'audio': {2: 'audio_len'}}
     for i in range(NUM_LAYER_EN):
         name = f'in_en_key_{i}'
         input_names.append(name)
@@ -369,7 +369,7 @@ with torch.inference_mode():
     output_names.append("max_logit_ids")
     dynamic_axes["max_logit_ids"] = {-1: 'token_len'}
 
-    paraformer_decoder = PARAFORMER_DECODER(model, LOOK_BACK_B, LOOK_BACK_DECODER)
+    paraformer_decoder = PARAFORMER_DECODER(model, LOOK_BACK_B, LOOK_BACK_DECODER, CIF_HIDDEN_SIZE)
     torch.onnx.export(
         paraformer_decoder,
         tuple(all_inputs),
