@@ -273,7 +273,6 @@ with torch.inference_mode():
         dynamic_axes[name] = {2: 'history_len'}
         name = f'out_en_key_{i}'
         output_names.append(name)
-        dynamic_axes[name] = {2: 'history_len_plus'}
     for i in range(NUM_LAYER_EN):
         name = f'in_en_value_{i}'
         input_names.append(name)
@@ -281,7 +280,6 @@ with torch.inference_mode():
         dynamic_axes[name] = {1: 'history_len'}
         name = f'out_en_value_{i}'
         output_names.append(name)
-        dynamic_axes[name] = {1: 'history_len_plus'}
     input_names.append("in_previous_mel_features")
     all_inputs.append(previous_mel_features)
     output_names.append("out_previous_mel_features")
@@ -355,7 +353,6 @@ with torch.inference_mode():
         dynamic_axes[name] = {2: 'history_len'}
         name = f'out_de_key_{i}'
         output_names.append(name)
-        dynamic_axes[name] = {2: 'history_len_plus'}
     for i in range(NUM_LAYER_DE):
         name = f'in_de_value_{i}'
         input_names.append(name)
@@ -363,7 +360,6 @@ with torch.inference_mode():
         dynamic_axes[name] = {1: 'history_len'}
         name = f'out_de_value_{i}'
         output_names.append(name)
-        dynamic_axes[name] = {1: 'history_len_plus'}
     input_names.append("encoder_out")
     all_inputs.append(encoder_out)
     input_names.append("list_frame")
