@@ -18,6 +18,7 @@ test_audio = "./zh.wav"                                                         
 
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                                             # else keep empty.
+MAX_CONTINUE_STREAMING = 503                                # 503 = Max 30 seconds streaming audio input. # 1004 = Max 60 seconds streaming audio input.
 INPUT_AUDIO_LENGTH = 8800                                   # The fixed input audio segment length, edit it carefully.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
@@ -48,7 +49,7 @@ def normalize_to_int16(audio):
 
 
 class PARAFORMER_ENCODER(torch.nn.Module):
-    def __init__(self, paraformer, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size, fsmn_hidden_size, feature_size, look_back_A, look_back_B, look_back_en):
+    def __init__(self, paraformer, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size, fsmn_hidden_size, feature_size, look_back_A, look_back_B, look_back_en, max_continue_streaming):
         super(PARAFORMER_ENCODER, self).__init__()
         self.inv_int16 = float(1.0 / 32768.0)
         self.threshold = float(1.0)
@@ -80,7 +81,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         self.save_values_en = [None] * self.cache_layer_num_en
         self.pad_zeros_predictor = torch.zeros((1, cif_hidden_size, 1), dtype=torch.float32)
         self.pad_zeros_fsmn = torch.zeros((1, fsmn_hidden_size, self.encoder.encoders0._modules["0"].self_attn.pad_fn.padding[0]), dtype=torch.float32)
-        positions = torch.arange(1, 503, dtype=torch.int32).unsqueeze(0)  # 503 = Max 30 seconds audio
+        positions = torch.arange(1, max_continue_streaming, dtype=torch.int32).unsqueeze(0)
         self.position_encoding = self.encoder.embed.encode(positions, feature_size).half()
 
     def forward(self, *all_inputs):
@@ -295,7 +296,7 @@ with torch.inference_mode():
     output_names.append("list_frame_len")
     all_inputs.append(audio)
 
-    paraformer_encoder = PARAFORMER_ENCODER(model, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE, FSMN_HIDDEN_SIZE, FEATURE_SIZE, LOOK_BACK_A, LOOK_BACK_B, LOOK_BACK_ENCODER)
+    paraformer_encoder = PARAFORMER_ENCODER(model, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE, FSMN_HIDDEN_SIZE, FEATURE_SIZE, LOOK_BACK_A, LOOK_BACK_B, LOOK_BACK_ENCODER, MAX_CONTINUE_STREAMING)
     torch.onnx.export(
         paraformer_encoder,
         tuple(all_inputs),
