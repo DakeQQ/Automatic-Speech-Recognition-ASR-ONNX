@@ -458,10 +458,10 @@ aligned_len = audio.shape[-1]
 
 
 # Initialize
+amount_of_outputs_B -= 1   # The last 1 is max_logit_ids; pass it to the tokenizer.
+num_layer_de = amount_of_outputs_B // 3
 num_layer_en = (amount_of_outputs_A - 7) // 2
-num_layer_de = (amount_of_outputs_B - 1) // 3
-amount_of_outputs_B -= 1
-amount_of_outputs_A -= 3
+amount_of_outputs_A -= 3   # The last 3 are for model_B.
 
 in_en_value_start = num_layer_en
 in_previous_mel_features_start = in_en_value_start + num_layer_en
