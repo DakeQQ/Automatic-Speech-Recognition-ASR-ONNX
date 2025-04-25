@@ -108,7 +108,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
         mel_features = (mel_features - self.cmvn_means) * self.cmvn_vars
         end_idx = start_idx + mel_features.shape[1]
-        mel_features = mel_features + self.position_encoding[:, start_idx:end_idx]
+        mel_features += self.position_encoding[:, start_idx:end_idx]
         x = torch.cat([previous_mel_features, mel_features], dim=1)
         previous_mel_features = x[:, -(self.look_back_A + self.look_back_C):]
         for layer_idx, encoder_layer in enumerate(self.total_encoders):
