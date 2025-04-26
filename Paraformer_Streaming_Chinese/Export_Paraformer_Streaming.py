@@ -87,6 +87,10 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         self.pad_zeros_fsmn = torch.zeros((1, fsmn_hidden_size, self.encoder.encoders0._modules["0"].self_attn.pad_fn.padding[0]), dtype=torch.float32)
         positions = torch.arange(1, max_continue_streaming, dtype=torch.int32).unsqueeze(0)
         self.position_encoding = self.encoder.embed.encode(positions, feature_size).half()
+        factor = self.encoder.encoders._modules["0"].self_attn.d_k ** (-0.5)
+        for encoder_layer in self.total_encoders:
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size] *= factor
 
     def forward(self, *all_inputs):
         previous_mel_features = all_inputs[-5]
@@ -126,7 +130,6 @@ class PARAFORMER_ENCODER(torch.nn.Module):
             v_fsmn = torch.cat([self.pad_zeros_fsmn, v.transpose(1, 2), self.pad_zeros_fsmn], dim=-1)
             v_fsmn = encoder_layer.self_attn.fsmn_block(v_fsmn).transpose(1, 2)
             v_fsmn += v
-            q = q * (encoder_layer.self_attn.d_k ** (-0.5))
             x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, self.cif_hidden_size)
             x = encoder_layer.self_attn.linear_out(x)
             x += v_fsmn
@@ -193,6 +196,10 @@ class PARAFORMER_DECODER(torch.nn.Module):
         self.save_fsmn_de = [None] * cache_layer_num_de
         self.save_keys_de = [None] * cache_layer_num_de
         self.save_values_de = [None] * cache_layer_num_de
+        factor = self.decoder.decoders._modules["0"].src_attn.d_k ** (-0.5)
+        for decoder_layer in self.decoder.decoders:
+            decoder_layer.src_attn.linear_q.weight.data *= factor
+            decoder_layer.src_attn.linear_q.bias.data *= factor
 
     def forward(self, *all_inputs):
         encoder_out = all_inputs[-3]
@@ -219,7 +226,6 @@ class PARAFORMER_DECODER(torch.nn.Module):
             v = torch.cat([all_inputs[layer_idx + self.cache_layer_num_de_2], v], dim=1)
             self.save_keys_de[layer_idx] = k[:, :, -self.look_back_de:]
             self.save_values_de[layer_idx] = v[:, -self.look_back_de:]
-            q = q * (decoder_layer.src_attn.d_k ** (-0.5))
             x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v).transpose(0, 1).contiguous().view(1, -1, self.cif_hidden_size)
             x = decoder_layer.src_attn.linear_out(x)
             list_frame = residual + x
@@ -533,4 +539,3 @@ while True:
     elif slice_end > aligned_len:
         input_feed_A, input_feed_B, slice_start, slice_end = Initialize()      # Ready for next input audio.
         break
-
