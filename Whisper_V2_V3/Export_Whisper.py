@@ -14,7 +14,10 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 model_path = "/home/DakeQQ/Downloads/whisper-large-v3"                                            # The Whisper project download path.
 onnx_model_A = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Encoder.onnx"                         # The exported onnx model path.
 onnx_model_B = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Decoder.onnx"                         # The exported onnx model path.
-test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./example/ko.mp3"]     # The test audio list.
+if "3.5" in model_path:
+    test_audio = ["./example/en.mp3"]                                                                 # The test audio list.
+else:
+    test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/ja.mp3", "./example/ko.mp3"]     # The test audio list.
 
 
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Whisper series models only support dynamic_axes due to their transformer structure.
@@ -41,7 +44,7 @@ shutil.copyfile('./modeling_modified/modeling_whisper.py', site.getsitepackages(
 from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
 
 
-if "v3" in model_path or "V3" in model_path:
+if "v3" in model_path or "V3" in model_path or "CrisperWhisper" in model_path or "crisperwhisper" in model_path:
     is_v3 = True
     print("\nExport the Whisper-V3")
 else:
@@ -480,4 +483,3 @@ for language_idx, test in enumerate(test_audio):
     )
     print(f"\nASR Result:\n{text}\n\nTime Cost: {(count_time - start_time):.3f} Seconds\n\nDecode Speed: {num_decode / (count_time - decode_time):.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
-
