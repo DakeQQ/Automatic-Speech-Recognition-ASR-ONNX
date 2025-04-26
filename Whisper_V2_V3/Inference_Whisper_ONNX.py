@@ -53,7 +53,7 @@ else:
 
 
 
-if "v3" in download_path or "V3" in download_path:
+if "v3" in model_path or "V3" in model_path or "CrisperWhisper" in model_path or "crisperwhisper" in model_path:
     is_v3 = True
 else:
     is_v3 = False
