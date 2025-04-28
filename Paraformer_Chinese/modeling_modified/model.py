@@ -245,8 +245,8 @@ class Paraformer(torch.nn.Module):
         encoder_out = self.encoder(speech)
         return encoder_out
 
-    def calc_predictor(self, encoder_out, encoder_out_lens=None):
-        return self.predictor(encoder_out, None, None, ignore_id=self.ignore_id)
+    def calc_predictor(self, encoder_out, hidden_len, encoder_out_lens=None):
+        return self.predictor(encoder_out, hidden_len, None, None, ignore_id=self.ignore_id)
 
     def cal_decoder_with_predictor(self, encoder_out, sematic_embeds):
         return self.decoder(encoder_out, sematic_embeds)
