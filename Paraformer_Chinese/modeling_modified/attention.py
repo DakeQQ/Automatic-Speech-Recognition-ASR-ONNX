@@ -203,14 +203,15 @@ class MultiHeadedAttentionSANM(nn.Module):
             left_padding = left_padding + sanm_shfit
         right_padding = kernel_size - 1 - left_padding
         self.pad_fn = nn.ConstantPad1d((left_padding, right_padding), 0.0)
-        self.scale =  self.d_k ** (-0.25)
         self.h_d_k = self.h * self.d_k
+        self.pad_zeros = torch.zeros((1, self.h_d_k, left_padding), dtype=torch.float32)
+
 
     def forward_fsmn(self, inputs, mask=None, mask_shfit_chunk=None):
         if inputs.dim() == 2:
             inputs = inputs.unsqueeze(0)
         x = inputs.transpose(1, 2)
-        x = self.pad_fn(x)
+        x = torch.cat([self.pad_zeros, x, self.pad_zeros], dim=-1)
         x = self.fsmn_block(x)
         x = x.transpose(1, 2)
         x += inputs
@@ -219,15 +220,15 @@ class MultiHeadedAttentionSANM(nn.Module):
     def forward_qkv(self, x):
         q_k_v = self.linear_q_k_v(x)
         q, k, v = torch.split(q_k_v, int(self.h * self.d_k), dim=-1)
-        q_h = torch.reshape(q, (1, -1, self.h, self.d_k)).transpose(1, 2)
-        k_h = torch.reshape(k, (1, -1, self.h, self.d_k)).permute(0, 2, 3, 1)
-        v_h = torch.reshape(v, (1, -1, self.h, self.d_k)).transpose(1, 2)
+        q_h = torch.reshape(q, (-1, self.h, self.d_k)).transpose(0, 1)
+        k_h = torch.reshape(k, (-1, self.h, self.d_k)).permute(1, 2, 0)
+        v_h = torch.reshape(v, (-1, self.h, self.d_k)).transpose(0, 1)
         return q_h, k_h, v_h, v
 
     def forward_attention(self, value, scores, mask, mask_att_chunk_encoder=None):
         attn = torch.softmax(scores, dim=-1)
         attn = torch.matmul(attn, value)  # (batch, head, time1, d_k)
-        attn = attn.transpose(1, 2).contiguous().view(1, -1, self.h_d_k)  # (batch, time1, d_model)
+        attn = attn.transpose(0, 1).contiguous().view(1, -1, self.h_d_k)  # (batch, time1, d_model)
         return self.linear_out(attn)  # (batch, time1, d_model)
 
     def forward(self, x, mask=None, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
@@ -246,7 +247,7 @@ class MultiHeadedAttentionSANM(nn.Module):
         """
         q_h, k_h, v_h, v = self.forward_qkv(x)
         fsmn_memory = self.forward_fsmn(v, mask, mask_shfit_chunk)
-        scores = torch.matmul(q_h * self.scale, k_h * self.scale)
+        scores = torch.matmul(q_h, k_h)
         att_outs = self.forward_attention(v_h, scores, mask, mask_att_chunk_encoder)
         return att_outs + fsmn_memory
 
