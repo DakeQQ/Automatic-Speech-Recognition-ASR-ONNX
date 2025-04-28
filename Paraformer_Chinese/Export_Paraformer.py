@@ -21,7 +21,7 @@ test_audio = "./zh.mp3"                                                         
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                                             # else keep empty.
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length.
+INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length. Must less than 480000 (30 seconds)
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
@@ -58,7 +58,7 @@ def normalize_to_int16(audio):
 
 
 class PARAFORMER(torch.nn.Module):
-    def __init__(self, paraformer, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars):
+    def __init__(self, paraformer, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size):
         super(PARAFORMER, self).__init__()
         self.encoder = paraformer.encoder
         self.calc_predictor = paraformer.calc_predictor
@@ -80,6 +80,11 @@ class PARAFORMER(torch.nn.Module):
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
         self.inv_int16 = float(1.0 / 32768.0)
+        factor = self.encoder.encoders._modules["0"].self_attn.d_k ** (-0.5)
+        total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders)
+        for encoder_layer in total_encoders:
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size] *= factor
 
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
@@ -94,8 +99,8 @@ class PARAFORMER(torch.nn.Module):
         left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
-        encoder_out = self.encoder((mel_features - self.cmvn_means) * self.cmvn_vars)
-        pre_acoustic_embeds = self.calc_predictor(encoder_out)
+        encoder_out = self.encoder((mel_features - self.cmvn_means) * self.cmvn_vars, self.T_lfr)
+        pre_acoustic_embeds = self.calc_predictor(encoder_out, self.T_lfr + 1)
         decoder_outs = self.cal_decoder_with_predictor(encoder_out, pre_acoustic_embeds)
         return decoder_outs.argmax(dim=-1).int()
 
@@ -111,8 +116,9 @@ with torch.inference_mode():
     encoder_output_size_factor = (model.model.encoder.output_size()) ** 0.5
     CMVN_MEANS = model.kwargs['frontend'].cmvn[0].repeat(1, 1, 1)
     CMVN_VARS = (model.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
+    CIF_HIDDEN_SIZE = model.model.encoder.encoders0._modules["0"].size
     tokenizer = model.kwargs['tokenizer']
-    paraformer = PARAFORMER(model.model.eval(), custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS)
+    paraformer = PARAFORMER(model.model.eval(), custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     torch.onnx.export(
         paraformer,
