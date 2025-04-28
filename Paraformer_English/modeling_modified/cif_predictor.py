@@ -204,11 +204,13 @@ class CifPredictorV2(torch.nn.Module):
         self.tail_threshold_expand = torch.reshape(torch.tensor([tail_threshold], dtype=torch.float32), (1, 1))
         self.zeros = torch.zeros((1, 1, idim), dtype=torch.float32)
 
-        self.fires = torch.zeros(1, 336, dtype=torch.float16)  # 336 Means max audio input = 20 seconds
+        self.fires = torch.zeros(1, 502, dtype=torch.float16)  # 502 Means max audio input = 30 seconds
+        self.pad_zeros = torch.zeros((1, self.cif_output.in_features, 1), dtype=torch.float32)
 
     def forward(
         self,
         hidden,
+        hidden_len,
         target_label=None,
         mask=None,
         ignore_id=-1,
@@ -217,16 +219,16 @@ class CifPredictorV2(torch.nn.Module):
     ):
         h = hidden
         context = h.transpose(1, 2)
-        queries = self.pad(context)
+        queries = torch.cat([self.pad_zeros, context, self.pad_zeros], dim=-1)
         output = torch.relu(self.cif_conv1d(queries))
         output = output.transpose(1, 2)
 
         output = self.cif_output(output)
         alphas = torch.sigmoid(output)
-        alphas = torch.nn.functional.relu(alphas * self.smooth_factor - self.noise_threshold)
+        alphas = torch.nn.functional.relu(alphas)
         alphas = alphas.squeeze(-1)
         hidden, alphas = self.tail_process_fn(hidden, alphas, None, mask=None)
-        acoustic_embeds = cif_v1(hidden, alphas, self.threshold, self.fires)
+        acoustic_embeds = cif_v1(hidden, alphas, self.threshold, self.fires, hidden_len, self.cif_output.in_features)
 
         return acoustic_embeds
 
@@ -622,8 +624,8 @@ def cif(hidden, alphas, threshold):
     return torch.stack(list_ls, 0), fires
 
 
-def cif_wo_hidden_v1(alphas, threshold=None, fires=None, return_fire_idxs=False):
-    fires = fires[:, :alphas.shape[-1]].float()
+def cif_wo_hidden_v1(alphas, hidden_len, threshold=None, fires=None, return_fire_idxs=False):
+    fires = fires[:, :hidden_len].float()
     prefix_sum = torch.cumsum(alphas, dim=-1, dtype=torch.float32)
     prefix_sum_floor = torch.floor(prefix_sum)
     dislocation_prefix_sum = torch.roll(prefix_sum, 1, dims=1)
@@ -636,9 +638,8 @@ def cif_wo_hidden_v1(alphas, threshold=None, fires=None, return_fire_idxs=False)
     return fires, fire_idxs
 
 
-def cif_v1(hidden, alphas, threshold, fires):
-    fires, fire_idxs = cif_wo_hidden_v1(alphas, threshold, fires, return_fire_idxs=True)
-    hidden_size = hidden.shape[-1]
+def cif_v1(hidden, alphas, threshold, fires, hidden_len, hidden_size):
+    fires, fire_idxs = cif_wo_hidden_v1(alphas, hidden_len, threshold, fires, return_fire_idxs=True)
     prefix_sum_hidden = torch.cumsum(alphas.unsqueeze(-1).repeat((1, 1, hidden_size)) * hidden, dim=1)
     frames = prefix_sum_hidden[fire_idxs]
     shift_frames = torch.roll(frames, 1, dims=0)
