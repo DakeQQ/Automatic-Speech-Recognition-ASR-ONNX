@@ -18,7 +18,7 @@ test_audio = "./zh.wav"                                                         
 
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                                             # else keep empty.
-MAX_CONTINUE_STREAMING = 503                                # 503 = Max 30 seconds streaming audio input. # 1005 = Max 60 seconds streaming audio input.
+MAX_CONTINUE_STREAMING = 502                                # 502 = Max 30 seconds streaming audio input. # 1003 = Max 60 seconds streaming audio input.
 INPUT_AUDIO_LENGTH = 8800                                   # The fixed input audio segment length, edit it carefully.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
