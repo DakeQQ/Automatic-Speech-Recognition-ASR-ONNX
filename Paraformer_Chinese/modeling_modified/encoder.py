@@ -323,11 +323,12 @@ class SANMEncoder(nn.Module):
     def forward(
         self,
         xs_pad: torch.Tensor,
+        x_len,
         ilens: torch.Tensor = None,
         prev_states: torch.Tensor = None,
         ctc: CTC = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.after_norm(self.encoders(self.encoders0(xs_pad + self.position_encoding[:, :xs_pad.shape[1], :].float(), None), None))
+        return self.after_norm(self.encoders(self.encoders0(xs_pad + self.position_encoding[:, :x_len, :].float(), None), None))
 
     def _add_overlap_chunk(self, feats: np.ndarray, cache: dict = {}):
         if len(cache) == 0:
