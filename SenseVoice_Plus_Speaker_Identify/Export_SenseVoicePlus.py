@@ -56,7 +56,7 @@ def normalize_to_int16(audio):
 
 
 class SENSE_VOICE_PLUS(torch.nn.Module):
-    def __init__(self, sense_voice, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, eres2netv2, use_emo):
+    def __init__(self, sense_voice, stft_model, cif_hidden_size, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, eres2netv2, use_emo):
         super(SENSE_VOICE_PLUS, self).__init__()
         self.eres2netv2 = eres2netv2
         self.embed_sys = sense_voice.embed
@@ -82,6 +82,11 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
         self.inv_int16 = float(1.0 / 32768.0)
+        factor = self.encoder.encoders._modules["0"].self_attn.d_k ** (-0.5)
+        total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders)
+        for encoder_layer in total_encoders:
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size] *= factor
   
     def forward(self, audio, language_idx, saved_embed, saved_dot, num_speakers):
         audio = audio.float() * self.inv_int16 
@@ -131,13 +136,14 @@ with torch.inference_mode():
     model_asr.model.embed.weight.data *= encoder_output_size_factor
     CMVN_MEANS = model_asr.kwargs['frontend'].cmvn[0].repeat(1, 1, 1)
     CMVN_VARS = (model_asr.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
+    CIF_HIDDEN_SIZE = model.model.encoder.encoders0._modules["0"].size
     tokenizer = model_asr.kwargs['tokenizer']
     model_speaker = Model.from_pretrained(
         model_name_or_path=model_path_speaker,
         disable_update=True,
         device="cpu",
     ).embedding_model.eval()
-    sense_voice_plus = SENSE_VOICE_PLUS(model_asr.model.eval(), custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, model_speaker, USE_EMOTION)
+    sense_voice_plus = SENSE_VOICE_PLUS(model_asr.model.eval(), custom_stft, CIF_HIDDEN_SIZE, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, model_speaker, USE_EMOTION)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     language_idx = torch.tensor([0], dtype=torch.int32)
     saved_embed = torch.ones((HIDDEN_SIZE, MAX_SPEAKERS), dtype=torch.float32)
