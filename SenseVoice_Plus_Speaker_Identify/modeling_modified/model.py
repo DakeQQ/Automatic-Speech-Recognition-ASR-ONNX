@@ -108,26 +108,25 @@ class MultiHeadedAttentionSANM(nn.Module):
             left_padding = left_padding + sanm_shfit
         right_padding = kernel_size - 1 - left_padding
         self.pad_fn = nn.ConstantPad1d((left_padding, right_padding), 0.0)
-
         self.split_factor = int(self.h * self.d_k)
-        self.d_k_factor = self.d_k ** (-0.25)
+        self.pad_zeros = torch.zeros((1, self.split_factor, left_padding), dtype=torch.float32)
 
     def forward_fsmn(self, inputs, mask=None, mask_shfit_chunk=None):
-        return self.fsmn_block(self.pad_fn(inputs.transpose(1, 2))).transpose(1, 2) + inputs
+        return self.fsmn_block(torch.cat([self.pad_zeros, inputs.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + inputs
 
     def forward_qkv(self, x):
         q, k, v = torch.split(self.linear_q_k_v(x), self.split_factor, dim=-1)
-        q_h = torch.reshape(q, (1, -1, self.h, self.d_k)).transpose(1, 2)
-        k_h = torch.reshape(k, (1, -1, self.h, self.d_k)).permute(0, 2, 3, 1)
-        v_h = torch.reshape(v, (1, -1, self.h, self.d_k)).transpose(1, 2)
+        q_h = torch.reshape(q, (-1, self.h, self.d_k)).transpose(0, 1)
+        k_h = torch.reshape(k, (-1, self.h, self.d_k)).permute(1, 2, 0)
+        v_h = torch.reshape(v, (-1, self.h, self.d_k)).transpose(0, 1)
         return q_h, k_h, v_h, v
 
     def forward_attention(self, value, scores, mask=None, mask_att_chunk_encoder=None):
-        return self.linear_out(torch.matmul(torch.softmax(scores, dim=-1), value).transpose(1, 2).contiguous().view(1, -1, self.split_factor))
+        return self.linear_out(torch.matmul(torch.softmax(scores, dim=-1), value).transpose(0, 1).contiguous().view(1, -1, self.split_factor))
 
     def forward(self, x, mask=None, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
         q_h, k_h, v_h, v = self.forward_qkv(x)
-        return self.forward_attention(v_h, torch.matmul(q_h * self.d_k_factor, k_h * self.d_k_factor)) + self.forward_fsmn(v)
+        return self.forward_attention(v_h, torch.matmul(q_h, k_h)) + self.forward_fsmn(v)
 
     def forward_chunk(self, x, cache=None, chunk_size=None, look_back=0):
         """Compute scaled dot product attention.
