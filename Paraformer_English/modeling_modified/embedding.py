@@ -380,12 +380,11 @@ class StreamPositionalEncoding(torch.nn.Module):
         return self.dropout(x)
 
 
-class (torch.nn.Module):
+class SinusoidalPositionEncoder(torch.nn.Module):
     """ """
 
     def __int__(self, d_model=80, dropout_rate=0.1):
-        positions = torch.arange(1, 385, dtype=torch.int32).unsqueeze(0)
-        self.position_encoding = self.encode(positions, 560).half()
+        pass
 
     def encode(
         self, positions: torch.Tensor = None, depth: int = None, dtype: torch.dtype = torch.float32
@@ -410,7 +409,7 @@ class (torch.nn.Module):
         return x + self.position_encoding[:, :x.shape[1], :].float()
 
 
-class Stream(torch.nn.Module):
+class StreamSinusoidalPositionEncoder(torch.nn.Module):
     """ """
 
     def __int__(self, d_model=80, dropout_rate=0.1):
