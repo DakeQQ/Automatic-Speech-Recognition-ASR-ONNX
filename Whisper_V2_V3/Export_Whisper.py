@@ -458,7 +458,6 @@ for language_idx, test in enumerate(test_audio):
         all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start:slice_end], 'cpu', 0)})
         for i in range(num_layers_2):
             input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
-        decode_time = time.time() 
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
             max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])[0][0]
@@ -472,7 +471,7 @@ for language_idx, test in enumerate(test_audio):
             save_token.append(max_logit_ids)
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
-    count_time = time.time()
+    count_time = time.time() - start_time
     save_token_array = remove_repeated_parts(save_token, 3)  # To handle "over-talking".
     text, _ = tokenizer._decode_asr(
         [{
@@ -482,5 +481,5 @@ for language_idx, test in enumerate(test_audio):
         return_language=None,
         time_precision=0
     )
-    print(f"\nASR Result:\n{text}\n\nTime Cost: {(count_time - start_time):.3f} Seconds\n\nDecode Speed: {num_decode / (count_time - decode_time):.3f} tokens/s")
+    print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
