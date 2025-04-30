@@ -326,11 +326,12 @@ for language_idx, test in enumerate(test_audio):
         num_windows = int(np.ceil((audio_len - INPUT_AUDIO_LENGTH) / stride_step)) + 1
         total_length_needed = (num_windows - 1) * stride_step + INPUT_AUDIO_LENGTH
         pad_amount = total_length_needed - audio_len
-        final_slice = audio[:, :, -pad_amount:]
+        final_slice = audio[:, :, -pad_amount:].astype(np.float32)
         white_noise = (np.sqrt(np.mean(final_slice * final_slice)) * np.random.normal(loc=0.0, scale=1.0, size=(1, 1, pad_amount))).astype(audio.dtype)
         audio = np.concatenate((audio, white_noise), axis=-1)
     elif audio_len < INPUT_AUDIO_LENGTH:
-        white_noise = (np.sqrt(np.mean(audio * audio)) * np.random.normal(loc=0.0, scale=1.0, size=(1, 1, INPUT_AUDIO_LENGTH - audio_len))).astype(audio.dtype)
+        audio_float = audio.astype(np.float32)
+        white_noise = (np.sqrt(np.mean(audio_float * audio_float)) * np.random.normal(loc=0.0, scale=1.0, size=(1, 1, INPUT_AUDIO_LENGTH - audio_len))).astype(audio.dtype)
         audio = np.concatenate((audio, white_noise), axis=-1)
     aligned_len = audio.shape[-1]
 
@@ -357,7 +358,6 @@ for language_idx, test in enumerate(test_audio):
         all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start:slice_end], 'cpu', 0)})
         for i in range(num_layers_2):
             input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
-        decode_time = time.time()
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
             max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])
@@ -371,7 +371,7 @@ for language_idx, test in enumerate(test_audio):
             save_token.append(max_logit_ids)
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
-    count_time = time.time()
+    count_time = time.time() - start_time
     text = ("".join([tokenizer.dict[int(id[0][0])] for id in save_token])).replace(tokenizer.SPM_SPACE, ' ').strip()
-    print(f"\nASR Result:\n{text}\n\nTime Cost: {(count_time - start_time):.3f} Seconds\n\nDecode Speed: {num_decode / (count_time - decode_time):.3f} tokens/s")
+    print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
