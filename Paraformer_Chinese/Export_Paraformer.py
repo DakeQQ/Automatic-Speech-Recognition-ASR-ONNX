@@ -196,19 +196,18 @@ aligned_len = audio.shape[-1]
 # Start to run Paraformer
 slice_start = 0
 slice_end = INPUT_AUDIO_LENGTH
+text = np.array([], dtype=np.str_)
+start_time = time.time()
 while slice_end <= aligned_len:
-    start_time = time.time()
     token_ids = ort_session_A.run(
         [out_name_A0],
         {
             in_name_A0: audio[:, :, slice_start: slice_end],
         })[0]
-    end_time = time.time()
-    text = tokenizer[token_ids[0]].tolist()
-    if '</s>' in text:
-        text.remove('</s>')
-    text = ''.join(text)
+    text = np.concatenate((text, tokenizer[token_ids[0]]))
     slice_start += stride_step
     slice_end = slice_start + INPUT_AUDIO_LENGTH
-    print(f"\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
-    print("----------------------------------------------------------------------------------------------------------")
+end_time = time.time()
+text = "".join(text).replace("</s>", "")
+print(f"\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
+print("----------------------------------------------------------------------------------------------------------")
