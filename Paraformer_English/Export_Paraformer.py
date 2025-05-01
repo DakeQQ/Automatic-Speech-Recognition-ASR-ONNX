@@ -51,19 +51,6 @@ shutil.copyfile('./modeling_modified/embedding.py', python_package_path + '/funa
 from funasr import AutoModel
 
 
-def handle_sentence(text_list):
-    do_again = False
-    for i in range(len(text_list) - 1):
-        if text_list[i]:
-            if "@" in text_list[i]:
-                text_list[i] = text_list[i].replace("@", "") + text_list[i + 1]
-                text_list[i + 1] = ""
-            if "@" in text_list[i]:
-                do_again = True
-    text_list = [word for word in text_list if word != '']
-    return text_list, do_again
-
-
 def normalize_to_int16(audio):
     max_val = np.max(np.abs(audio))
     scaling_factor = 32767.0 / max_val if max_val > 0 else 1.0
@@ -209,22 +196,18 @@ aligned_len = audio.shape[-1]
 # Start to run Paraformer
 slice_start = 0
 slice_end = INPUT_AUDIO_LENGTH
+text = np.array([], dtype=np.str_)
+start_time = time.time()
 while slice_end <= aligned_len:
-    start_time = time.time()
     token_ids = ort_session_A.run(
         [out_name_A0],
         {
             in_name_A0: audio[:, :, slice_start: slice_end],
         })[0]
-    end_time = time.time()
-    text = tokenizer[token_ids[0]].tolist()
-    if '</s>' in text:
-        text.remove('</s>')
-    text, do_again = handle_sentence(text)
-    while do_again:
-        text, do_again = handle_sentence(text)
-    text = ' '.join(text)
+    text = np.concatenate((text, tokenizer[token_ids[0]]))
     slice_start += stride_step
     slice_end = slice_start + INPUT_AUDIO_LENGTH
-    print(f"\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
-    print("----------------------------------------------------------------------------------------------------------")
+text = ' '.join(text).replace("</s>", "").replace("@@ ", "")
+end_time = time.time()
+print(f"\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
+print("----------------------------------------------------------------------------------------------------------")
