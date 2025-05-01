@@ -251,7 +251,7 @@ for language_idx, test in enumerate(test_audio):
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
     input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[50258, get_language_id(language), get_task_id(TASK, True)[0]]], dtype=np.int32), device_type, DEVICE_ID)
-    attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
+    attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
     past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), device_type, DEVICE_ID)
     past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), device_type, DEVICE_ID)
 
