@@ -201,17 +201,18 @@ for language_idx, test in enumerate(test_audio):
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
     language_idx = np.array([language_idx + 1], dtype=np.int32)
+    text = ""
+    start_time = time.time()
     while slice_end <= aligned_len:
-        start_time = time.time()
         token_ids = ort_session_A.run(
             [out_name_A0],
             {
                 in_name_A0: audio[:, :, slice_start: slice_end],
                 in_name_A1: language_idx
             })[0]
-        end_time = time.time()
-        text = tokenizer.decode(token_ids.tolist())[0]
+        text += tokenizer.decode(token_ids.tolist())[0]
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
-        print(f"\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
-        print("----------------------------------------------------------------------------------------------------------")
+    end_time = time.time()
+    print(f"\nASR Result:\n{text}\n\nTime Cost: {end_time - start_time:.3f} Seconds\n")
+    print("----------------------------------------------------------------------------------------------------------")
