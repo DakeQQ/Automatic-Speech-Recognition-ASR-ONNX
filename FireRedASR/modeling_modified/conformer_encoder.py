@@ -79,6 +79,7 @@ class Conv2dSubsampling(nn.Module):
         )
         subsample_idim = ((idim - 1) // 2 - 1) // 2
         self.out = nn.Linear(out_channels * subsample_idim, d_model)
+        self.out_size = self.out.in_features
 
         self.subsampling = 4
         left_context = right_context = 3  # both exclude currect frame
@@ -88,7 +89,7 @@ class Conv2dSubsampling(nn.Module):
         x = x.unsqueeze(1)
         x = self.conv(x)
         x_len = x.shape[2].unsqueeze(0)
-        x = self.out(x.transpose(1, 2).contiguous().view(1, x_len, -1))
+        x = self.out(x.transpose(1, 2).contiguous().view(1, -1, self.out_size))
         return x, x_len
 
 
@@ -187,6 +188,7 @@ class EncoderMultiHeadAttention(nn.Module):
 
         self.attention = ScaledDotProductAttention(temperature=self.d_k ** 0.5)
         self.fc = nn.Linear(n_head * self.d_v, d_model, bias=False)
+        self.fc_size = self.fc.in_features
         self.dropout = nn.Dropout(residual_dropout)
 
     def forward(self, q, k, v, mask=None):
@@ -206,8 +208,8 @@ class EncoderMultiHeadAttention(nn.Module):
         v = self.w_vs(self.layer_norm_v(v)).view(-1, self.n_head, self.d_v).transpose(0, 1)
         return q, k, v
 
-    def forward_output(self, output, residual, sz_b, len_q):
-        output = output.transpose(0, 1).contiguous().view(sz_b, len_q, -1)
+    def forward_output(self, output, residual):
+        output = output.transpose(0, 1).contiguous().view(1, -1, self.fc_size)
         return self.fc(output) + residual
 
 
@@ -233,7 +235,6 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         super().__init__(n_head, d_model,
                          residual_dropout)
         d_k = d_model // n_head
-        self.scale = float(1.0 / (d_k ** 0.5))
         self.linear_pos = nn.Linear(d_model, n_head * d_k, bias=False)
         self.pos_bias_u = nn.Parameter(torch.FloatTensor(n_head, d_k))
         self.pos_bias_v = nn.Parameter(torch.FloatTensor(n_head, d_k))
@@ -259,4 +260,4 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         matrix_bd = self._rel_shift(matrix_bd, x_len)
         attn_scores = matrix_ac + matrix_bd
         output = self.attention.forward_attention(attn_scores, v, mask=None)
-        return self.forward_output(output, residual, 1, x_len)
+        return self.forward_output(output, residual)
