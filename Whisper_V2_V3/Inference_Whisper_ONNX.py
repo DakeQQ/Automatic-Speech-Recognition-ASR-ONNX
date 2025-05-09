@@ -52,8 +52,8 @@ else:
     provider_options = None
 
 
-
-if "v3" in model_path or "V3" in model_path or "CrisperWhisper" in model_path or "crisperwhisper" in model_path or "anime" in model_path or "Anime" in model_path:
+download_path_lower = download_path.lower()
+if ("v3" in download_path_lower) or ("crisperwhisper" in download_path) or ("anime" in download_path):
     is_v3 = True
 else:
     is_v3 = False
