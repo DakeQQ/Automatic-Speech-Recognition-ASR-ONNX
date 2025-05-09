@@ -44,7 +44,8 @@ shutil.copyfile('./modeling_modified/modeling_whisper.py', site.getsitepackages(
 from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
 
 
-if "v3" in model_path or "V3" in model_path or "CrisperWhisper" in model_path or "crisperwhisper" in model_path or "anime" in model_path or "Anime" in model_path:
+model_path_lower = model_path.lower()
+if ("v3" in model_path_lower) or ("crisperwhisper" in model_path_lower) or ("anime" in model_path_lower):
     is_v3 = True
     print("\nExport the Whisper-V3")
 else:
