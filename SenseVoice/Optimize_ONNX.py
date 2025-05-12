@@ -27,8 +27,7 @@ slim(
     skip_fusion_patterns=False,
     no_constant_folding=False,
     save_as_external_data=False,
-    verbose=False,
-    dtype='fp16' if use_gpu_fp16 else 'fp32'
+    verbose=False
 )
 
 
@@ -52,25 +51,24 @@ if do_quantize:
 
 # transformers.optimizer
 # Use this function for float16 quantization will get errors.
-if not use_gpu_fp16:
-    model = optimize_model(optimized_model_path,
-                           use_gpu=True,        # Set to True because the model uses float16.
-                           opt_level=99 if (target_platform == "amd64") and not use_gpu_fp16 else 2,
-                           num_heads=4,         # The SenseVoiceSmall model parameter.
-                           hidden_size=512,     # The SenseVoiceSmall model parameter.
-                           provider=provider,
-                           verbose=False,
-                           model_type='bert')
-    if use_gpu_fp16:
-        model.convert_float_to_float16(
-            keep_io_types=False,
-            force_fp16_initializers=True,
-            use_symbolic_shape_infer=True,      # True for more optimize but may get errors.
-            op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'Range', 'MatMulIntegerToFloat']
-        )
-    model.save_model_to_file(optimized_model_path, use_external_data_format=False)
-    del model
-    gc.collect()
+model = optimize_model(optimized_model_path,
+                       use_gpu=use_gpu_fp16,        # Set to True because the model uses float16.
+                       opt_level=99 if (target_platform == "amd64") and not use_gpu_fp16 else 2,
+                       num_heads=4,         # The SenseVoiceSmall model parameter.
+                       hidden_size=512,     # The SenseVoiceSmall model parameter.
+                       provider=provider,
+                       verbose=False,
+                       model_type='bert')
+if use_gpu_fp16:
+    model.convert_float_to_float16(
+        keep_io_types=False,
+        force_fp16_initializers=True,
+        use_symbolic_shape_infer=True,      # True for more optimize but may get errors.
+        op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'Range', 'MatMulIntegerToFloat']
+    )
+model.save_model_to_file(optimized_model_path, use_external_data_format=False)
+del model
+gc.collect()
 
 
 # onnxslim 2nd
@@ -81,8 +79,7 @@ slim(
     skip_fusion_patterns=False,
     no_constant_folding=False,
     save_as_external_data=False,
-    verbose=False,
-    dtype='fp16' if use_gpu_fp16 else 'fp32'
+    verbose=False
 )
 
 
