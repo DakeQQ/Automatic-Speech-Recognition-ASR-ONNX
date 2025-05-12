@@ -19,12 +19,13 @@ model_path = os.path.join(original_folder_path, "FireRedASR_AED_L-Encoder.onnx")
 quanted_model_path = os.path.join(quanted_folder_path, "FireRedASR_AED_L-Encoder.onnx")       # The optimized model stored path.
 # model_path = os.path.join(original_folder_path, "FireRedASR_AED_L-Decoder.onnx")            # The original fp32 model path.
 # quanted_model_path = os.path.join(quanted_folder_path, "FireRedASR_AED_L-Decoder.onnx")     # The optimized model stored path.
+
 quant_int8 = True                                                                             # Quant the model to int8 format.
 quant_float16 = False                                                                         # Quant the model to float16 format.
 use_gpu = False                                                                               # If true, the transformers.optimizer will remain the FP16 processes.
 provider = 'CPUExecutionProvider'                                                             # ['CPUExecutionProvider', 'CUDAExecutionProvider']
-use_low_memory_mode_in_Android = False                                                        # If you need to use low memory mode on Android, please set it to True.
 upgrade_opset = 17                                                                            # Optional process. Set 0 for close.
+use_low_memory_mode_in_Android = False                                                        # If True, save the model into 2 part.
 
 
 # Start Quantize
@@ -44,42 +45,46 @@ if quant_int8:
         nodes_to_exclude=None,                                   # Specify the node names to exclude quant process. Example: nodes_to_exclude={'/Gather'}
         use_external_data_format=True                            # Save the model into two parts.
     )
-
-
-model_size_bytes = sys.getsizeof(onnx.load(quanted_model_path).SerializeToString())
-model_size_gb = model_size_bytes * 9.31322575e-10  # 1 / (1024 * 1024 * 1024)
-if model_size_gb > 2.0:
-    is_large_model = True
+    # ONNX Model Optimizer
+    slim(
+        model=quanted_model_path,
+        output_model=quanted_model_path,
+        no_shape_infer=True if "Encoder" in model_path else False,  # False for more optimize but may get errors.
+        skip_fusion_patterns=False,
+        no_constant_folding=False,
+        save_as_external_data=use_low_memory_mode_in_Android,
+        verbose=False
+    )
 else:
-    is_large_model = True if use_low_memory_mode_in_Android else False
-    
+    # ONNX Model Optimizer
+    slim(
+        model=quant_utils.load_model_with_shape_infer(Path(model_path)),
+        output_model=quanted_model_path,
+        no_shape_infer=True if "Encoder" in model_path else False,  # False for more optimize but may get errors.
+        skip_fusion_patterns=False,
+        no_constant_folding=False,
+        save_as_external_data=use_low_memory_mode_in_Android,
+        verbose=False
+    )
 
-# ONNX Model Optimizer
-slim(
-    model=quanted_model_path,
-    output_model=quanted_model_path,
-    no_shape_infer=False,                                     # False for more optimize but may get errors.
-    skip_fusion_patterns=False,
-    no_constant_folding=False,
-    save_as_external_data=is_large_model,
-    verbose=False
-)
-
-
-if download_path == "NONE":
+if project_path == "NONE" or project_path is None or project_path == "":
     num_heads = 0    # default
     hidden_size = 0  # default
 else:
-    model = AutoModelForCausalLM.from_pretrained(download_path, torch_dtype=torch.float16, device_map='cpu', trust_remote_code=True, low_cpu_mem_usage=True).eval()
     try:
-        num_heads = model.config.num_attention_heads
-        hidden_size = model.config.hidden_size
+        if project_path not in sys.path:
+            sys.path.append(project_path)
+        from fireredasr.models.fireredasr import FireRedAsr
+        model = FireRedAsr.from_pretrained("aed", model_path).model.half()
+        hidden_size = model.encoder.odim
+        num_heads = model.encoder.layer_stack._modules['0'].mhsa.n_head
+        del model
+        gc.collect()
+        if project_path in sys.path:
+            sys.path.remove(project_path)
     except:
         num_heads = 0
         hidden_size = 0
-    del model
-    gc.collect()
-
 
 # transformers.optimizer
 model = optimize_model(quanted_model_path,
@@ -90,15 +95,7 @@ model = optimize_model(quanted_model_path,
                        provider=provider,
                        verbose=False,
                        model_type='bert')
-if quant_float16:
-    model.convert_float_to_float16(
-        keep_io_types=False,
-        force_fp16_initializers=True,
-        use_symbolic_shape_infer=True,  # True for more optimize but may get errors.
-        max_finite_val=65504.0,
-        op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'Range', 'MatMulIntegerToFloat']
-    )
-model.save_model_to_file(quanted_model_path, use_external_data_format=is_large_model)
+model.save_model_to_file(quanted_model_path, use_external_data_format=use_low_memory_mode_in_Android)
 del model
 gc.collect()
 
@@ -107,10 +104,10 @@ gc.collect()
 slim(
     model=quanted_model_path,
     output_model=quanted_model_path,
-    no_shape_infer=False,                                     # False for more optimize but may get errors.
+    no_shape_infer=True if "Encoder" in model_path else False,  # False for more optimize but may get errors.
     skip_fusion_patterns=False,
     no_constant_folding=False,
-    save_as_external_data=is_large_model,
+    save_as_external_data=use_low_memory_mode_in_Android,
     verbose=False
 )
 
@@ -120,17 +117,17 @@ if upgrade_opset > 0:
     try:
         model = onnx.load(quanted_model_path)
         model = onnx.version_converter.convert_version(model, upgrade_opset)
-        onnx.save(model, quanted_model_path, save_as_external_data=is_large_model)
+        onnx.save(model, quanted_model_path, save_as_external_data=use_low_memory_mode_in_Android)
         del model
         gc.collect()
     except:
         model = onnx.load(quanted_model_path)
-        onnx.save(model, quanted_model_path, save_as_external_data=is_large_model)
+        onnx.save(model, quanted_model_path, save_as_external_data=use_low_memory_mode_in_Android)
         del model
         gc.collect()
 else:
     model = onnx.load(quanted_model_path)
-    onnx.save(model, quanted_model_path, save_as_external_data=is_large_model)
+    onnx.save(model, quanted_model_path, save_as_external_data=use_low_memory_mode_in_Android)
     del model
     gc.collect()
 
@@ -141,8 +138,8 @@ for file_path in files_to_delete:
         os.remove(file_path)
     except Exception as e:
         print(f"Error deleting {file_path}: {e}")
-        
-if not is_large_model:
+
+if not use_low_memory_mode_in_Android:
     # Convert the simplified model to ORT format.
     if provider == 'CPUExecutionProvider':
         optimization_style = "Fixed"
@@ -151,4 +148,3 @@ if not is_large_model:
     target_platform = "arm"                 # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
     # Call subprocess may get permission failed on Windows system.
     subprocess.run([f'python -m onnxruntime.tools.convert_onnx_models_to_ort --output_dir {quanted_folder_path} --optimization_style {optimization_style} --target_platform {target_platform} --enable_type_reduction {quanted_folder_path}'], shell=True)
-    
