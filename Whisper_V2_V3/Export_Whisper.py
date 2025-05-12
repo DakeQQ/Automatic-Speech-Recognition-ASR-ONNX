@@ -240,19 +240,22 @@ with torch.inference_mode():
     if MAX_SEQ_LEN > model.config.max_target_positions:
         MAX_SEQ_LEN = model.config.max_target_positions
         
-    scaling = float(math.pow(model.model.encoder.layers._modules['0'].self_attn.head_dim, -0.5))
+    scaling = float(math.pow(model.model.encoder.layers._modules['0'].self_attn.head_dim, -0.25))
     for i in model.model.encoder.layers._modules:
-        model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data * scaling
-        model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data * scaling
-    scaling = float(math.pow(model.model.decoder.layers._modules['0'].self_attn.head_dim, -0.5))
+        model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data *= scaling
+        model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data *= scaling
+        model.model.encoder.layers._modules[i].self_attn.k_proj.weight.data *= scaling
+    scaling = float(math.pow(model.model.decoder.layers._modules['0'].self_attn.head_dim, -0.25))
     for i in model.model.decoder.layers._modules:
-        model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data * scaling
-        model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data * scaling
-    scaling = float(math.pow(model.model.decoder.layers._modules['0'].encoder_attn.head_dim, -0.5))
+        model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data *= scaling
+        model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data *= scaling
+        model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data *= scaling
+    scaling = float(math.pow(model.model.decoder.layers._modules['0'].encoder_attn.head_dim, -0.25))
     for i in model.model.decoder.layers._modules:
-        model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data * scaling
-        model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data * scaling
-    
+        model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data *= scaling
+        model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data *= scaling
+        model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data *= scaling
+
     custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
 
