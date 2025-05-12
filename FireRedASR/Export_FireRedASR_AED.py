@@ -19,7 +19,7 @@ test_audio = ["./example/zh.mp3", "./example/zh_1.wav", "./example/zh_2.wav"]   
 
 
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-INPUT_AUDIO_LENGTH = 160000                                 # Set for maximum input audio length.
+INPUT_AUDIO_LENGTH = 240000                                 # Set for maximum input audio length.
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
@@ -141,19 +141,22 @@ with torch.inference_mode():
         NUM_LAYER_DE = model.decoder.n_layers
         HEAD_DIM_EN = model.encoder.layer_stack._modules['0'].mhsa.d_k
         HEAD_DIM_DE = model.decoder.layer_stack._modules['0'].self_attn.d_k
-        scaling = float(math.pow(HEAD_DIM_EN, -0.5))
+        scaling = float(math.pow(HEAD_DIM_EN, -0.25))
         for i in model.encoder.layer_stack._modules:
-            model.encoder.layer_stack._modules[i].mhsa.w_qs.weight.data = model.encoder.layer_stack._modules[i].mhsa.w_qs.weight.data * scaling
+            model.encoder.layer_stack._modules[i].mhsa.w_qs.weight.data *= scaling
+            model.encoder.layer_stack._modules[i].mhsa.w_ks.weight.data *= scaling
+            model.encoder.layer_stack._modules[i].mhsa.linear_pos.weight.data *= scaling
             model.encoder.layer_stack._modules[i].mhsa.pos_bias_u.data = model.encoder.layer_stack._modules[i].mhsa.pos_bias_u.data.unsqueeze(1) * scaling
             model.encoder.layer_stack._modules[i].mhsa.pos_bias_v.data = model.encoder.layer_stack._modules[i].mhsa.pos_bias_v.data.unsqueeze(1) * scaling
-        scaling = float(math.pow(HEAD_DIM_DE, -0.5))
+        scaling = float(math.pow(HEAD_DIM_DE, -0.25))
         for i in model.decoder.layer_stack._modules:
-            model.decoder.layer_stack._modules[i].self_attn.w_qs.weight.data = model.decoder.layer_stack._modules[i].self_attn.w_qs.weight.data * scaling
-            model.decoder.layer_stack._modules[i].self_attn.w_qs.bias.data = model.decoder.layer_stack._modules[i].self_attn.w_qs.bias.data * scaling
-        scaling = float(math.pow(model.decoder.layer_stack._modules['0'].cross_attn.d_k, -0.5))
+            model.decoder.layer_stack._modules[i].self_attn.w_qs.weight.data *=  scaling
+            model.decoder.layer_stack._modules[i].self_attn.w_qs.bias.data *= scaling
+            model.decoder.layer_stack._modules[i].self_attn.w_ks.weight.data *= scaling
+        scaling = float(math.pow(model.decoder.layer_stack._modules['0'].cross_attn.d_k, -0.25))
         for i in model.decoder.layer_stack._modules:
-            model.decoder.layer_stack._modules[i].cross_attn.w_qs.weight.data = model.decoder.layer_stack._modules[i].cross_attn.w_qs.weight.data * scaling
-            model.decoder.layer_stack._modules[i].cross_attn.w_qs.bias.data = model.decoder.layer_stack._modules[i].cross_attn.w_qs.bias.data * scaling
+            model.decoder.layer_stack._modules[i].cross_attn.w_qs.weight.data *= scaling
+            model.decoder.layer_stack._modules[i].cross_attn.w_qs.bias.data *= scaling
 
         custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
         fire_red_encoder = FIRE_RED_ENCODER(model, feat_extractor, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE)
