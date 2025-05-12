@@ -180,7 +180,6 @@ class WHISPER_ENCODER(torch.nn.Module):
         self.save_encoder_value = [None] * num_layers_de
         self.inv_int16 = float(1.0 / 32768.0)
 
-
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
         audio -= torch.mean(audio)  # Remove DC Offset
