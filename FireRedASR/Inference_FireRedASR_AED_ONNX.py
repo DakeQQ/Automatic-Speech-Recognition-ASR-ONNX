@@ -29,25 +29,46 @@ if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
             'num_of_threads': MAX_THREADS,
             'num_streams': 1,
             'enable_opencl_throttling': True,
-            'enable_qdq_optimizer': False                 # Enable it carefully
+            'enable_qdq_optimizer': False,                # Enable it carefully
+            'disable_dynamic_shapes': False
         }
     ]
+    device_type = 'cpu'
 elif "CUDAExecutionProvider" in ORT_Accelerate_Providers:
     provider_options = [
         {
             'device_id': DEVICE_ID,
-            'gpu_mem_limit': 8 * 1024 * 1024 * 1024,      # 8 GB
-            'arena_extend_strategy': 'kNextPowerOfTwo',
-            'cudnn_conv_algo_search': 'EXHAUSTIVE',
+            'gpu_mem_limit': 24 * 1024 * 1024 * 1024,     # 24 GB
+            'arena_extend_strategy': 'kNextPowerOfTwo',   # ["kNextPowerOfTwo", "kSameAsRequested"]
+            'cudnn_conv_algo_search': 'EXHAUSTIVE',       # ["DEFAULT", "HEURISTIC", "EXHAUSTIVE"]
+            'sdpa_kernel': '2',                           # ["0", "1", "2"]
+            'use_tf32': '1',
+            'fuse_conv_bias': '1',
             'cudnn_conv_use_max_workspace': '1',
-            'do_copy_in_default_stream': '1',
             'cudnn_conv1d_pad_to_nc1d': '1',
+            'tunable_op_enable': '1',
+            'tunable_op_tuning_enable': '1',
+            'tunable_op_max_tuning_duration_ms': 10000,
+            'do_copy_in_default_stream': '0',
             'enable_cuda_graph': '0',                     # Set to '0' to avoid potential errors when enabled.
-            'use_tf32': '0'            
+            'prefer_nhwc': '0',
+            'enable_skip_layer_norm_strict_mode': '0',
+            'use_ep_level_unified_stream': '0',
         }
     ]
+    device_type = 'cuda'
+elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
+    provider_options = [
+        {
+            'device_id': DEVICE_ID,
+            'performance_preference': 'high_performance',  # [high_performance, default, minimum_power]
+            'device_filter': 'npu'                         # [any, npu, gpu]
+        }
+    ]
+    device_type = 'dml'
 else:
     # Please config by yourself for others providers.
+    device_type = 'cpu'
     provider_options = None
 
 
@@ -65,10 +86,11 @@ def normalize_to_int16(audio):
 
 # ONNX Runtime settings
 session_opts = onnxruntime.SessionOptions()
-session_opts.log_severity_level = 3         # error level, it an adjustable value.
-session_opts.inter_op_num_threads = 0       # Run different nodes with num_threads. Set 0 for auto.
-session_opts.intra_op_num_threads = 0       # Under the node, execute the operators with num_threads. Set 0 for auto.
-session_opts.enable_cpu_mem_arena = True    # True for execute speed; False for less memory usage.
+session_opts.log_severity_level = 4                   # Fatal level, it an adjustable value.
+session_opts.log_verbosity_level = 4                  # Fatal level, it an adjustable value.
+session_opts.inter_op_num_threads = MAX_THREADS       # Run different nodes with num_threads. Set 0 for auto.
+session_opts.intra_op_num_threads = MAX_THREADS       # Under the node, execute the operators with num_threads. Set 0 for auto.
+session_opts.enable_cpu_mem_arena = True              # True for execute speed; False for less memory usage.
 session_opts.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
 session_opts.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
 session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
@@ -92,6 +114,11 @@ for i in range(len(out_name_A)):
     output_names_A.append(out_name_A[i].name)
 
 ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
+model_dtype = ort_session_B._inputs_meta[0].type
+if 'float16' in model_dtype:
+    model_dtype = np.float16
+else:
+    model_dtype = np.float32
 in_name_B = ort_session_B.get_inputs()
 out_name_B = ort_session_B.get_outputs()
 input_names_B = []
@@ -106,15 +133,6 @@ generate_limit = MAX_SEQ_LEN - 1  # 1 = length of input_ids
 num_layers = (amount_of_outputs - 1) // 2
 num_layers_2 = num_layers + num_layers
 num_layers_4 = num_layers_2 + num_layers_2
-
-ORT_Accelerate_Providers = ort_session_B.get_providers()[0]
-print(f"\nUsable Providers: {ORT_Accelerate_Providers}")
-if "CUDAExecutionProvider" in ORT_Accelerate_Providers or "TensorrtExecutionProvider" in ORT_Accelerate_Providers:
-    device_type = 'cuda'
-elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
-    device_type = 'dml'
-else:
-    device_type = 'cpu'
 
 tokenizer = ChineseCharEnglishSpmTokenizer(download_path + "/dict.txt", download_path + "/train_bpe1000.model")
 
@@ -152,8 +170,8 @@ for language_idx, test in enumerate(test_audio):
     slice_end = INPUT_AUDIO_LENGTH
     input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[3]], dtype=np.int32), device_type, DEVICE_ID)
     attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
-    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), device_type, DEVICE_ID)
-    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), device_type, DEVICE_ID)
+    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=model_dtype), device_type, DEVICE_ID)
+    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=model_dtype), device_type, DEVICE_ID)
     layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 1
     input_feed_B = {
         in_name_B[-1].name: attention_mask,
@@ -171,7 +189,6 @@ for language_idx, test in enumerate(test_audio):
         all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start:slice_end], device_type, DEVICE_ID)})
         for i in range(num_layers_2):
             input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
-        decode_time = time.time()
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
             max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])
@@ -185,9 +202,9 @@ for language_idx, test in enumerate(test_audio):
             save_token.append(max_logit_ids)
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
-    count_time = time.time()
+    count_time = time.time() - start_time
     text = ("".join([tokenizer.dict[int(id[0][0])] for id in save_token])).replace(tokenizer.SPM_SPACE, ' ').strip()
-    print(f"\nASR Result:\n{text}\n\nTime Cost: {(count_time - start_time):.3f} Seconds\n\nDecode Speed: {num_decode / (count_time - decode_time):.3f} tokens/s")
+    print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
 
 if project_path in sys.path:
