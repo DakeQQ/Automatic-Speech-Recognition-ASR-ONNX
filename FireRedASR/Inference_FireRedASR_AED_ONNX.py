@@ -130,9 +130,11 @@ for i in range(amount_of_outputs):
     output_names_B.append(out_name_B[i].name)
 
 generate_limit = MAX_SEQ_LEN - 1  # 1 = length of input_ids
-num_layers = (amount_of_outputs - 1) // 2
+num_layers = (amount_of_outputs - 2) // 2
 num_layers_2 = num_layers + num_layers
 num_layers_4 = num_layers_2 + num_layers_2
+num_layers_2_plus_1 = num_layers_2 + 1
+num_layers_2_plus_2 = num_layers_2 + 2
 
 tokenizer = ChineseCharEnglishSpmTokenizer(download_path + "/dict.txt", download_path + "/train_bpe1000.model")
 
@@ -168,14 +170,19 @@ for language_idx, test in enumerate(test_audio):
     # Start to run FireRedASR
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[3]], dtype=np.int32), device_type, DEVICE_ID)
+    input_ids = np.array([[3]], dtype=np.int32)
+    ids_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([input_ids.shape[-1]], dtype=np.int64), device_type, DEVICE_ID)
+    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, device_type, DEVICE_ID)
+    history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), device_type, DEVICE_ID)
     attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
     past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=model_dtype), device_type, DEVICE_ID)
     past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=model_dtype), device_type, DEVICE_ID)
-    layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 1
+    layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 3
     input_feed_B = {
         in_name_B[-1].name: attention_mask,
-        in_name_B[num_layers_2].name: input_ids
+        in_name_B[num_layers_2].name: input_ids,
+        in_name_B[num_layers_2_plus_1].name: history_len,
+        in_name_B[num_layers_2_plus_2].name: ids_len
     }
     for i in range(num_layers):
         input_feed_B[in_name_B[i].name] = past_keys_B
@@ -186,12 +193,12 @@ for language_idx, test in enumerate(test_audio):
     save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
-        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start:slice_end], device_type, DEVICE_ID)})
+        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], device_type, DEVICE_ID)})
         for i in range(num_layers_2):
             input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
-            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])
+            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-2])
             num_decode += 1
             if max_logit_ids in STOP_TOKEN:
                 break
