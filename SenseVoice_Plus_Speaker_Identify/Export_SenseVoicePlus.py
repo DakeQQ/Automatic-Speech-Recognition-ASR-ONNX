@@ -82,11 +82,12 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
         self.inv_int16 = float(1.0 / 32768.0)
-        factor = self.encoder.encoders._modules["0"].self_attn.d_k ** (-0.5)
+        factor = self.encoder.encoders._modules["0"].self_attn.d_k ** (-0.25)
         total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders)
+        cif_hidden_size_2 = cif_hidden_size + cif_hidden_size
         for encoder_layer in total_encoders:
-            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size] *= factor
-            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size_2] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size_2] *= factor
   
     def forward(self, audio, language_idx, saved_embed, saved_dot, num_speakers):
         audio = audio.float() * self.inv_int16 
