@@ -639,17 +639,19 @@ def cif_wo_hidden_v1(alphas, hidden_len, threshold=None, fires=None, return_fire
 
 
 def cif_v1(hidden, alphas, threshold, fires, hidden_len, hidden_size):
-    fires, fire_idxs = cif_wo_hidden_v1(alphas, hidden_len, threshold, fires, return_fire_idxs=True)
-    prefix_sum_hidden = torch.cumsum(alphas.unsqueeze(-1).repeat((1, 1, hidden_size)) * hidden, dim=1)
-    frames = prefix_sum_hidden[fire_idxs]
+    fires, fire_idxs = cif_wo_hidden_v1(
+        alphas, hidden_len, threshold, fires, return_fire_idxs=True
+    )
+    prefix_sum_hidden = torch.cumsum(alphas.unsqueeze(-1) * hidden, dim=1)
+    frames = prefix_sum_hidden[fire_idxs]              # (N, H)
     shift_frames = torch.roll(frames, 1, dims=0)
-    batch_len = fire_idxs.sum(1)
-    batch_idxs = torch.cumsum(batch_len, dim=0)
+    batch_len        = fire_idxs.sum(1)                # (B,)
+    batch_idxs       = torch.cumsum(batch_len, dim=0)  # (B,)
     shift_batch_idxs = torch.roll(batch_idxs, 1, dims=0)
     shift_batch_idxs[0] = 0
     shift_frames[shift_batch_idxs] = 0
-    remains = fires - torch.floor(fires)
-    remain_frames = remains[fire_idxs].unsqueeze(-1).repeat((1, hidden_size)) * hidden[fire_idxs]
+    remains       = fires - torch.floor(fires)         # (B, T)
+    remain_frames = remains[fire_idxs].unsqueeze(-1) * hidden[fire_idxs]
     shift_remain_frames = torch.roll(remain_frames, 1, dims=0)
     shift_remain_frames[shift_batch_idxs] = 0
     frames = frames - shift_frames + shift_remain_frames - remain_frames
