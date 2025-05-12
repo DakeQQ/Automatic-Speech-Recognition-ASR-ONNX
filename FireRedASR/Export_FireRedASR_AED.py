@@ -245,6 +245,7 @@ with torch.inference_mode():
         input_names.append('attention_mask')
         all_inputs.append(attention_mask)
         output_names.append('max_logit_id')
+        output_names.append('kv_seq_len')
 
         torch.onnx.export(
             fire_red_decoder,
