@@ -25,7 +25,7 @@ quant_float16 = False                                                           
 use_gpu = False                                                                               # If true, the transformers.optimizer will remain the FP16 processes.
 provider = 'CPUExecutionProvider'                                                             # ['CPUExecutionProvider', 'CUDAExecutionProvider']
 upgrade_opset = 17                                                                            # Optional process. Set 0 for close.
-use_low_memory_mode_in_Android = False                                                        # If True, save the model into 2 part.
+use_low_memory_mode_in_Android = False                                                        # If True, save the model into 2 parts.
 
 
 # Start Quantize
