@@ -95,7 +95,7 @@ class FIRE_RED_DECODER(torch.nn.Module):
         super(FIRE_RED_DECODER, self).__init__()
         self.model = fire_red
         self.num_layers_de_2 = self.model.decoder.n_layers + self.model.decoder.n_layers
-        self.num_layers_de_2_plus = self.num_layers_de_2 + 1
+        self.num_layers_de_2_plus = self.num_layers_de_2 + 3
         self.num_layers_de_3_plus = self.num_layers_de_2_plus + self.model.decoder.n_layers
         self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
         self.model.decoder.tgt_word_emb.weight.data *= self.model.decoder.scale
@@ -104,13 +104,12 @@ class FIRE_RED_DECODER(torch.nn.Module):
         self.save_de_values = [None] * self.model.decoder.n_layers
 
     def forward(self, *all_inputs):
-        attention_mask = all_inputs[-1]
         input_ids = all_inputs[self.num_layers_de_2]
-        ids_len = input_ids.shape[1].unsqueeze(0)
-        history_len = all_inputs[0].shape[-1].unsqueeze(0)
-        kv_seq_len = ids_len + history_len
-        hidden_state = self.model.decoder.tgt_word_emb(input_ids) + self.model.decoder.positional_encoding.pe[:, history_len:kv_seq_len].float()
-        attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * attention_mask).float()
+        history_len = all_inputs[self.num_layers_de_2 + 1]
+        ids_len = all_inputs[self.num_layers_de_2 + 2]
+        kv_seq_len = history_len + ids_len
+        hidden_state = self.model.decoder.tgt_word_emb(input_ids) + self.model.decoder.positional_encoding.pe[:, history_len: kv_seq_len].float()
+        attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * all_inputs[-1]).float()
         for idx, decoder_layer in enumerate(self.model.decoder.layer_stack):
             hidden_state_norm = decoder_layer.self_attn_norm(hidden_state)
             q = decoder_layer.self_attn.w_qs(hidden_state_norm).view(-1, decoder_layer.self_attn.n_head, decoder_layer.self_attn.d_k).transpose(0, 1)
@@ -127,7 +126,7 @@ class FIRE_RED_DECODER(torch.nn.Module):
             hidden_state_cross += hidden_state_attn
             hidden_state = hidden_state_cross + decoder_layer.mlp(decoder_layer.mlp_norm(hidden_state_cross))
         max_logit_idx = torch.argmax(self.model.decoder.tgt_word_prj(self.model.decoder.layer_norm_out(hidden_state)[:, -1]), dim=-1, keepdim=True).int()
-        return *self.save_de_keys, *self.save_de_values, max_logit_idx
+        return *self.save_de_keys, *self.save_de_values, max_logit_idx, kv_seq_len
 
 
 print('\nStart to export the Encoder part.\n')
@@ -192,6 +191,8 @@ with torch.inference_mode():
 
         fire_red_decoder = FIRE_RED_DECODER(model, MAX_SEQ_LEN)
         input_ids = torch.tensor([[3]], dtype=torch.int32)
+        ids_len = torch.tensor([input_ids.shape[-1]], dtype=torch.int64)
+        history_len = torch.tensor([0], dtype=torch.int64)
         save_encoder_key = torch.zeros((NUM_HEAD_EN, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float32)
         save_encoder_value = torch.zeros((NUM_HEAD_EN, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float32)
         past_key_de = torch.zeros((NUM_HEAD_DE, HEAD_DIM_DE, 0), dtype=torch.float32)
@@ -199,14 +200,14 @@ with torch.inference_mode():
         attention_mask = torch.tensor([1], dtype=torch.int8)
 
         input_names = []
-        keys_values = []
+        all_inputs = []
         output_names = []
-        dynamic_axes = {'input_ids': {1: 'ids_len'}}
+        dynamic_axes = {}
 
         for i in range(NUM_LAYER_DE):
             name = f'in_de_key_{i}'
             input_names.append(name)
-            keys_values.append(past_key_de)
+            all_inputs.append(past_key_de)
             dynamic_axes[name] = {2: 'history_len'}
             name = f'out_de_key_{i}'
             output_names.append(name)
@@ -214,32 +215,37 @@ with torch.inference_mode():
         for i in range(NUM_LAYER_DE):
             name = f'in_de_value_{i}'
             input_names.append(name)
-            keys_values.append(past_value_de)
+            all_inputs.append(past_value_de)
             dynamic_axes[name] = {1: 'history_len'}
             name = f'out_de_value_{i}'
             output_names.append(name)
             dynamic_axes[name] = {1: 'history_len_plus_ids_len'}
 
         input_names.append('input_ids')
-        keys_values.append(input_ids)
+        all_inputs.append(input_ids)
+        input_names.append('history_len')
+        all_inputs.append(history_len)
+        input_names.append('ids_len')
+        all_inputs.append(ids_len)
 
         for i in range(NUM_LAYER_DE):
             name = f'en_key_{i}'
             input_names.append(name)
-            keys_values.append(save_encoder_key)
+            all_inputs.append(save_encoder_key)
             dynamic_axes[name] = {2: 'signal_len'}
         for i in range(NUM_LAYER_DE):
             name = f'en_value_{i}'
             input_names.append(name)
-            keys_values.append(save_encoder_value)
+            all_inputs.append(save_encoder_value)
             dynamic_axes[name] = {1: 'signal_len'}
 
         input_names.append('attention_mask')
+        all_inputs.append(attention_mask)
         output_names.append('max_logit_id')
 
         torch.onnx.export(
             fire_red_decoder,
-            tuple(keys_values + [attention_mask]),
+            tuple(all_inputs),
             onnx_model_B,
             input_names=input_names,
             output_names=output_names,
@@ -250,6 +256,8 @@ with torch.inference_mode():
         del model
         del fire_red_decoder
         del input_ids
+        del ids_len
+        del history_len
         del save_encoder_key
         del save_encoder_value
         del past_key_de
@@ -268,15 +276,22 @@ print('\nExport done!\n\nStart to run FireRedASR by ONNX Runtime.\n\nNow, loadin
 
 # ONNX Runtime settings
 session_opts = onnxruntime.SessionOptions()
-session_opts.log_severity_level = 3         # error level, it an adjustable value.
+session_opts.log_severity_level = 4         # Fatal level, it an adjustable value.
+session_opts.log_verbosity_level = 4        # Fatal level, it an adjustable value.
 session_opts.inter_op_num_threads = 0       # Run different nodes with num_threads. Set 0 for auto.
 session_opts.intra_op_num_threads = 0       # Under the node, execute the operators with num_threads. Set 0 for auto.
 session_opts.enable_cpu_mem_arena = True    # True for execute speed; False for less memory usage.
 session_opts.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
 session_opts.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
 session_opts.add_session_config_entry("session.intra_op.allow_spinning", "1")
 session_opts.add_session_config_entry("session.inter_op.allow_spinning", "1")
-session_opts.add_session_config_entry("session.set_denormal_as_zero", "1")
+session_opts.add_session_config_entry("session.enable_quant_qdq_cleanup", "1")
+session_opts.add_session_config_entry("session.qdq_matmulnbits_accuracy_level", "4")
+session_opts.add_session_config_entry("optimization.enable_gelu_approximation", "1")
+session_opts.add_session_config_entry("disable_synchronize_execution_providers", "1")
+session_opts.add_session_config_entry("optimization.minimal_build_optimizations", "")
+session_opts.add_session_config_entry("session.use_device_allocator_for_initializers", "1")
 
 ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=['CPUExecutionProvider'])
 print(f"\nUsable Providers: {ort_session_A.get_providers()}")
@@ -300,9 +315,11 @@ for i in range(amount_of_outputs):
     output_names_B.append(out_name_B[i].name)
 
 generate_limit = MAX_SEQ_LEN - 1  # 1 = length of input_ids
-num_layers = (amount_of_outputs - 1) // 2
+num_layers = (amount_of_outputs - 2) // 2
 num_layers_2 = num_layers + num_layers
 num_layers_4 = num_layers_2 + num_layers_2
+num_layers_2_plus_1 = num_layers_2 + 1
+num_layers_2_plus_2 = num_layers_2 + 2
 
 tokenizer = ChineseCharEnglishSpmTokenizer(model_path + "/dict.txt", model_path + "/train_bpe1000.model")
 
@@ -338,14 +355,19 @@ for language_idx, test in enumerate(test_audio):
     # Start to run FireRedASR
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[3]], dtype=np.int32), 'cpu', 0)
+    input_ids = np.array([[3]], dtype=np.int32)
+    ids_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([input_ids.shape[-1]], dtype=np.int64), 'cpu', 0)
+    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, 'cpu', 0)
+    history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), 'cpu', 0)
     attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
     past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), 'cpu', 0)
     past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), 'cpu', 0)
-    layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 1
+    layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 3
     input_feed_B = {
         in_name_B[-1].name: attention_mask,
-        in_name_B[num_layers_2].name: input_ids
+        in_name_B[num_layers_2].name: input_ids,
+        in_name_B[num_layers_2_plus_1].name: history_len,
+        in_name_B[num_layers_2_plus_2].name: ids_len
     }
     for i in range(num_layers):
         input_feed_B[in_name_B[i].name] = past_keys_B
@@ -360,7 +382,7 @@ for language_idx, test in enumerate(test_audio):
             input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
-            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])
+            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-2])
             num_decode += 1
             if max_logit_ids in STOP_TOKEN:
                 break
