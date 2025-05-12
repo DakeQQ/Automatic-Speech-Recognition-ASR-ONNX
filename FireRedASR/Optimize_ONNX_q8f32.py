@@ -85,7 +85,6 @@ else:
     except:
         num_heads = 0
         hidden_size = 0
-
 # transformers.optimizer
 model = optimize_model(quanted_model_path,
                        use_gpu=use_gpu,
@@ -95,6 +94,14 @@ model = optimize_model(quanted_model_path,
                        provider=provider,
                        verbose=False,
                        model_type='bert')
+if quant_float16:
+    model.convert_float_to_float16(
+        keep_io_types=False,
+        force_fp16_initializers=True,
+        use_symbolic_shape_infer=True,  # True for more optimize but may get errors.
+        max_finite_val=65504.0,
+        op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'Range', 'MatMulIntegerToFloat']
+    )
 model.save_model_to_file(quanted_model_path, use_external_data_format=use_low_memory_mode_in_Android)
 del model
 gc.collect()
