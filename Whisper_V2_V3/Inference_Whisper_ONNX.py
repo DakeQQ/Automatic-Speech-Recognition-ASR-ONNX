@@ -240,14 +240,6 @@ num_layers_4 = num_layers_2 + num_layers_2
 num_layers_2_plus_1 = num_layers_2 + 1
 num_layers_2_plus_2 = num_layers_2 + 2
 
-ORT_Accelerate_Providers = ort_session_B.get_providers()[0]
-print(f"\nUsable Providers: {ORT_Accelerate_Providers}")
-if "CUDAExecutionProvider" in ORT_Accelerate_Providers or "TensorrtExecutionProvider" in ORT_Accelerate_Providers:
-    device_type = 'cuda'
-elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
-    device_type = 'dml'
-else:
-    device_type = 'cpu'
 tokenizer = AutoTokenizer.from_pretrained(download_path)
 
 # Load the input audio
