@@ -640,6 +640,7 @@ class WhisperEncoder(WhisperPreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        self.embed_positions.weight.data = self.embed_positions.weight.data.half()
 
     def _freeze_parameters(self):
         for param in self.parameters():
@@ -657,7 +658,7 @@ class WhisperEncoder(WhisperPreTrainedModel):
         input_features
     ):
         hidden_states = nn.functional.gelu(self.conv2(nn.functional.gelu(self.conv1(input_features)))).transpose(1, 2)
-        hidden_states += self.embed_positions.weight[:hidden_states.shape[1]]
+        hidden_states += self.embed_positions.weight[:hidden_states.shape[1]].float()
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(
                 hidden_states
@@ -704,9 +705,8 @@ class WhisperDecoder(WhisperPreTrainedModel):
         self.save_key_de = [None] * self.num_layer
         self.save_value_de = [None] * self.num_layer
 
-        self.num_layer_2 = self.num_layer + self.num_layer + 1
+        self.num_layer_2 = self.num_layer + self.num_layer + 3
         self.num_layer_3 = self.num_layer + self.num_layer_2
-
 
     def get_input_embeddings(self):
         return self.embed_tokens
