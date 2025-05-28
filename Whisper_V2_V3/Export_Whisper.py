@@ -1,5 +1,4 @@
 import gc
-import math
 import time
 import site
 import shutil
@@ -249,7 +248,7 @@ with torch.inference_mode():
         model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data *= scaling
         model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data *= scaling
         model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data *= scaling
-    scaling = float(math.pow(model.model.decoder.layers._modules['0'].encoder_attn.head_dim, -0.25))
+    scaling = float(model.model.decoder.layers._modules['0'].encoder_attn.head_dim ** -0.25)
     for i in model.model.decoder.layers._modules:
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data *= scaling
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data *= scaling
