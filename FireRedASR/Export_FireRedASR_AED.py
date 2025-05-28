@@ -19,7 +19,7 @@ test_audio = ["./example/zh.mp3", "./example/zh_1.wav", "./example/zh_2.wav"]   
 
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
 INPUT_AUDIO_LENGTH = 240000                                 # Set for maximum input audio length.
-WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
+WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
 NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
