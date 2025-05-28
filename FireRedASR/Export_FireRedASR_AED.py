@@ -1,7 +1,6 @@
 import gc
 import sys
 import shutil
-import math
 import time
 import torch
 import torchaudio
@@ -141,19 +140,19 @@ with torch.inference_mode():
         NUM_LAYER_DE = model.decoder.n_layers
         HEAD_DIM_EN = model.encoder.layer_stack._modules['0'].mhsa.d_k
         HEAD_DIM_DE = model.decoder.layer_stack._modules['0'].self_attn.d_k
-        scaling = float(math.pow(HEAD_DIM_EN, -0.25))
+        scaling = float(HEAD_DIM_EN ** -0.25)
         for i in model.encoder.layer_stack._modules:
             model.encoder.layer_stack._modules[i].mhsa.w_qs.weight.data *= scaling
             model.encoder.layer_stack._modules[i].mhsa.w_ks.weight.data *= scaling
             model.encoder.layer_stack._modules[i].mhsa.linear_pos.weight.data *= scaling
             model.encoder.layer_stack._modules[i].mhsa.pos_bias_u.data = model.encoder.layer_stack._modules[i].mhsa.pos_bias_u.data.unsqueeze(1) * scaling
             model.encoder.layer_stack._modules[i].mhsa.pos_bias_v.data = model.encoder.layer_stack._modules[i].mhsa.pos_bias_v.data.unsqueeze(1) * scaling
-        scaling = float(math.pow(HEAD_DIM_DE, -0.25))
+        scaling = float(HEAD_DIM_DE ** -0.25)
         for i in model.decoder.layer_stack._modules:
             model.decoder.layer_stack._modules[i].self_attn.w_qs.weight.data *=  scaling
             model.decoder.layer_stack._modules[i].self_attn.w_qs.bias.data *= scaling
             model.decoder.layer_stack._modules[i].self_attn.w_ks.weight.data *= scaling
-        scaling = float(math.pow(model.decoder.layer_stack._modules['0'].cross_attn.d_k, -0.25))
+        scaling = float(model.decoder.layer_stack._modules['0'].cross_attn.d_k ** -0.25)
         for i in model.decoder.layer_stack._modules:
             model.decoder.layer_stack._modules[i].cross_attn.w_qs.weight.data *= scaling
             model.decoder.layer_stack._modules[i].cross_attn.w_qs.bias.data *= scaling
