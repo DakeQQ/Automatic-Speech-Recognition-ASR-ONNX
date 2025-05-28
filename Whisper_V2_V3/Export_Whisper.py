@@ -231,20 +231,20 @@ with torch.inference_mode():
     HIDDEN_SIZE = model.config.d_model
     NUM_HEAD_EN = model.model.config.encoder_attention_heads
     NUM_HEAD_DE = model.model.config.decoder_attention_heads
-    HEAD_DIM_EN = HIDDEN_SIZE // NUM_HEAD_EN
-    HEAD_DIM_DE = HIDDEN_SIZE // NUM_HEAD_DE
+    HEAD_DIM_EN = model.model.encoder.layers._modules['0'].self_attn.head_dim
+    HEAD_DIM_DE = model.model.decoder.layers._modules['0'].self_attn.head_dim
     NUM_LAYER_DE = model.config.decoder_layers
     N_MELS = model.config.num_mel_bins
     STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1
     if MAX_SEQ_LEN > model.config.max_target_positions:
         MAX_SEQ_LEN = model.config.max_target_positions
         
-    scaling = float(math.pow(model.model.encoder.layers._modules['0'].self_attn.head_dim, -0.25))
+    scaling = float(HEAD_DIM_EN ** -0.25)
     for i in model.model.encoder.layers._modules:
         model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data *= scaling
         model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data *= scaling
         model.model.encoder.layers._modules[i].self_attn.k_proj.weight.data *= scaling
-    scaling = float(math.pow(model.model.decoder.layers._modules['0'].self_attn.head_dim, -0.25))
+    scaling = float(HEAD_DIM_DE ** -0.25)
     for i in model.model.decoder.layers._modules:
         model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data *= scaling
         model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data *= scaling
