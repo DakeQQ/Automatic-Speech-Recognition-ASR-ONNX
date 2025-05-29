@@ -44,28 +44,26 @@ if quant_int8:
         use_external_data_format=True                            # Save the model into two parts.
     )
     # ONNX Model Optimizer
-    # Disable, it will cause error after onnxslim
-    # slim(
-    #     model=quanted_model_path,
-    #     output_model=quanted_model_path,
-    #     no_shape_infer=False,  # False for more optimize but may get errors.
-    #     skip_fusion_patterns=False,
-    #     no_constant_folding=False,
-    #     save_as_external_data=use_low_memory_mode_in_Android,
-    #     verbose=False
-    # )
+    slim(
+        model=quanted_model_path,
+        output_model=quanted_model_path,
+        no_shape_infer=True,  # False for more optimize but may get errors.
+        skip_fusion_patterns=False,
+        no_constant_folding=False,
+        save_as_external_data=use_low_memory_mode_in_Android,
+        verbose=False
+    )
 else:
     # ONNX Model Optimizer
-    # Disable, it will cause error after onnxslim
-    # slim(
-    #     model=quant_utils.load_model_with_shape_infer(Path(model_path)),
-    #     output_model=quanted_model_path,
-    #     no_shape_infer=False,  # False for more optimize but may get errors.
-    #     skip_fusion_patterns=False,
-    #     no_constant_folding=False,
-    #     save_as_external_data=use_low_memory_mode_in_Android,
-    #     verbose=False
-    # )
+    slim(
+        model=quant_utils.load_model_with_shape_infer(Path(model_path)),
+        output_model=quanted_model_path,
+        no_shape_infer=True,  # False for more optimize but may get errors.
+        skip_fusion_patterns=False,
+        no_constant_folding=False,
+        save_as_external_data=use_low_memory_mode_in_Android,
+        verbose=False
+    )
     quanted_model_path = model_path
 
 
@@ -100,16 +98,15 @@ gc.collect()
 
 
 # onnxslim 2nd
-# Disable, it will cause error after onnxslim
-# slim(
-#     model=quanted_model_path,
-#     output_model=quanted_model_path,
-#     no_shape_infer=False,                                     # False for more optimize but may get errors.
-#     skip_fusion_patterns=False,
-#     no_constant_folding=False,
-#     save_as_external_data=use_low_memory_mode_in_Android,
-#     verbose=False
-# )
+slim(
+    model=quanted_model_path,
+    output_model=quanted_model_path,
+    no_shape_infer=True,                                     # False for more optimize but may get errors.
+    skip_fusion_patterns=False,
+    no_constant_folding=False,
+    save_as_external_data=use_low_memory_mode_in_Android,
+    verbose=False
+)
 
 
 # Upgrade the Opset version. (optional process)
