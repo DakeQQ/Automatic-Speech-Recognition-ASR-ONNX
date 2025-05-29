@@ -335,7 +335,7 @@ for language_idx, test in enumerate(test_audio):
     audio_len = len(audio)
     audio = audio.reshape(1, 1, -1)
     if isinstance(shape_value_in, str):
-        INPUT_AUDIO_LENGTH = min(160000, audio_len)  # You can adjust it.
+        INPUT_AUDIO_LENGTH = min(320000, audio_len)  # You can adjust it.
     else:
         INPUT_AUDIO_LENGTH = shape_value_in
     if SLIDING_WINDOW <= 0:
