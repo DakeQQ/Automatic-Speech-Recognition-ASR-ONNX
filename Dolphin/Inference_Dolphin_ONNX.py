@@ -436,7 +436,7 @@ for language_idx, test in enumerate(test_audio):
     while slice_end <= aligned_len:
         all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], device_type, DEVICE_ID)})
         input_feed_B = {
-            input_names_B[-1]: init_attention_mask,
+            input_names_B[attention_mask_indices]: init_attention_mask,
             input_names_B[num_layers_2_plus_1]: init_history_len,
         }
         for i in range(num_layers):
