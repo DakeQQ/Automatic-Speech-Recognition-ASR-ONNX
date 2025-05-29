@@ -725,6 +725,7 @@ for language_idx, test in enumerate(test_audio):
             print(message)
         else:
             print(f"\nThis audio belongs to {TARGET_LANGUAGE}.")
+            
         input_ids = np.array([[39999, lang_id, region_id, 6, 324]], dtype=np.int32)  # start_id = 39999; itn = 5; asr = 6; no_timestamp = 324
         ids_len = np.array([input_ids.shape[1]], dtype=np.int64)
         input_feed_B[input_names_B[num_layers_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, 'cpu', 0)
