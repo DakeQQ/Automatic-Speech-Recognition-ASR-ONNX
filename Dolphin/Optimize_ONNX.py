@@ -57,7 +57,6 @@ if quant_int8:
 else:
     # ONNX Model Optimizer
     # Disable, it will cause error after onnxslim
-    pass
     # slim(
     #     model=quant_utils.load_model_with_shape_infer(Path(model_path)),
     #     output_model=quanted_model_path,
@@ -67,6 +66,7 @@ else:
     #     save_as_external_data=use_low_memory_mode_in_Android,
     #     verbose=False
     # )
+    quanted_model_path = model_path
 
 
 if 'small' in download_path.lower():
