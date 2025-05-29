@@ -471,7 +471,6 @@ for language_idx, test in enumerate(test_audio):
                 input_feed_B[input_names_B[i]] = init_past_keys_B
             for i in range(num_layers, num_layers_2):
                 input_feed_B[input_names_B[i]] = init_past_values_B
-            
 
         if detect_region or detect_region:
             lang_str = tokenizer.decode(lang_id)
