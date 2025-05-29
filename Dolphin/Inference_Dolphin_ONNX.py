@@ -472,7 +472,7 @@ for test in test_audio:
             for i in range(num_layers, num_layers_2):
                 input_feed_B[input_names_B[i]] = init_past_values_B
 
-        if detect_region or detect_region:
+        if detect_language or detect_region:
             lang_str = tokenizer.decode(lang_id)
             region_str = tokenizer.decode(region_id)
             message = f"\nThis audio belongs to {lang_str}-{region_str}."
