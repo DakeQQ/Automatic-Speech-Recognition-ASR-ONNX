@@ -5,8 +5,8 @@ from pydub import AudioSegment
 
 
 model_path = "/home/DakeQQ/Downloads/dolphin-small"                                             # The dolphin project download path. Currently, only support dolphin-small and dolphin-base.
-onnx_model_A = "/home/DakeQQ/Downloads/Dolphin_ONNX/Dolphin_Encoder.onnx"                       # The exported onnx model path.
-onnx_model_B = "/home/DakeQQ/Downloads/Dolphin_ONNX/Dolphin_Decoder.onnx"                       # The exported onnx model path.
+onnx_model_A = "/home/DakeQQ/Downloads/Dolphin_Optimized/Dolphin_Encoder.onnx"                  # The exported onnx model path.
+onnx_model_B = "/home/DakeQQ/Downloads/Dolphin_Optimized/Dolphin_Decoder.onnx"                  # The exported onnx model path.
 save_vocab = "/home/DakeQQ/Downloads/Dolphin_ONNX/vocab_Dolphin.txt"                            # The exported Dolphin vocab path.
 TARGET_LANGUAGE = "Auto-Auto"                                                                   # See 'LANGUAGE_REGION' for detail.
 test_audio = ["./example/zh.mp3", "./example/zh-Shanghai.wav", "./example/ja.mp3", "./example/ko.mp3"]  # The test audio list.
