@@ -142,6 +142,6 @@ if not use_low_memory_mode_in_Android and not use_gpu:
         optimization_style = "Fixed"
     else:
         optimization_style = "Runtime"      # ['Runtime', 'Fixed']; Runtime for XNNPACK/NNAPI/QNN/CoreML..., Fixed for CPU provider
-    target_platform = "arm"                 # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
+    target_platform = "amd64"               # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
     # Call subprocess may get permission failed on Windows system.
     subprocess.run([f'python -m onnxruntime.tools.convert_onnx_models_to_ort --output_dir {quanted_folder_path} --optimization_style {optimization_style} --target_platform {target_platform} --enable_type_reduction {quanted_folder_path}'], shell=True)
