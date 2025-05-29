@@ -11,6 +11,8 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
    - [Paraformer-Small-Chinese](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1) / [Paraformer-Large-Chinese](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch) / [Paraformer-Large-English](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch)
    - [Paraformer-Online-Streaming-Chinese](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online)
    - [FireRedASR-AED](https://github.com/FireRedTeam/FireRedASR)
+   - [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
+     
 2. **Combined Models (ASR + Speaker Identify)**:  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common)
@@ -44,12 +46,12 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 | Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | Paraformer-Large-English<br>q8f32                | 0.14                                               |
 | Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | Paraformer-Large-Streaming-Chinese<br>f32        | 0.06 <br> Chunk Size: 8800                         |
 | Ubuntu 24.04     | Laptop     | CPU<br>i3-12300      | FireRedASR-AED-L-Chinese<br>q8f32                | 0.17                                               |
-
+| Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Dolphin-Small<br>q8f32                           | 0.13                                               |
 
 ---
 
 ## Coming Soon 🚀  
-- [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
+- None
 
 
 ---
@@ -65,6 +67,7 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
    - [Paraformer-Small-中文](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1) / [Paraformer-Large-中文](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch) / [Paraformer-Large-英文](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch)
    - [Paraformer-实时-流式-中文](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online)
    - [FireRedASR-AED](https://github.com/FireRedTeam/FireRedASR)
+   - [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
 
 2. **组合模型 (ASR + 讲话者识别)**：  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
