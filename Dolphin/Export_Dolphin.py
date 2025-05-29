@@ -2,7 +2,7 @@ import gc
 import copy
 import time
 import torch
-import dolphin                         # Currently, not support for Python > 3.11
+import dolphin                         # Currently, not support for Python >= 3.12
 import torchaudio
 import onnxruntime
 import numpy as np
