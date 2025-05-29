@@ -14,7 +14,7 @@ from onnxruntime.transformers.optimizer import optimize_model
 original_folder_path = r"/home/DakeQQ/Downloads/Dolphin_ONNX"                      # The original folder.
 quanted_folder_path = r"/home/DakeQQ/Downloads/Dolphin_Optimized"                  # The optimized folder.
 download_path = r'/home/DakeQQ/Downloads/dolphin-small'                            # Set the folder path where the Dolphin whole project downloaded, otherwise set "NONE".
-# model_path = os.path.join(original_folder_path, "Dolphin_Encoder.onnx")          # The original fp32 model path.  The Dolphin_Encoder can not quant with Float16.
+# model_path = os.path.join(original_folder_path, "Dolphin_Encoder.onnx")          # The original fp32 model path.
 # quanted_model_path = os.path.join(quanted_folder_path, "Dolphin_Encoder.onnx")   # The optimized model stored path.
 model_path = os.path.join(original_folder_path, "Dolphin_Decoder.onnx")          # The original fp32 model path.
 quanted_model_path = os.path.join(quanted_folder_path, "Dolphin_Decoder.onnx")   # The optimized model stored path.
