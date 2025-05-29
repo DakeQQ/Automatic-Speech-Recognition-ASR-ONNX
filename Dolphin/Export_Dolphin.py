@@ -636,7 +636,7 @@ init_past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_sess
 layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 3
 
 # Load the input audio
-for language_idx, test in enumerate(test_audio):
+for test in test_audio:
     print("----------------------------------------------------------------------------------------------------------")
     print(f"\nTest Input Audio: {test}")
     audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.float32)
