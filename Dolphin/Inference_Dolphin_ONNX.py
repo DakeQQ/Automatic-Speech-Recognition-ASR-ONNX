@@ -62,7 +62,7 @@ elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
         {
             'device_id': DEVICE_ID,
             'performance_preference': 'high_performance',  # [high_performance, default, minimum_power]
-            'device_filter': 'npu'                         # [any, npu, gpu]
+            'device_filter': 'any'                         # [any, npu, gpu]
         }
     ]
     device_type = 'dml'
