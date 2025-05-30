@@ -303,7 +303,7 @@ class DOLPHIN_ENCODER(torch.nn.Module):
         self.embed.bias.data *= self.position_encode.xscale
         self.position_encode_pe_half = self.position_encode.pe.size(1) // 2
 
-    def forward(self, audio):
+        def forward(self, audio):
         audio = audio.float() * self.inv_int16
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
@@ -331,10 +331,10 @@ class DOLPHIN_ENCODER(torch.nn.Module):
             matrix_bd = torch.matmul(q_with_bias_v, p)
             matrix_bd = rel_shift(matrix_bd, embed_len, self.zero_pad, encoder_layer.attn.h)
             x1 = encoder_layer.attn.linear_out(torch.matmul(torch.softmax(matrix_ac + matrix_bd, dim=-1), v).transpose(0, 1).contiguous().view(1, -1, encoder_layer.attn.linear_out.in_features))
-            x2 = encoder_layer.norm_mlp(x)
-            x2 = encoder_layer.cgmlp.channel_proj1(x2)
-            x2 = encoder_layer.cgmlp.csgu(x2)
-            x2 = encoder_layer.cgmlp.channel_proj2(x2)
+            x2 = encoder_layer.cgmlp.channel_proj1(encoder_layer.norm_mlp(x))
+            x_r, x_g = x2.chunk(2, dim=-1)
+            x_g = encoder_layer.cgmlp.csgu.conv(encoder_layer.cgmlp.csgu.norm(x_g).transpose(1, 2)).transpose(1, 2)
+            x2 = encoder_layer.cgmlp.channel_proj2(x_r * x_g)
             x_concat = torch.cat([x1, x2], dim=-1)
             x_concat += encoder_layer.depthwise_conv_fusion(x_concat.transpose(1, 2)).transpose(1, 2)
             x += encoder_layer.merge_proj(x_concat)
