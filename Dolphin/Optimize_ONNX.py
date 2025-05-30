@@ -64,8 +64,7 @@ else:
         save_as_external_data=use_low_memory_mode_in_Android,
         verbose=False
     )
-    quanted_model_path = model_path
-
+    
 
 if 'small' in download_path.lower():
     num_heads = 12
