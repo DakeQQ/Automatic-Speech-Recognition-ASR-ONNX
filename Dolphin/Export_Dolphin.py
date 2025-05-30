@@ -45,7 +45,7 @@ LANGUAGE_REGION = {
     # ───────────────────────────── Auto Detection ─────────────────────────────
     "Auto"                         : "auto-auto",
     "Auto-Auto"                    : "auto-auto",
-    "Chinese-Auto"                 : "auto-auto",
+    "Chinese-Auto"                 : "zh-auto",
     "Yue-Auto"                     : "ct-NULL",
     "Tamil-Auto"                   : "ta-auto",
     "Urdu-Auto"                    : "ur-auto",
