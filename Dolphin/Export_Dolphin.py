@@ -47,9 +47,9 @@ LANGUAGE_REGION = {
     "Auto-Auto"                    : "auto-auto",
     "Chinese-Auto"                 : "auto-auto",
     "Yue-Auto"                     : "ct-NULL",
-    "Tamil-auto"                   : "ta-auto",
-    "Urdu-auto"                    : "ur-auto",
-    "Arabic-auto"                  : "ar-auto",
+    "Tamil-Auto"                   : "ta-auto",
+    "Urdu-Auto"                    : "ur-auto",
+    "Arabic-Auto"                  : "ar-auto",
 
     "自动"                          : "auto",
     "自动-自动"                      : "auto-auto",
