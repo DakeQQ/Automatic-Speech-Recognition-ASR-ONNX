@@ -100,7 +100,7 @@ gc.collect()
 slim(
     model=quanted_model_path,
     output_model=quanted_model_path,
-    no_shape_infer=True,                                     # False for more optimize but may get errors.
+    no_shape_infer=False,                                     # False for more optimize but may get errors.
     skip_fusion_patterns=False,
     no_constant_folding=False,
     save_as_external_data=use_low_memory_mode_in_Android,
