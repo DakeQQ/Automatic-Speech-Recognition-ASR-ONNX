@@ -283,14 +283,11 @@ LANGUAGE_REGION = {
 }
 
 
+
 class Tokenizer:
-    def __init__(self, filename=None):
+    def __init__(self, filename):
         self.str_to_idx = {}
         self.idx_to_str = {}
-        if filename:
-            self.load_from_file(filename)
-
-    def load_from_file(self, filename):
         with open(filename, 'r', encoding='utf-8') as file:
             for idx, line in enumerate(file):
                 token = line.rstrip('\n')
@@ -302,9 +299,6 @@ class Tokenizer:
 
     def decode(self, idx):
         return self.idx_to_str.get(idx)
-
-    def __len__(self):
-        return len(self.str_to_idx)
 
 
 # ONNX Runtime settings
