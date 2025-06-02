@@ -437,9 +437,9 @@ for test in test_audio:
         }
         for i in range(num_layers):
             input_feed_B[input_names_B[i]] = init_past_keys_B
+            input_feed_B[input_names_B[layer_indices[i]]] = all_outputs_A[i]
         for i in range(num_layers, num_layers_2):
             input_feed_B[input_names_B[i]] = init_past_values_B
-        for i in range(num_layers_2):
             input_feed_B[input_names_B[layer_indices[i]]] = all_outputs_A[i]
 
         if detect_language:
