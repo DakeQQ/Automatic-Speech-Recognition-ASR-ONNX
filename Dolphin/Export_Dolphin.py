@@ -247,13 +247,9 @@ LANGUAGE_REGION = {
 
 
 class Tokenizer:
-    def __init__(self, filename=None):
+    def __init__(self, filename):
         self.str_to_idx = {}
         self.idx_to_str = {}
-        if filename:
-            self.load_from_file(filename)
-
-    def load_from_file(self, filename):
         with open(filename, 'r', encoding='utf-8') as file:
             for idx, line in enumerate(file):
                 token = line.rstrip('\n')
@@ -265,10 +261,7 @@ class Tokenizer:
 
     def decode(self, idx):
         return self.idx_to_str.get(idx)
-
-    def __len__(self):
-        return len(self.str_to_idx)
-
+        
 
 def rel_shift(x, x_len, zero_pad, n_head):
     x_padded = torch.cat([zero_pad[:, :x_len].float(), x], dim=-1)
