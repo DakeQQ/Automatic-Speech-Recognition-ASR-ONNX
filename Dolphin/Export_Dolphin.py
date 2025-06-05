@@ -296,7 +296,7 @@ class DOLPHIN_ENCODER(torch.nn.Module):
         self.embed.bias.data *= self.position_encode.xscale
         self.position_encode_pe_half = self.position_encode.pe.size(1) // 2
 
-        def forward(self, audio):
+    def forward(self, audio):
         audio = audio.float() * self.inv_int16
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
