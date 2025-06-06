@@ -25,7 +25,7 @@ INPUT_AUDIO_LENGTH = 160000                                 # The maximum input 
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
-NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
+WINDOW_LENGTH = 400                                         # Length of windowing, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 LFR_M = 7                                                   # The model parameter, do not edit the value.
@@ -58,7 +58,7 @@ def normalize_to_int16(audio):
 
 
 class PARAFORMER(torch.nn.Module):
-    def __init__(self, paraformer, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size):
+    def __init__(self, paraformer, stft_model, nfft_stft, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size):
         super(PARAFORMER, self).__init__()
         self.encoder = paraformer.encoder
         self.calc_predictor = paraformer.calc_predictor
@@ -68,14 +68,8 @@ class PARAFORMER(torch.nn.Module):
         self.cmvn_vars = cmvn_vars
         self.T_lfr = lfr_len
         self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_fbank // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
+        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
-        self.nfft_fbank = nfft_fbank
-        if self.nfft_stft > self.nfft_fbank:
-            self.padding = torch.zeros((1, n_mels, (nfft_stft - nfft_fbank) // 2), dtype=torch.float32)
-            self.fbank = torch.cat((self.fbank, self.padding), dim=-1)
-        else:
-            self.padding = torch.zeros((1, (nfft_fbank - nfft_stft) // 2, stft_signal_len), dtype=torch.int8)
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
@@ -92,9 +86,7 @@ class PARAFORMER(torch.nn.Module):
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
         power = real_part * real_part + imag_part * imag_part
-        if self.nfft_fbank > self.nfft_stft:
-            power = torch.cat((power, self.padding[:, :, :power.shape[-1]].float()), dim=1)
-        mel_features = torch.matmul(self.fbank, power).transpose(1, 2).clamp(min=1e-5).log()
+        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
         left_padding = mel_features[:, [0], :]
         left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
@@ -107,7 +99,7 @@ class PARAFORMER(torch.nn.Module):
 
 print('\nExport start ...\n')
 with torch.inference_mode():
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
+    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     model = AutoModel(
         model=model_path,
         disable_update=True,
@@ -118,7 +110,7 @@ with torch.inference_mode():
     CMVN_VARS = (model.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
     CIF_HIDDEN_SIZE = model.model.encoder.encoders0._modules["0"].size
     tokenizer = model.kwargs['tokenizer']
-    paraformer = PARAFORMER(model.model.eval(), custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE)
+    paraformer = PARAFORMER(model.model.eval(), custom_stft, NFFT_STFT, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     torch.onnx.export(
         paraformer,
