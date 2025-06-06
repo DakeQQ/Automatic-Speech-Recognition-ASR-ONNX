@@ -24,7 +24,7 @@ INPUT_AUDIO_LENGTH = 160000                                 # The maximum input 
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 # N_MELS = 80                                               # Setting by whisper model config. Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
-NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
+WINDOW_LENGTH = 400                                         # Length of windowing, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
@@ -161,20 +161,14 @@ def remove_repeated_parts(ids, repeat_words_threshold):
 
 
 class WHISPER_ENCODER(torch.nn.Module):
-    def __init__(self, whisper, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, num_layers_de):
+    def __init__(self, whisper, stft_model, nfft_stft, stft_signal_len, n_mels, sample_rate, pre_emphasis, num_layers_de):
         super(WHISPER_ENCODER, self).__init__()
         self.encoder = whisper.encoder
         self.decoder = whisper.decoder
         self.stft_model = stft_model
         self.pre_emphasis = float(pre_emphasis)
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_fbank // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, "slaney", 'slaney')).transpose(0, 1).unsqueeze(0)
+        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, "slaney", 'slaney')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
-        self.nfft_fbank = nfft_fbank
-        if self.nfft_stft > self.nfft_fbank:
-            self.padding = torch.zeros((1, n_mels, (nfft_stft - nfft_fbank) // 2), dtype=torch.float32)
-            self.fbank = torch.cat((self.fbank, self.padding), dim=-1)
-        else:
-            self.padding = torch.zeros((1, (nfft_fbank - nfft_stft) // 2, stft_signal_len), dtype=torch.int8)
         self.save_encoder_key = [None] * num_layers_de
         self.save_encoder_value = [None] * num_layers_de
         self.inv_int16 = float(1.0 / 32768.0)
@@ -184,10 +178,7 @@ class WHISPER_ENCODER(torch.nn.Module):
         audio -= torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
-        power = real_part * real_part + imag_part * imag_part
-        if self.nfft_fbank > self.nfft_stft:
-            power = torch.cat((power, self.padding[:, :, :power.shape[-1]].float()), dim=1)
-        mel_features = torch.matmul(self.fbank, power).clamp(min=1e-5).log10()
+        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-5).log10()
         mel_features = torch.maximum(mel_features, mel_features.max() - 8.0)
         mel_features = mel_features * 0.25 + 1.0
         encoder_hidden_states = self.encoder(mel_features)
@@ -254,8 +245,8 @@ with torch.inference_mode():
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data *= scaling
         model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data *= scaling
 
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
-    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
+    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
+    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
 
     output_names = []
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
