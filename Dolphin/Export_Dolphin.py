@@ -285,7 +285,7 @@ class DOLPHIN_ENCODER(torch.nn.Module):
         self.stft_bins = nfft_stft // 2 + 1  # Number of frequency bins from STFT
 
         # Create mel filterbank - ensure it matches STFT output dimensions
-        mel_filterbank = torchaudio.functional.melscale_fbanks(
+        self.fbank = torchaudio.functional.melscale_fbanks(
             n_freqs=self.stft_bins,
             f_min=20,
             f_max=sample_rate // 2,
@@ -293,16 +293,10 @@ class DOLPHIN_ENCODER(torch.nn.Module):
             sample_rate=sample_rate,
             norm='slaney',
             mel_scale='slaney'
-        )
-
-        # Register as buffer for ONNX export (transpose for matrix multiplication)
-        self.register_buffer('fbank', mel_filterbank.T.unsqueeze(0))
-
-        # Pre-compute constants
-        self.register_buffer('inv_int16', torch.tensor(1.0 / 32768.0))
-        self.register_buffer('log_offset', torch.tensor(1e-5))  # Small constant to avoid log(0)
-
+        ).transpose(0, 1).unsqueeze(0)
+                     
         # Normalization parameters
+        self.inv_int16 = float(1.0 / 32768.0)
         self.inv_std = 1.0 / self.dolphin.normalize.std
 
         # Encoder components (keeping your original structure)
@@ -322,9 +316,7 @@ class DOLPHIN_ENCODER(torch.nn.Module):
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2)
-        mel_features = torch.clamp(mel_features, min=self.log_offset)
-        mel_features = torch.log(mel_features)
+        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
         mel_features = (mel_features - self.dolphin.normalize.mean) * self.inv_std
         embed = self.dolphin.encoder.embed.conv(mel_features.unsqueeze(0))
         embed_len = embed.shape[-2].unsqueeze(0)
