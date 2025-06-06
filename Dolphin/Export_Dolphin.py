@@ -18,11 +18,11 @@ TARGET_LANGUAGE = "Auto-Auto"                                                   
 test_audio = ["./example/zh.mp3", "./example/zh-Shanghai.wav", "./example/ja.mp3", "./example/ko.mp3"]  # The test audio list.
 
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. dolphin series models only support dynamic_axes due to their transformer structure.
-INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length. Must less than 480000 (30 seconds).
+INPUT_AUDIO_LENGTH = 320000                                 # The maximum input audio length. Must less than 480000 (30 seconds).
 WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
 N_MELS = 80                                                 # Setting by dolphin model config. Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
-NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
+WINDOW_LENGTH = 400                                         # Length of windowing, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
@@ -271,22 +271,42 @@ def rel_shift(x, x_len, zero_pad, n_head):
 
 
 class DOLPHIN_ENCODER(torch.nn.Module):
-    def __init__(self, dolphin, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, num_layers_de):
+    def __init__(self, dolphin, stft_model, nfft_stft, stft_signal_len, n_mels, sample_rate, pre_emphasis,
+                 num_layers_de):
         super(DOLPHIN_ENCODER, self).__init__()
         self.dolphin = copy.deepcopy(dolphin.s2t_model)
         self.stft_model = stft_model
         self.pre_emphasis = float(pre_emphasis)
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_fbank // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, 'slaney', 'slaney')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
-        self.nfft_fbank = nfft_fbank
-        if self.nfft_stft > self.nfft_fbank:
-            self.padding = torch.zeros((1, n_mels, (nfft_stft - nfft_fbank) // 2), dtype=torch.float32)
-            self.fbank = torch.cat((self.fbank, self.padding), dim=-1)
-        else:
-            self.padding = torch.zeros((1, (nfft_fbank - nfft_stft) // 4, stft_signal_len), dtype=torch.int8)
-        self.inv_int16 = float(1.0 / 32768.0)
+        self.n_mels = n_mels
+        self.sample_rate = sample_rate
+
+        # Calculate frequency bins for STFT and filterbank
+        self.stft_bins = nfft_stft // 2 + 1  # Number of frequency bins from STFT
+
+        # Create mel filterbank - ensure it matches STFT output dimensions
+        mel_filterbank = torchaudio.functional.melscale_fbanks(
+            n_freqs=self.stft_bins,
+            f_min=20,
+            f_max=sample_rate // 2,
+            n_mels=n_mels,
+            sample_rate=sample_rate,
+            norm='slaney',
+            mel_scale='slaney'
+        )
+
+        # Register as buffer for ONNX export (transpose for matrix multiplication)
+        self.register_buffer('fbank', mel_filterbank.T.unsqueeze(0))
+
+        # Pre-compute constants
+        self.register_buffer('inv_int16', torch.tensor(1.0 / 32768.0))
+        self.register_buffer('log_offset', torch.tensor(1e-5))  # Small constant to avoid log(0)
+
+        # Normalization parameters
         self.inv_std = 1.0 / self.dolphin.normalize.std
-        self.zero_pad = torch.zeros((self.dolphin.encoder.encoders._modules['0'].attn.h, 2048, 1), dtype=torch.int8)  # 2048 is about 30 seconds audio input.
+
+        # Encoder components (keeping your original structure)
+        self.zero_pad = torch.zeros((self.dolphin.encoder.encoders._modules['0'].attn.h, 2048, 1), dtype=torch.int8)
         self.save_en_keys = [None] * num_layers_de
         self.save_en_values = [None] * num_layers_de
         self.embed = self.dolphin.encoder.embed.out[0]
@@ -298,14 +318,13 @@ class DOLPHIN_ENCODER(torch.nn.Module):
 
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
-        audio -= torch.mean(audio)  # Remove DC Offset
-        audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
+        audio -= torch.mean(audio, dim=-1, keepdim=True)
+        if self.pre_emphasis > 0:
+            audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
-        power = real_part * real_part + imag_part * imag_part
-        if self.nfft_fbank > self.nfft_stft:
-            padding = self.padding[:, :, :power.shape[-1]].float()
-            power = torch.cat((padding, power, padding), dim=1)
-        mel_features = torch.matmul(self.fbank, power).transpose(1, 2).clamp(min=1e-5).log()
+        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2)
+        mel_features = torch.clamp(mel_features, min=self.log_offset)
+        mel_features = torch.log(mel_features)
         mel_features = (mel_features - self.dolphin.normalize.mean) * self.inv_std
         embed = self.dolphin.encoder.embed.conv(mel_features.unsqueeze(0))
         embed_len = embed.shape[-2].unsqueeze(0)
@@ -425,9 +444,8 @@ with torch.inference_mode():
         model.s2t_model.decoder.decoders._modules[i].src_attn.linear_k.weight.data *= scaling
         model.s2t_model.decoder.decoders._modules[i].src_attn.linear_k.bias.data *= scaling
 
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
-    dolphin_encoder = DOLPHIN_ENCODER(model, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
-
+    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, hop_len=HOP_LENGTH, win_length=WINDOW_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
+    dolphin_encoder = DOLPHIN_ENCODER(model, custom_stft, NFFT_STFT, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
     output_names = []
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     dynamic_axes = {'audio': {2: 'audio_len'}}
