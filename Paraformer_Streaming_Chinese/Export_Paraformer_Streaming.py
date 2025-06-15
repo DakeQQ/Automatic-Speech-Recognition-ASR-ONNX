@@ -87,10 +87,11 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         self.pad_zeros_fsmn = torch.zeros((1, fsmn_hidden_size, self.encoder.encoders0._modules["0"].self_attn.pad_fn.padding[0]), dtype=torch.float32)
         positions = torch.arange(1, max_continue_streaming, dtype=torch.int32).unsqueeze(0)
         self.position_encoding = self.encoder.embed.encode(positions, feature_size).half()
-        factor = self.encoder.encoders._modules["0"].self_attn.d_k ** (-0.5)
+        factor = self.encoder.encoders._modules["0"].self_attn.d_k ** (-0.25)
+        cif_hidden_size_2 = cif_hidden_size + cif_hidden_size
         for encoder_layer in self.total_encoders:
-            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size] *= factor
-            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size_2] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size_2] *= factor
 
     def forward(self, *all_inputs):
         previous_mel_features = all_inputs[-5]
@@ -99,7 +100,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         start_idx = all_inputs[-2]
         audio = all_inputs[-1]
         audio = audio.float() * self.inv_int16
-        audio -= torch.mean(audio)  # Remove DC Offset
+        audio = audio - torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
         power = real_part * real_part + imag_part * imag_part
