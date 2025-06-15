@@ -21,7 +21,7 @@ else:
 
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Whisper series models only support dynamic_axes due to their transformer structure.
 INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length.
-WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
+WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
 # N_MELS = 80                                               # Setting by whisper model config. Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
 WINDOW_LENGTH = 400                                         # Length of windowing, edit it carefully.
