@@ -312,7 +312,7 @@ class DOLPHIN_ENCODER(torch.nn.Module):
 
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
-        audio -= torch.mean(audio, dim=-1, keepdim=True)
+        audio = audio - torch.mean(audio, dim=-1, keepdim=True)
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
@@ -323,7 +323,7 @@ class DOLPHIN_ENCODER(torch.nn.Module):
         x = self.embed(embed.transpose(1, 2).contiguous().view(1, embed_len, -1))
         pos_emb = self.position_encode.pe[:, self.position_encode_pe_half - embed_len + 1: self.position_encode_pe_half + embed_len].float()
         for encoder_layer in self.dolphin.encoder.encoders:
-            x += encoder_layer.ff_scale * encoder_layer.feed_forward_macaron(encoder_layer.norm_ff_macaron(x))
+            x = x + encoder_layer.ff_scale * encoder_layer.feed_forward_macaron(encoder_layer.norm_ff_macaron(x))
             x1 = encoder_layer.norm_mha(x)
             q = encoder_layer.attn.linear_q(x1).view(-1, encoder_layer.attn.h, encoder_layer.attn.d_k).transpose(0, 1)
             k = encoder_layer.attn.linear_k(x1).view(-1, encoder_layer.attn.h, encoder_layer.attn.d_k).permute(1, 2, 0)
@@ -340,9 +340,9 @@ class DOLPHIN_ENCODER(torch.nn.Module):
             x_g = encoder_layer.cgmlp.csgu.conv(encoder_layer.cgmlp.csgu.norm(x_g).transpose(1, 2)).transpose(1, 2)
             x2 = encoder_layer.cgmlp.channel_proj2(x_r * x_g)
             x_concat = torch.cat([x1, x2], dim=-1)
-            x_concat += encoder_layer.depthwise_conv_fusion(x_concat.transpose(1, 2)).transpose(1, 2)
-            x += encoder_layer.merge_proj(x_concat)
-            x += encoder_layer.ff_scale * encoder_layer.feed_forward(encoder_layer.norm_ff(x))
+            x_concat = x_concat + encoder_layer.depthwise_conv_fusion(x_concat.transpose(1, 2)).transpose(1, 2)
+            x = x + encoder_layer.merge_proj(x_concat)
+            x = x + encoder_layer.ff_scale * encoder_layer.feed_forward(encoder_layer.norm_ff(x))
             x = encoder_layer.norm_final(x)
         enc_outputs = self.dolphin.encoder.after_norm(x)
         for idx, decoder_layer in enumerate(self.dolphin.decoder.decoders):
