@@ -20,10 +20,10 @@ ORT_Accelerate_Providers = []                               # If you have accele
                                                             # else keep empty.
 MAX_CONTINUE_STREAMING = 502                                # 502 = Max 30 seconds streaming audio input. # 1003 = Max 60 seconds streaming audio input.
 INPUT_AUDIO_LENGTH = 8800                                   # The fixed input audio segment length, edit it carefully.
-WINDOW_TYPE = 'kaiser'                                      # Type of window function used in the STFT
+WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
-NFFT_FBANK = 512                                            # Number of FFT components for the FBank process, edit it carefully.
+WINDOW_LENGTH = 400                                         # Length of windowing, edit it carefully.
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 LFR_M = 7                                                   # The model parameter, do not edit the value.
@@ -52,7 +52,7 @@ def normalize_to_int16(audio):
 
 
 class PARAFORMER_ENCODER(torch.nn.Module):
-    def __init__(self, paraformer, stft_model, nfft_stft, nfft_fbank, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size, fsmn_hidden_size, feature_size, look_back_A, look_back_B, look_back_C, look_back_en, max_continue_streaming):
+    def __init__(self, paraformer, stft_model, nfft_stft, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size, fsmn_hidden_size, feature_size, look_back_A, look_back_B, look_back_C, look_back_en, max_continue_streaming):
         super(PARAFORMER_ENCODER, self).__init__()
         self.inv_int16 = float(1.0 / 32768.0)
         self.threshold = float(1.0)
@@ -68,14 +68,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         self.T_lfr = lfr_len
         self.cif_hidden_size = cif_hidden_size
         self.pre_emphasis = float(pre_emphasis)
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_fbank // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
-        self.nfft_stft = nfft_stft
-        self.nfft_fbank = nfft_fbank
-        if self.nfft_stft > self.nfft_fbank:
-            self.padding = torch.zeros((1, n_mels, (nfft_stft - nfft_fbank) // 2), dtype=torch.float32)
-            self.fbank = torch.cat((self.fbank, self.padding), dim=-1)
-        else:
-            self.padding = torch.zeros((1, (nfft_fbank - nfft_stft) // 2, stft_signal_len), dtype=torch.int8)
+        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
@@ -103,10 +96,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         audio = audio - torch.mean(audio)  # Remove DC Offset
         audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
         real_part, imag_part = self.stft_model(audio, 'constant')
-        power = real_part * real_part + imag_part * imag_part
-        if self.nfft_fbank > self.nfft_stft:
-            power = torch.cat((power, self.padding[:, :, :power.shape[-1]].float()), dim=1)
-        mel_features = torch.matmul(self.fbank, power).transpose(1, 2).clamp(min=1e-5).log()
+        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
         left_padding = mel_features[:, [0], :]
         left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
@@ -239,7 +229,7 @@ class PARAFORMER_DECODER(torch.nn.Module):
 
 print('\nExport Encoder Part...\n')
 with torch.inference_mode():
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, n_mels=N_MELS, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
+    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     model = AutoModel(
         model=model_path,
         disable_update=True,
@@ -306,7 +296,7 @@ with torch.inference_mode():
     all_inputs.append(audio)
     dynamic_axes["list_frame"] = {1: 'list_frame_len'}
 
-    paraformer_encoder = PARAFORMER_ENCODER(model, custom_stft, NFFT_STFT, NFFT_FBANK, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE, FSMN_HIDDEN_SIZE, FEATURE_SIZE, LOOK_BACK_A, LOOK_BACK_B, LOOK_BACK_C, LOOK_BACK_ENCODER, MAX_CONTINUE_STREAMING)
+    paraformer_encoder = PARAFORMER_ENCODER(model, custom_stft, NFFT_STFT, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE, FSMN_HIDDEN_SIZE, FEATURE_SIZE, LOOK_BACK_A, LOOK_BACK_B, LOOK_BACK_C, LOOK_BACK_ENCODER, MAX_CONTINUE_STREAMING)
     torch.onnx.export(
         paraformer_encoder,
         tuple(all_inputs),
@@ -541,3 +531,4 @@ while True:
     elif slice_end > aligned_len:
         input_feed_A, input_feed_B, slice_start, slice_end = Initialize()      # Ready for next input audio.
         break
+      
