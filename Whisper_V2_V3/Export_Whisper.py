@@ -195,19 +195,24 @@ class WHISPER_DECODER(torch.nn.Module):
         self.decoder = whisper.model.decoder
         self.suppress_tokens = suppress_tokens
         self.num_layers_de_2 = num_layers_de + num_layers_de
+        self.num_layers_de_2_plus_1 = self.num_layers_de_2 + 1
+        self.num_layers_de_2_plus_2 = self.num_layers_de_2 + 2
         self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
+        self.suppress_tokens_penality = torch.ones((1, self.whisper.proj_out.out_features), dtype=torch.float32)
+        if self.suppress_tokens is not None:
+            self.suppress_tokens_penality[:, self.suppress_tokens] = float(-9999.0)
 
     def forward(self, *all_inputs):
         input_ids = all_inputs[self.num_layers_de_2]
-        history_len = all_inputs[self.num_layers_de_2 + 1]
-        ids_len = all_inputs[self.num_layers_de_2 + 2]
+        history_len = all_inputs[self.num_layers_de_2_plus_1]
+        ids_len = all_inputs[self.num_layers_de_2_plus_2]
         kv_seq_len = history_len + ids_len
         task_embeds = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len: kv_seq_len]
         attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * all_inputs[-1]).float()
         outputs = self.decoder(*(all_inputs + tuple([task_embeds, attention_mask])))
         lm_logits = self.whisper.proj_out(outputs[0][:, -1])
         if self.suppress_tokens is not None:
-            lm_logits[:, self.suppress_tokens] = float(-65504.0)
+            lm_logits = lm_logits + self.suppress_tokens_penality
         indices = torch.argmax(lm_logits, dim=-1, keepdim=True).int()
         return outputs[1:], indices, kv_seq_len
 
