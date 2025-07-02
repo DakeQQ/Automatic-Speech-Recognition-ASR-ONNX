@@ -74,7 +74,7 @@ else:
 
 
 download_path_lower = download_path.lower()
-if ("v3" in download_path_lower) or ("crisperwhisper" in download_path) or ("anime" in download_path):
+if ("v3" in download_path_lower) or ("crisperwhisper" in download_path_lower) or ("anime" in download_path_lower):
     is_v3 = True
 else:
     is_v3 = False
