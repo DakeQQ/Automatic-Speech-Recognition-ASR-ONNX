@@ -271,7 +271,7 @@ def rel_shift(x, x_len, zero_pad, n_head):
 
 
 class DOLPHIN_ENCODER(torch.nn.Module):
-    def __init__(self, dolphin, stft_model, nfft_stft, stft_signal_len, n_mels, sample_rate, pre_emphasis,
+    def __init__(self, dolphin, stft_model, nfft_stft, n_mels, sample_rate, pre_emphasis,
                  num_layers_de):
         super(DOLPHIN_ENCODER, self).__init__()
         self.dolphin = copy.deepcopy(dolphin.s2t_model)
@@ -437,7 +437,7 @@ with torch.inference_mode():
         model.s2t_model.decoder.decoders._modules[i].src_attn.linear_k.bias.data *= scaling
 
     custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, hop_len=HOP_LENGTH, win_length=WINDOW_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
-    dolphin_encoder = DOLPHIN_ENCODER(model, custom_stft, NFFT_STFT, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
+    dolphin_encoder = DOLPHIN_ENCODER(model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
     output_names = []
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     dynamic_axes = {'audio': {2: 'audio_len'}}
