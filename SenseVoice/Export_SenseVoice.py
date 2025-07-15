@@ -75,7 +75,8 @@ class SENSE_VOICE(torch.nn.Module):
     def forward(self, audio, language_idx):
         audio = audio.float() * self.int_inv16
         audio = audio - torch.mean(audio)  # Remove DC Offset
-        audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
+        if self.pre_emphasis > 0:
+            audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
         left_padding = mel_features[:, [0], :]
