@@ -18,7 +18,7 @@ test_audio = ["./example/zh.mp3", "./example/zh_1.wav", "./example/zh_2.wav"]   
 
 
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-INPUT_AUDIO_LENGTH = 240000                                 # Set for maximum input audio length.
+INPUT_AUDIO_LENGTH = 160000                                 # Set for maximum input audio length.
 WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
@@ -26,7 +26,7 @@ WINDOW_LENGTH = 400                                         # Length of windowin
 HOP_LENGTH = 160                                            # Number of samples between successive frames in the STFT, edit it carefully.
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
-MAX_SEQ_LEN = 64                                            # Set an appropriate value.
+MAX_SEQ_LEN = 72                                            # Set an appropriate value.
 STOP_TOKEN = [4]                                            # 4 is the end token for FireRedASR-AED series model.
 SLIDING_WINDOW = 0                                          # Set the sliding window step for test audio reading; use 0 to disable.
 
