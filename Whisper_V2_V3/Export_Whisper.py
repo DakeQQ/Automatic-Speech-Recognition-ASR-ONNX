@@ -161,7 +161,7 @@ def remove_repeated_parts(ids, repeat_words_threshold):
 
 
 class WHISPER_ENCODER(torch.nn.Module):
-    def __init__(self, whisper, stft_model, nfft_stft, stft_signal_len, n_mels, sample_rate, pre_emphasis, num_layers_de):
+    def __init__(self, whisper, stft_model, nfft_stft, n_mels, sample_rate, pre_emphasis, num_layers_de):
         super(WHISPER_ENCODER, self).__init__()
         self.encoder = whisper.encoder
         self.decoder = whisper.decoder
@@ -176,7 +176,8 @@ class WHISPER_ENCODER(torch.nn.Module):
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
         audio = audio - torch.mean(audio)  # Remove DC Offset
-        audio = torch.cat((audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]), dim=-1)  # Pre Emphasize
+        if self.pre_emphasis > 0:
+            audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-5).log10()
         mel_features = torch.maximum(mel_features, mel_features.max() - 8.0)
@@ -251,7 +252,7 @@ with torch.inference_mode():
         model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data *= scaling
 
     custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
-    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
+    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
 
     output_names = []
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
