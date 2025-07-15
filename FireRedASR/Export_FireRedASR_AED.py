@@ -68,7 +68,7 @@ class FIRE_RED_ENCODER(torch.nn.Module):
   
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
-        audio -= torch.mean(audio)  # Remove DC Offset
+        audio = audio - torch.mean(audio)  # Remove DC Offset
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
