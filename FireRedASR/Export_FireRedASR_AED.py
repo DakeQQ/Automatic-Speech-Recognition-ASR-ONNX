@@ -148,6 +148,7 @@ with torch.inference_mode():
         for i in model.decoder.layer_stack._modules:
             model.decoder.layer_stack._modules[i].cross_attn.w_qs.weight.data *= scaling
             model.decoder.layer_stack._modules[i].cross_attn.w_qs.bias.data *= scaling
+            model.decoder.layer_stack._modules[i].cross_attn.w_ks.weight.data *= scaling
 
         custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
         fire_red_encoder = FIRE_RED_ENCODER(model, feat_extractor, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE)
