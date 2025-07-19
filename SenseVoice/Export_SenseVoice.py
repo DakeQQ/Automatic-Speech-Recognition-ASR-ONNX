@@ -63,7 +63,7 @@ class SENSE_VOICE(torch.nn.Module):
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int64).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int64)
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
-        self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0)  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
+        self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
         self.int_inv16 = float(1.0 / 32768.0)
         num_head = self.encoder.encoders._modules["0"].self_attn.h
         head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
@@ -93,7 +93,7 @@ class SENSE_VOICE(torch.nn.Module):
         left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
-        mel_features = torch.cat((self.language_embed[:, language_idx], self.system_embed, mel_features), dim=1)
+        mel_features = torch.cat((self.language_embed[:, language_idx].float(), self.system_embed, mel_features), dim=1)
         encoder_out = self.encoder((mel_features - self.cmvn_means) * self.cmvn_vars)
         token_ids = self.ctc_lo(encoder_out).argmax(dim=-1).int()
         shifted_tensor = torch.roll(token_ids, shifts=-1, dims=-1)
