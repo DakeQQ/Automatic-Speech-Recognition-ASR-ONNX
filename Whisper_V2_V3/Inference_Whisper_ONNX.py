@@ -18,7 +18,7 @@ DEVICE_ID = 0                           # The GPU id, default to 0.
 TARGET_LANGUAGE = "en"                  # Choose a language listed in the get_language_id function's language_map.
 TASK = 'transcribe'                     # Choose one of : ['transcribe', 'translate']
 SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
-MAX_SEQ_LEN = 64                        # It should keep the same with exported model.
+MAX_SEQ_LEN = 80                        # It should keep the same with exported model.
 SAMPLE_RATE = 16000                     # The model parameter, do not edit the value.
 STOP_TOKEN = [50257]                    # 50257 is the end token for common Whisper series model.
 
@@ -289,8 +289,8 @@ for language_idx, test in enumerate(test_audio):
     layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 3
     input_feed_B = {
         input_names_B[-1]: attention_mask,
-        input_names_B[num_layers_2]: input_ids,
-        input_names_B[num_layers_2_plus_1]: history_len,
+        input_names_B[num_layers_2]: history_len,
+        input_names_B[num_layers_2_plus_1]: input_ids,
         input_names_B[num_layers_2_plus_2]: ids_len
     }
     for i in range(num_layers):
@@ -306,7 +306,7 @@ for language_idx, test in enumerate(test_audio):
             input_feed_B[input_names_B[layer_indices[i]]] = all_outputs_A[i]
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
-            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-2])[0][0]
+            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])[0][0]
             num_decode += 1
             if max_logit_ids in STOP_TOKEN:
                 break
