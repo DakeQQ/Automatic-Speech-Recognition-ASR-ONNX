@@ -13,7 +13,7 @@ original_folder_path = "/home/DakeQQ/Downloads/SenseVoice_ONNX"                 
 optimized_folder_path = "/home/DakeQQ/Downloads/SenseVoice_Optimized"                     # The optimized folder.
 model_path = os.path.join(original_folder_path, "SenseVoiceSmall.onnx")                   # The original fp32 model name.
 optimized_model_path = os.path.join(optimized_folder_path, "SenseVoiceSmall.onnx")        # The optimized model name.
-do_quantize = True                                                                        # Use dynamic quant the model to int8 format.
+do_quantize = False                                                                       # Use dynamic quant the model to int8 format.
 use_gpu_fp16 = False                                                                      # If true, the transformers.optimizer will remain the FP16 processes.
 provider = 'CPUExecutionProvider'                                                         # ['CPUExecutionProvider', 'CUDAExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider']
 target_platform = "amd64"                                                                 # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
@@ -53,7 +53,7 @@ if do_quantize:
 # Use this function for float16 quantization will get errors.
 model = optimize_model(optimized_model_path,
                        use_gpu=use_gpu_fp16,        # Set to True because the model uses float16.
-                       opt_level=99 if (target_platform == "amd64") and not use_gpu_fp16 else 2,
+                       opt_level=2,
                        num_heads=4,         # The SenseVoiceSmall model parameter.
                        hidden_size=512,     # The SenseVoiceSmall model parameter.
                        provider=provider,
@@ -85,7 +85,7 @@ slim(
 
 # Upgrade the Opset version. (optional process)
 model = onnx.load(optimized_model_path)
-model = onnx.version_converter.convert_version(model, 21)
+model = onnx.version_converter.convert_version(model, 18)
 onnx.save(model, optimized_model_path, save_as_external_data=False)
 del model
 gc.collect()
