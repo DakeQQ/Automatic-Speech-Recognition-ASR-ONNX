@@ -91,6 +91,23 @@ class PARAFORMER(torch.nn.Module):
             encoder_layer.self_attn.linear_out_w = encoder_layer.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
             encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
 
+        num_head = self.decoder.decoders._modules["0"].src_attn.h
+        head_dim = self.decoder.decoders._modules["0"].src_attn.d_k
+        factor = float(head_dim ** (-0.25))
+        for decoder_layer in self.decoder.decoders:
+            decoder_layer.src_attn.linear_q.weight.data *= factor
+            decoder_layer.src_attn.linear_q.bias.data *= factor
+            decoder_layer.src_attn.linear_q_w = decoder_layer.src_attn.linear_q.weight.data.view(num_head, head_dim, -1).transpose(1, 2).contiguous()
+            decoder_layer.src_attn.linear_q_b = decoder_layer.src_attn.linear_q.bias.data.view(num_head, 1, head_dim).contiguous()
+            decoder_layer.src_attn.linear_k_w = decoder_layer.src_attn.linear_k_v.weight.data[:cif_hidden_size].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
+            decoder_layer.src_attn.linear_k_b = decoder_layer.src_attn.linear_k_v.bias.data[:cif_hidden_size].view(num_head, 1, head_dim).contiguous()
+            decoder_layer.src_attn.linear_k_w *= factor
+            decoder_layer.src_attn.linear_k_b *= factor
+            decoder_layer.src_attn.linear_v_w = decoder_layer.src_attn.linear_k_v.weight.data[cif_hidden_size:].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
+            decoder_layer.src_attn.linear_v_b = decoder_layer.src_attn.linear_k_v.bias.data[cif_hidden_size:].view(num_head, 1, head_dim).contiguous()
+            decoder_layer.src_attn.linear_out_w = decoder_layer.src_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
+            decoder_layer.src_attn.linear_out_b = decoder_layer.src_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
+
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
         audio = audio - torch.mean(audio)  # Remove DC Offset
