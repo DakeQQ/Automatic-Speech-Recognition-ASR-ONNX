@@ -20,7 +20,7 @@ else:
 
 
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Whisper series models only support dynamic_axes due to their transformer structure.
-INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length.
+INPUT_AUDIO_LENGTH = 240000                                 # The maximum input audio length.
 WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
 # N_MELS = 80                                               # Setting by whisper model config. Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
@@ -31,7 +31,7 @@ PRE_EMPHASIZE = 0.97                                        # For audio preproce
 TARGET_LANGUAGE = "en"                                      # Choose a language listed in the get_language_id function's language_map.
 TASK = 'transcribe'                                         # Choose one of : ['transcribe', 'translate']
 SLIDING_WINDOW = 0                                          # Set the sliding window step for test audio reading; use 0 to disable.
-MAX_SEQ_LEN = 64                                            # It should less than 448.
+MAX_SEQ_LEN = 80                                            # It should less than 448.
 STOP_TOKEN = [50257]                                        # 50257 is the end token for common Whisper series model.
 
 
@@ -184,8 +184,8 @@ class WHISPER_ENCODER(torch.nn.Module):
         mel_features = mel_features * 0.25 + 1.0
         encoder_hidden_states = self.encoder(mel_features)
         for idx, decoder_layer in enumerate(self.decoder.layers):
-            self.save_encoder_key[idx] = decoder_layer.encoder_attn._shape(decoder_layer.encoder_attn.k_proj(encoder_hidden_states), -1, 1).transpose(1, 2)
-            self.save_encoder_value[idx] = decoder_layer.encoder_attn._shape(decoder_layer.encoder_attn.v_proj(encoder_hidden_states), -1, 1)
+            self.save_encoder_key[idx] = torch.matmul(encoder_hidden_states, decoder_layer.encoder_attn.k_proj.weight.data).transpose(1, 2)
+            self.save_encoder_value[idx] = torch.matmul(encoder_hidden_states, decoder_layer.encoder_attn.v_proj.weight.data) + decoder_layer.encoder_attn.v_proj.bias.data
         return *self.save_encoder_key, *self.save_encoder_value
 
 
@@ -204,8 +204,8 @@ class WHISPER_DECODER(torch.nn.Module):
             self.suppress_tokens_penality[:, self.suppress_tokens] = float(-9999.0)
 
     def forward(self, *all_inputs):
-        input_ids = all_inputs[self.num_layers_de_2]
-        history_len = all_inputs[self.num_layers_de_2_plus_1]
+        history_len = all_inputs[self.num_layers_de_2]
+        input_ids = all_inputs[self.num_layers_de_2_plus_1]
         ids_len = all_inputs[self.num_layers_de_2_plus_2]
         kv_seq_len = history_len + ids_len
         task_embeds = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len: kv_seq_len]
@@ -214,8 +214,8 @@ class WHISPER_DECODER(torch.nn.Module):
         lm_logits = self.whisper.proj_out(outputs[0][:, -1])
         if self.suppress_tokens is not None:
             lm_logits = lm_logits + self.suppress_tokens_penality
-        indices = torch.argmax(lm_logits, dim=-1, keepdim=True).int()
-        return outputs[1:], indices, kv_seq_len
+        max_logit_ids = torch.argmax(lm_logits, dim=-1, keepdim=True).int()
+        return outputs[1:], kv_seq_len, max_logit_ids
 
 
 print('\nExport start...\n')
@@ -240,16 +240,42 @@ with torch.inference_mode():
         model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data *= scaling
         model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data *= scaling
         model.model.encoder.layers._modules[i].self_attn.k_proj.weight.data *= scaling
+
+        model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
+        model.model.encoder.layers._modules[i].self_attn.k_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.k_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.model.encoder.layers._modules[i].self_attn.v_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.v_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.model.encoder.layers._modules[i].self_attn.v_proj.bias.data = model.model.encoder.layers._modules[i].self_attn.v_proj.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
+        model.model.encoder.layers._modules[i].self_attn.out_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.out_proj.weight.data.view(HIDDEN_SIZE, NUM_HEAD_EN, HEAD_DIM_EN).permute(1, 2, 0).contiguous()
+        model.model.encoder.layers._modules[i].self_attn.out_proj.bias.data = model.model.encoder.layers._modules[i].self_attn.out_proj.bias.data.view(1, 1, -1).contiguous()
+        
     scaling = float(HEAD_DIM_DE ** -0.25)
     for i in model.model.decoder.layers._modules:
         model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data *= scaling
         model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data *= scaling
         model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data *= scaling
+
+        model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
+        model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.model.decoder.layers._modules[i].self_attn.v_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.v_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.model.decoder.layers._modules[i].self_attn.v_proj.bias.data = model.model.decoder.layers._modules[i].self_attn.v_proj.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
+        model.model.decoder.layers._modules[i].self_attn.out_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.out_proj.weight.data.view(HIDDEN_SIZE, NUM_HEAD_EN, HEAD_DIM_EN).permute(1, 2, 0).contiguous()
+        model.model.decoder.layers._modules[i].self_attn.out_proj.bias.data = model.model.decoder.layers._modules[i].self_attn.out_proj.bias.data.view(1, 1, -1).contiguous()
+        
     scaling = float(model.model.decoder.layers._modules['0'].encoder_attn.head_dim ** -0.25)
     for i in model.model.decoder.layers._modules:
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data *= scaling
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data *= scaling
         model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data *= scaling
+        
+        model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
+        model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.model.decoder.layers._modules[i].encoder_attn.v_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.v_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.model.decoder.layers._modules[i].encoder_attn.v_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.v_proj.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
+        model.model.decoder.layers._modules[i].encoder_attn.out_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.out_proj.weight.data.view(HIDDEN_SIZE, NUM_HEAD_EN, HEAD_DIM_EN).permute(1, 2, 0).contiguous()
+        model.model.decoder.layers._modules[i].encoder_attn.out_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.out_proj.bias.data.view(1, 1, -1).contiguous()
 
     custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
@@ -321,10 +347,10 @@ with torch.inference_mode():
         output_names.append(name)
         dynamic_axes[name] = {1: 'history_len_plus_ids_len'}
 
-    input_names.append('input_ids')
-    all_inputs.append(input_ids)
     input_names.append('history_len')
     all_inputs.append(history_len)
+    input_names.append('input_ids')
+    all_inputs.append(input_ids)
     input_names.append('ids_len')
     all_inputs.append(ids_len)
 
@@ -341,8 +367,8 @@ with torch.inference_mode():
 
     all_inputs.append(attention_mask)
     input_names.append('attention_mask')
-    output_names.append('max_logit_id')
     output_names.append('kv_seq_len')
+    output_names.append('max_logit_id')
 
     torch.onnx.export(
         whisper_decoder,
@@ -432,7 +458,7 @@ for language_idx, test in enumerate(test_audio):
     audio_len = len(audio)
     audio = audio.reshape(1, 1, -1)
     if isinstance(shape_value_in, str):
-        INPUT_AUDIO_LENGTH = min(160000, audio_len)  # You can adjust it.
+        INPUT_AUDIO_LENGTH = min(240000, audio_len)  # You can adjust it.
     else:
         INPUT_AUDIO_LENGTH = shape_value_in
     if SLIDING_WINDOW <= 0:
@@ -465,8 +491,8 @@ for language_idx, test in enumerate(test_audio):
     layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 3
     input_feed_B = {
         in_name_B[-1].name: attention_mask,
-        in_name_B[num_layers_2].name: input_ids,
-        in_name_B[num_layers_2_plus_1].name: history_len,
+        in_name_B[num_layers_2].name: history_len,
+        in_name_B[num_layers_2_plus_1].name: input_ids,
         in_name_B[num_layers_2_plus_2].name: ids_len
     }
     for i in range(num_layers):
@@ -482,7 +508,7 @@ for language_idx, test in enumerate(test_audio):
             input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
-            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-2])[0][0]
+            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])[0][0]
             num_decode += 1
             if max_logit_ids in STOP_TOKEN:
                 break
@@ -500,7 +526,7 @@ for language_idx, test in enumerate(test_audio):
         [{
             "tokens": save_token_array
         }],
-        return_timestamps=None,                              # Do not support return timestamps
+        return_timestamps=None,  # Do not support return timestamps
         return_language=None,
         time_precision=0
     )
