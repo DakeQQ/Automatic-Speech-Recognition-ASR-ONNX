@@ -60,7 +60,7 @@ else:
 # transformers.optimizer
 model = optimize_model(optimized_model_path,
                        use_gpu=True,                                  # Set to True because the model uses float16.
-                       opt_level=99 if (target_platform == "amd64") and not use_gpu_fp16 else 2,
+                       opt_level=2,
                        num_heads=4,                                   # The Paraformer model parameter.
                        hidden_size=512 if is_large_model else 320,    # The Paraformer model parameter.
                        provider=provider,
@@ -92,7 +92,7 @@ slim(
 
 # Upgrade the Opset version. (optional process)
 model = onnx.load(optimized_model_path)
-model = onnx.version_converter.convert_version(model, 21)
+model = onnx.version_converter.convert_version(model, 18)
 onnx.save(model, optimized_model_path, save_as_external_data=False)
 del model
 gc.collect()
