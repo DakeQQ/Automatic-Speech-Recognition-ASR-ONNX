@@ -20,7 +20,7 @@ from typing import Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.utils.checkpoint
-from torch import nn
+from torch import nn, Tensor
 from torch.nn import CrossEntropyLoss
 
 from ...activations import ACT2FN
@@ -281,11 +281,13 @@ class WhisperAttention(nn.Module):
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        query_states = self.q_proj(hidden_states).view(-1, self.num_heads, self.head_dim).transpose(0, 1).contiguous()
-        key_states = self.k_proj(hidden_states).view(-1, self.num_heads, self.head_dim).permute(1, 2, 0).contiguous()
-        value_states = self.v_proj(hidden_states).view(-1, self.num_heads, self.head_dim).transpose(0, 1).contiguous()
-        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states), dim=-1), value_states).transpose(0, 1).contiguous().reshape(1, -1, self.embed_dim))
+    ) -> Tensor:
+        query_states = torch.matmul(hidden_states, self.q_proj.weight.data) + self.q_proj.bias.data
+        key_states = torch.matmul(hidden_states, self.k_proj.weight.data).transpose(1, 2)
+        value_states = torch.matmul(hidden_states, self.v_proj.weight.data) + self.v_proj.bias.data
+        attn = torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states), dim=-1), value_states)
+        attn = torch.matmul(attn, self.out_proj.weight.data).sum(dim=0, keepdim=True) + self.out_proj.bias.data
+        return attn
 
 
 class WhisperFlashAttention2(WhisperAttention):
@@ -310,8 +312,10 @@ class WhisperFlashAttention2(WhisperAttention):
         output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
-        query_states = self.q_proj(hidden_states).view(-1, self.num_heads, self.head_dim).transpose(0, 1).contiguous()
-        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, past_key_en), dim=-1), past_value_en).transpose(0, 1).contiguous().reshape(1, -1, self.embed_dim))
+        query_states = torch.matmul(hidden_states, self.q_proj.weight.data) + self.q_proj.bias.data
+        attn = torch.matmul(nn.functional.softmax(torch.matmul(query_states, past_key_en), dim=-1), past_value_en)
+        attn = torch.matmul(attn, self.out_proj.weight.data).sum(dim=0, keepdim=True) + self.out_proj.bias.data
+        return attn
 
 
 class WhisperSdpaAttention(WhisperAttention):
@@ -325,13 +329,15 @@ class WhisperSdpaAttention(WhisperAttention):
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-    ) -> [torch.Tensor, torch.Tensor, torch.Tensor]:
-        query_states = self.q_proj(hidden_states).view(-1, self.num_heads, self.head_dim).transpose(0, 1).contiguous()
-        key_states = self.k_proj(hidden_states).view(-1, self.num_heads, self.head_dim).permute(1, 2, 0).contiguous()
-        value_states = self.v_proj(hidden_states).view(-1, self.num_heads, self.head_dim).transpose(0, 1).contiguous()
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        query_states = torch.matmul(hidden_states, self.q_proj.weight.data) + self.q_proj.bias.data
+        key_states = torch.matmul(hidden_states, self.k_proj.weight.data).transpose(1, 2)
+        value_states = torch.matmul(hidden_states, self.v_proj.weight.data) + self.v_proj.bias.data
         key_states = torch.cat((past_key_de, key_states), dim=2)
         value_states = torch.cat((past_value_de, value_states), dim=1)
-        return self.out_proj(torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states) + attention_mask, dim=-1), value_states).transpose(0, 1).contiguous().reshape(1, -1, self.embed_dim)), key_states, value_states
+        attn = torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states) + attention_mask, dim=-1), value_states)
+        attn = torch.matmul(attn, self.out_proj.weight.data).sum(dim=0, keepdim=True) + self.out_proj.bias.data
+        return attn, key_states, value_states
 
 
 WHISPER_ATTENTION_CLASSES = {
