@@ -18,8 +18,8 @@ test_audio = [model_path + "/example/zh.mp3", model_path + "/example/en.mp3", mo
 ORT_Accelerate_Providers = []                               # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                                             # else keep empty.
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length.
-WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
+INPUT_AUDIO_LENGTH = 240000                                 # The maximum input audio length.
+WINDOW_TYPE = 'hamming'                                     # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
 WINDOW_LENGTH = 400                                         # Length of windowing, edit it carefully.
@@ -65,12 +65,22 @@ class SENSE_VOICE(torch.nn.Module):
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0)  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
         self.int_inv16 = float(1.0 / 32768.0)
-        factor = self.encoder.encoders._modules["0"].self_attn.d_k ** (-0.25)
-        total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders)
+        num_head = self.encoder.encoders._modules["0"].self_attn.h
+        head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
+        factor = float(head_dim ** (-0.25))
+        total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders) + list(self.encoder.tp_encoders)
         cif_hidden_size_2 = cif_hidden_size + cif_hidden_size
         for encoder_layer in total_encoders:
             encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size_2] *= factor
             encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size_2] *= factor
+            encoder_layer.self_attn.linear_q_w = encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
+            encoder_layer.self_attn.linear_q_b = encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size].view(num_head, 1, head_dim).contiguous()
+            encoder_layer.self_attn.linear_k_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size:cif_hidden_size_2].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
+            encoder_layer.self_attn.linear_k_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size:cif_hidden_size_2].view(num_head, 1, head_dim).contiguous()
+            encoder_layer.self_attn.linear_v_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size_2:].transpose(0, 1).unsqueeze(0).contiguous()
+            encoder_layer.self_attn.linear_v_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size_2:].view(1, 1, -1).contiguous()
+            encoder_layer.self_attn.linear_out_w = encoder_layer.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
+            encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
   
     def forward(self, audio, language_idx):
         audio = audio.float() * self.int_inv16
