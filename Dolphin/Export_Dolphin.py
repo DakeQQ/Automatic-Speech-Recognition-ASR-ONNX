@@ -18,7 +18,7 @@ TARGET_LANGUAGE = "Auto-Auto"                                                   
 test_audio = ["./example/zh.mp3", "./example/zh-Shanghai.wav", "./example/ja.mp3", "./example/ko.mp3"]  # The test audio list.
 
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. dolphin series models only support dynamic_axes due to their transformer structure.
-INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length. Must less than 480000 (30 seconds).
+INPUT_AUDIO_LENGTH = 240000                                 # The maximum input audio length. Must less than 480000 (30 seconds).
 WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
 N_MELS = 80                                                 # Setting by dolphin model config. Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
@@ -27,7 +27,7 @@ HOP_LENGTH = 160                                            # Number of samples 
 SAMPLE_RATE = 16000                                         # The model parameter, do not edit the value.
 PRE_EMPHASIZE = 0.97                                        # For audio preprocessing.
 SLIDING_WINDOW = 0                                          # Set the sliding window step for test audio reading; use 0 to disable.
-MAX_SEQ_LEN = 72                                            # It should less than 448.
+MAX_SEQ_LEN = 80                                            # It should less than 448.
 STOP_TOKEN = [40000]                                        # 40000 is the end token for Dolphin model.
 
 
@@ -325,16 +325,17 @@ class DOLPHIN_ENCODER(torch.nn.Module):
         for encoder_layer in self.dolphin.encoder.encoders:
             x = x + encoder_layer.ff_scale * encoder_layer.feed_forward_macaron(encoder_layer.norm_ff_macaron(x))
             x1 = encoder_layer.norm_mha(x)
-            q = encoder_layer.attn.linear_q(x1).view(-1, encoder_layer.attn.h, encoder_layer.attn.d_k).transpose(0, 1)
-            k = encoder_layer.attn.linear_k(x1).view(-1, encoder_layer.attn.h, encoder_layer.attn.d_k).permute(1, 2, 0)
-            v = encoder_layer.attn.linear_v(x1).view(-1, encoder_layer.attn.h, encoder_layer.attn.d_k).transpose(0, 1)
-            p = encoder_layer.attn.linear_pos(pos_emb).view(-1, encoder_layer.attn.h, encoder_layer.attn.d_k).permute(1, 2, 0)
+            q = torch.matmul(x1, encoder_layer.attn.linear_q.weight.data) + encoder_layer.attn.linear_q.bias.data
+            k = (torch.matmul(x1, encoder_layer.attn.linear_k.weight.data) + encoder_layer.attn.linear_k.bias.data).transpose(1, 2)
+            v = torch.matmul(x1, encoder_layer.attn.linear_v.weight.data) + encoder_layer.attn.linear_v.bias.data
+            p = torch.matmul(pos_emb, encoder_layer.attn.linear_pos.weight.data).transpose(1, 2)
             q_with_bias_u = q + encoder_layer.attn.pos_bias_u
             q_with_bias_v = q + encoder_layer.attn.pos_bias_v
             matrix_ac = torch.matmul(q_with_bias_u, k)
             matrix_bd = torch.matmul(q_with_bias_v, p)
             matrix_bd = rel_shift(matrix_bd, embed_len, self.zero_pad, encoder_layer.attn.h)
-            x1 = encoder_layer.attn.linear_out(torch.matmul(torch.softmax(matrix_ac + matrix_bd, dim=-1), v).transpose(0, 1).contiguous().view(1, -1, encoder_layer.attn.linear_out.in_features))
+            x1 = torch.matmul(torch.softmax(matrix_ac + matrix_bd, dim=-1), v)
+            x1 = torch.matmul(x1, encoder_layer.attn.linear_out.weight.data).sum(dim=0, keepdim=True) + encoder_layer.attn.linear_out.bias.data
             x2 = encoder_layer.cgmlp.channel_proj1(encoder_layer.norm_mlp(x))
             x_r, x_g = x2.chunk(2, dim=-1)
             x_g = encoder_layer.cgmlp.csgu.conv(encoder_layer.cgmlp.csgu.norm(x_g).transpose(1, 2)).transpose(1, 2)
@@ -346,8 +347,8 @@ class DOLPHIN_ENCODER(torch.nn.Module):
             x = encoder_layer.norm_final(x)
         enc_outputs = self.dolphin.encoder.after_norm(x)
         for idx, decoder_layer in enumerate(self.dolphin.decoder.decoders):
-            self.save_en_keys[idx] = decoder_layer.src_attn.linear_k(enc_outputs).view(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).permute(1, 2, 0)
-            self.save_en_values[idx] = decoder_layer.src_attn.linear_v(enc_outputs).view(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).transpose(0, 1)
+            self.save_en_keys[idx] = (torch.matmul(enc_outputs, decoder_layer.src_attn.linear_k.weight.data) + decoder_layer.src_attn.linear_k.bias.data).transpose(1, 2)
+            self.save_en_values[idx] = torch.matmul(enc_outputs, decoder_layer.src_attn.linear_v.weight.data) + decoder_layer.src_attn.linear_v.bias.data
         return *self.save_en_keys, *self.save_en_values
 
 
@@ -378,17 +379,19 @@ class DOLPHIN_DECODER(torch.nn.Module):
         attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * all_inputs[-1]).float()
         for idx, decoder_layer in enumerate(self.dolphin.decoder.decoders):
             hidden_states_norm = decoder_layer.norm1(hidden_states)
-            q = decoder_layer.self_attn.linear_q(hidden_states_norm).view(-1, decoder_layer.self_attn.h, decoder_layer.self_attn.d_k).transpose(0, 1)
-            k = decoder_layer.self_attn.linear_k(hidden_states_norm).view(-1, decoder_layer.self_attn.h, decoder_layer.self_attn.d_k).permute(1, 2, 0)
-            v = decoder_layer.self_attn.linear_v(hidden_states_norm).view(-1, decoder_layer.self_attn.h, decoder_layer.self_attn.d_k).transpose(0, 1)
+            q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.linear_q.weight.data) + decoder_layer.self_attn.linear_q.bias.data
+            k = (torch.matmul(hidden_states_norm, decoder_layer.self_attn.linear_k.weight.data) + decoder_layer.self_attn.linear_k.bias.data).transpose(1, 2)
+            v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.linear_v.weight.data) + decoder_layer.self_attn.linear_v.bias.data
             k = torch.cat((all_inputs[idx], k), dim=2)
             v = torch.cat((all_inputs[idx + self.num_layers_de], v), dim=1)
             self.save_de_keys[idx] = k
             self.save_de_values[idx] = v
-            hidden_state_attn = decoder_layer.self_attn.linear_out(torch.matmul(torch.softmax(torch.matmul(q, k) + attention_mask, dim=-1), v).transpose(0, 1).contiguous().view(1, -1, decoder_layer.self_attn.linear_out.in_features))
+            hidden_state_attn = torch.matmul(torch.softmax(torch.matmul(q, k) + attention_mask, dim=-1), v)
+            hidden_state_attn = torch.matmul(hidden_state_attn, decoder_layer.self_attn.linear_out.weight.data).sum(dim=0, keepdim=True) + decoder_layer.self_attn.linear_out.bias.data
             hidden_state_attn += hidden_states
-            q = decoder_layer.src_attn.linear_q(decoder_layer.norm2(hidden_state_attn)).view(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).transpose(0, 1)
-            hidden_state_cross = decoder_layer.src_attn.linear_out(torch.matmul(torch.softmax(torch.matmul(q, all_inputs[idx + self.num_layers_de_2_plus]), dim=-1), all_inputs[idx + self.num_layers_de_3_plus]).transpose(0, 1).contiguous().view(1, -1, decoder_layer.src_attn.linear_out.in_features))
+            q = torch.matmul(decoder_layer.norm2(hidden_state_attn), decoder_layer.src_attn.linear_q.weight.data) + decoder_layer.src_attn.linear_q.bias.data
+            hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q, all_inputs[idx + self.num_layers_de_2_plus]), dim=-1), all_inputs[idx + self.num_layers_de_3_plus])
+            hidden_state_cross = torch.matmul(hidden_state_cross, decoder_layer.src_attn.linear_out.weight.data).sum(dim=0, keepdim=True) + decoder_layer.src_attn.linear_out.bias.data
             hidden_state_cross += hidden_state_attn
             hidden_states = hidden_state_cross + decoder_layer.feed_forward(decoder_layer.norm3(hidden_state_cross))
         hidden_states = self.dolphin.decoder.output_layer(self.dolphin.decoder.after_norm(hidden_states[:, -1]))
@@ -423,18 +426,48 @@ with torch.inference_mode():
         model.s2t_model.encoder.encoders._modules[i].attn.linear_pos.weight.data *= scaling
         model.s2t_model.encoder.encoders._modules[i].attn.pos_bias_u.data = model.s2t_model.encoder.encoders._modules[i].attn.pos_bias_u.data.unsqueeze(1) * scaling
         model.s2t_model.encoder.encoders._modules[i].attn.pos_bias_v.data = model.s2t_model.encoder.encoders._modules[i].attn.pos_bias_v.data.unsqueeze(1) * scaling
+    
+        model.s2t_model.encoder.encoders._modules[i].attn.linear_q.weight.data = model.s2t_model.encoder.encoders._modules[i].attn.linear_q.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.encoder.encoders._modules[i].attn.linear_q.bias.data = model.s2t_model.encoder.encoders._modules[i].attn.linear_q.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
+        model.s2t_model.encoder.encoders._modules[i].attn.linear_k.weight.data = model.s2t_model.encoder.encoders._modules[i].attn.linear_k.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.encoder.encoders._modules[i].attn.linear_k.bias.data = model.s2t_model.encoder.encoders._modules[i].attn.linear_k.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
+        model.s2t_model.encoder.encoders._modules[i].attn.linear_v.weight.data = model.s2t_model.encoder.encoders._modules[i].attn.linear_v.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.encoder.encoders._modules[i].attn.linear_v.bias.data = model.s2t_model.encoder.encoders._modules[i].attn.linear_v.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
+        model.s2t_model.encoder.encoders._modules[i].attn.linear_pos.weight.data = model.s2t_model.encoder.encoders._modules[i].attn.linear_pos.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.encoder.encoders._modules[i].attn.linear_out.weight.data = model.s2t_model.encoder.encoders._modules[i].attn.linear_out.weight.data.view(HIDDEN_SIZE, NUM_HEAD_EN, HEAD_DIM_EN).permute(1, 2, 0).contiguous()
+        model.s2t_model.encoder.encoders._modules[i].attn.linear_out.bias.data = model.s2t_model.encoder.encoders._modules[i].attn.linear_out.bias.data.view(1, 1, -1).contiguous()
+
     scaling = float(HEAD_DIM_DE ** -0.25)
     for i in model.s2t_model.decoder.decoders._modules:
         model.s2t_model.decoder.decoders._modules[i].self_attn.linear_q.weight.data *= scaling
         model.s2t_model.decoder.decoders._modules[i].self_attn.linear_q.bias.data *= scaling
         model.s2t_model.decoder.decoders._modules[i].self_attn.linear_k.weight.data *= scaling
         model.s2t_model.decoder.decoders._modules[i].self_attn.linear_k.bias.data *= scaling
+        
+        model.s2t_model.decoder.decoders._modules[i].self_attn.linear_q.weight.data = model.s2t_model.decoder.decoders._modules[i].self_attn.linear_q.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].self_attn.linear_q.bias.data = model.s2t_model.decoder.decoders._modules[i].self_attn.linear_q.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].self_attn.linear_k.weight.data = model.s2t_model.decoder.decoders._modules[i].self_attn.linear_k.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].self_attn.linear_k.bias.data = model.s2t_model.decoder.decoders._modules[i].self_attn.linear_k.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].self_attn.linear_v.weight.data = model.s2t_model.decoder.decoders._modules[i].self_attn.linear_v.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].self_attn.linear_v.bias.data = model.s2t_model.decoder.decoders._modules[i].self_attn.linear_v.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].self_attn.linear_out.weight.data = model.s2t_model.decoder.decoders._modules[i].self_attn.linear_out.weight.data.view(HIDDEN_SIZE, NUM_HEAD_DE, HEAD_DIM_DE).permute(1, 2, 0).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].self_attn.linear_out.bias.data = model.s2t_model.decoder.decoders._modules[i].self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
+        
     scaling = float(model.s2t_model.decoder.decoders._modules['0'].src_attn.d_k ** -0.25)
     for i in model.s2t_model.decoder.decoders._modules:
         model.s2t_model.decoder.decoders._modules[i].src_attn.linear_q.weight.data *= scaling
         model.s2t_model.decoder.decoders._modules[i].src_attn.linear_q.bias.data *= scaling
         model.s2t_model.decoder.decoders._modules[i].src_attn.linear_k.weight.data *= scaling
         model.s2t_model.decoder.decoders._modules[i].src_attn.linear_k.bias.data *= scaling
+        
+        model.s2t_model.decoder.decoders._modules[i].src_attn.linear_q.weight.data = model.s2t_model.decoder.decoders._modules[i].src_attn.linear_q.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].src_attn.linear_q.bias.data = model.s2t_model.decoder.decoders._modules[i].src_attn.linear_q.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].src_attn.linear_k.weight.data = model.s2t_model.decoder.decoders._modules[i].src_attn.linear_k.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].src_attn.linear_k.bias.data = model.s2t_model.decoder.decoders._modules[i].src_attn.linear_k.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].src_attn.linear_v.weight.data = model.s2t_model.decoder.decoders._modules[i].src_attn.linear_v.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].src_attn.linear_v.bias.data = model.s2t_model.decoder.decoders._modules[i].src_attn.linear_v.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].src_attn.linear_out.weight.data = model.s2t_model.decoder.decoders._modules[i].src_attn.linear_out.weight.data.view(HIDDEN_SIZE, NUM_HEAD_DE, HEAD_DIM_DE).permute(1, 2, 0).contiguous()
+        model.s2t_model.decoder.decoders._modules[i].src_attn.linear_out.bias.data = model.s2t_model.decoder.decoders._modules[i].src_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
 
     custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, hop_len=HOP_LENGTH, win_length=WINDOW_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
     dolphin_encoder = DOLPHIN_ENCODER(model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
