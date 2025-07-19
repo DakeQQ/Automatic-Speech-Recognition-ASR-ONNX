@@ -192,25 +192,23 @@ class EncoderMultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(residual_dropout)
 
     def forward(self, q, k, v, mask=None):
-        sz_b, len_q = q.size(0), q.size(1)
-
         residual = q
         q, k, v = self.forward_qkv(q, k, v)
 
         output, attn = self.attention(q, k, v, mask=mask)
 
-        output = self.forward_output(output, residual, sz_b, len_q)
+        output = self.forward_output(output, residual)
         return output, attn
 
     def forward_qkv(self, q, k, v):
-        q = self.w_qs(self.layer_norm_q(q)).view(-1, self.n_head, self.d_k).transpose(0, 1)
-        k = self.w_ks(self.layer_norm_k(k)).view(-1, self.n_head, self.d_k).permute(1, 2, 0)
-        v = self.w_vs(self.layer_norm_v(v)).view(-1, self.n_head, self.d_v).transpose(0, 1)
+        q = torch.matmul(self.layer_norm_q(q), self.w_qs.weight)
+        k = torch.matmul(self.layer_norm_k(k), self.w_ks.weight).transpose(1, 2)
+        v = torch.matmul(self.layer_norm_v(v), self.w_vs.weight)
         return q, k, v
 
     def forward_output(self, output, residual):
-        output = output.transpose(0, 1).contiguous().view(1, -1, self.fc_size)
-        return self.fc(output) + residual
+        output = torch.matmul(output, self.fc.weight).sum(dim=0, keepdim=True)
+        return output + residual
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -221,7 +219,7 @@ class ScaledDotProductAttention(nn.Module):
         self.INF = float('inf')
 
     def forward(self, q, k, v, mask=None):
-        attn = torch.matmul(q, k.transpose(2, 3)) / self.temperature
+        attn = torch.matmul(q, k)
         output, attn = self.forward_attention(attn, v, mask)
         return output, attn
 
@@ -252,7 +250,7 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
     def forward(self, q, k, v, pos_emb, x_len, mask=None):
         residual = q
         q, k, v = self.forward_qkv(q, k, v)
-        p = self.linear_pos(pos_emb).view(-1, self.n_head, self.d_k).permute(1, 2, 0)
+        p = torch.matmul(pos_emb, self.linear_pos.weight).transpose(1, 2)
         q_with_bias_u = q + self.pos_bias_u
         q_with_bias_v = q + self.pos_bias_v
         matrix_ac = torch.matmul(q_with_bias_u, k)
