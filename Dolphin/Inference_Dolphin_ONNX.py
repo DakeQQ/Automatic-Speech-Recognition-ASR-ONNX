@@ -11,12 +11,13 @@ save_vocab = "/home/DakeQQ/Downloads/Dolphin_ONNX/vocab_Dolphin.txt"            
 TARGET_LANGUAGE = "Auto-Auto"                                                                   # See 'LANGUAGE_REGION' for detail.
 test_audio = ["./example/zh.mp3", "./example/zh-Shanghai.wav", "./example/ja.mp3", "./example/ko.mp3"]  # The test audio list.
 
+
 ORT_Accelerate_Providers = []           # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                         # else keep empty.
 MAX_THREADS = 4                         # Max CPU parallel threads.
 DEVICE_ID = 0                           # The GPU id, default to 0.
 SAMPLE_RATE = 16000                     # The model parameter, do not edit the value.
-MAX_SEQ_LEN = 72                        # It should keep the same with exported model.
+MAX_SEQ_LEN = 80                        # It should keep the same with exported model.
 STOP_TOKEN = [40000]                    # 40000 is the end token for Dolphin model.
 SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
 
@@ -358,7 +359,7 @@ num_layers_2_plus_2 = num_layers_2 + 2
 language_start_indices = amount_of_inputs - 3
 language_end_indices = amount_of_inputs - 2
 attention_mask_indices = amount_of_inputs - 1
-max_logit_ids_indices = amount_of_outputs - 2
+max_logit_ids_indices = amount_of_outputs - 1
 
 language_region = LANGUAGE_REGION.get(TARGET_LANGUAGE, "NONE")
 if language_region == "NONE":
@@ -433,7 +434,7 @@ for test in test_audio:
         all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], device_type, DEVICE_ID)})
         input_feed_B = {
             input_names_B[attention_mask_indices]: init_attention_mask,
-            input_names_B[num_layers_2_plus_1]: init_history_len,
+            input_names_B[num_layers_2]: init_history_len,
         }
         for i in range(num_layers):
             input_feed_B[input_names_B[i]] = init_past_keys_B
@@ -446,7 +447,7 @@ for test in test_audio:
             print("\nAutomatically detect which language it is.")
             input_feed_B[input_names_B[language_start_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([7], dtype=np.int64), device_type, DEVICE_ID)
             input_feed_B[input_names_B[language_end_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([145], dtype=np.int64), device_type, DEVICE_ID)
-            input_feed_B[input_names_B[num_layers_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[39999]], dtype=np.int32), device_type, DEVICE_ID)
+            input_feed_B[input_names_B[num_layers_2_plus_1]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[39999]], dtype=np.int32), device_type, DEVICE_ID)
             input_feed_B[input_names_B[num_layers_2_plus_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), device_type, DEVICE_ID)
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
             lang_id = onnxruntime.OrtValue.numpy(all_outputs_B[max_logit_ids_indices])[0][0] + 7
@@ -459,7 +460,7 @@ for test in test_audio:
             print("\nAutomatically detect which region it is.")
             input_feed_B[input_names_B[language_start_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([145], dtype=np.int64), device_type, DEVICE_ID)
             input_feed_B[input_names_B[language_end_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([324], dtype=np.int64), device_type, DEVICE_ID)
-            input_feed_B[input_names_B[num_layers_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[39999, lang_id]], dtype=np.int32), device_type, DEVICE_ID)
+            input_feed_B[input_names_B[num_layers_2_plus_1]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[39999, lang_id]], dtype=np.int32), device_type, DEVICE_ID)
             input_feed_B[input_names_B[num_layers_2_plus_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([2], dtype=np.int64), device_type, DEVICE_ID)
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
             region_id = onnxruntime.OrtValue.numpy(all_outputs_B[max_logit_ids_indices])[0][0] + 145
@@ -479,7 +480,7 @@ for test in test_audio:
           
         input_ids = np.array([[39999, lang_id, region_id, 6, 324]], dtype=np.int32)  # start_id = 39999; itn = 5; asr = 6; no_timestamp = 324
         ids_len = np.array([input_ids.shape[1]], dtype=np.int64)
-        input_feed_B[input_names_B[num_layers_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, device_type, DEVICE_ID)
+        input_feed_B[input_names_B[num_layers_2_plus_1]] = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, device_type, DEVICE_ID)
         input_feed_B[input_names_B[num_layers_2_plus_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(ids_len, device_type, DEVICE_ID)
         input_feed_B[input_names_B[language_start_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), device_type, DEVICE_ID)
         input_feed_B[input_names_B[language_end_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([40002], dtype=np.int64), device_type, DEVICE_ID)
