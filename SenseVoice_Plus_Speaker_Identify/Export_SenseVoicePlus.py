@@ -88,8 +88,8 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
             encoder_layer.self_attn.linear_q_b = encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size].view(num_head, 1, head_dim).contiguous()
             encoder_layer.self_attn.linear_k_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size:cif_hidden_size_2].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
             encoder_layer.self_attn.linear_k_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size:cif_hidden_size_2].view(num_head, 1, head_dim).contiguous()
-            encoder_layer.self_attn.linear_v_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size_2:].transpose(0, 1)
-            encoder_layer.self_attn.linear_v_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size_2:]
+            encoder_layer.self_attn.linear_v_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size_2:].transpose(0, 1).unsqueeze(0)
+            encoder_layer.self_attn.linear_v_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size_2:].view(1, 1, -1)
             encoder_layer.self_attn.linear_out_w = encoder_layer.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
             encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
   
