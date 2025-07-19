@@ -17,6 +17,7 @@ save_vocab = "/home/DakeQQ/Downloads/Dolphin_ONNX/vocab_Dolphin.txt"            
 TARGET_LANGUAGE = "Auto-Auto"                                                                   # See 'LANGUAGE_REGION' for detail.
 test_audio = ["./example/zh.mp3", "./example/zh-Shanghai.wav", "./example/ja.mp3", "./example/ko.mp3"]  # The test audio list.
 
+
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. dolphin series models only support dynamic_axes due to their transformer structure.
 INPUT_AUDIO_LENGTH = 240000                                 # The maximum input audio length. Must less than 480000 (30 seconds).
 WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
@@ -363,15 +364,17 @@ class DOLPHIN_DECODER(torch.nn.Module):
         self.embed.weight.data *= self.position_encode.xscale
         self.num_layers_de = num_layers_de
         self.num_layers_de_2 = num_layers_de + num_layers_de
-        self.num_layers_de_2_plus = self.num_layers_de_2 + 3
-        self.num_layers_de_3_plus = self.num_layers_de_2_plus + num_layers_de
+        self.num_layers_de_2_plus_1 = self.num_layers_de_2 + 1
+        self.num_layers_de_2_plus_2 = self.num_layers_de_2 + 2
+        self.num_layers_de_2_plus_3 = self.num_layers_de_2 + 3
+        self.num_layers_de_3_plus = self.num_layers_de_2_plus_3 + num_layers_de
         self.save_de_keys = [None] * num_layers_de
         self.save_de_values = [None] * num_layers_de
 
     def forward(self, *all_inputs):
-        input_ids = all_inputs[self.num_layers_de_2]
-        history_len = all_inputs[self.num_layers_de_2 + 1]
-        ids_len = all_inputs[self.num_layers_de_2 + 2]
+        history_len = all_inputs[self.num_layers_de_2]
+        input_ids = all_inputs[self.num_layers_de_2_plus_1]
+        ids_len = all_inputs[self.num_layers_de_2_plus_2]
         kv_seq_len = history_len + ids_len
         hidden_states = self.embed(input_ids) + self.position_encode.pe[:, history_len: kv_seq_len].float()
         language_start = all_inputs[-3]
@@ -390,13 +393,13 @@ class DOLPHIN_DECODER(torch.nn.Module):
             hidden_state_attn = torch.matmul(hidden_state_attn, decoder_layer.self_attn.linear_out.weight.data).sum(dim=0, keepdim=True) + decoder_layer.self_attn.linear_out.bias.data
             hidden_state_attn += hidden_states
             q = torch.matmul(decoder_layer.norm2(hidden_state_attn), decoder_layer.src_attn.linear_q.weight.data) + decoder_layer.src_attn.linear_q.bias.data
-            hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q, all_inputs[idx + self.num_layers_de_2_plus]), dim=-1), all_inputs[idx + self.num_layers_de_3_plus])
+            hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q, all_inputs[idx + self.num_layers_de_2_plus_3]), dim=-1), all_inputs[idx + self.num_layers_de_3_plus])
             hidden_state_cross = torch.matmul(hidden_state_cross, decoder_layer.src_attn.linear_out.weight.data).sum(dim=0, keepdim=True) + decoder_layer.src_attn.linear_out.bias.data
             hidden_state_cross += hidden_state_attn
             hidden_states = hidden_state_cross + decoder_layer.feed_forward(decoder_layer.norm3(hidden_state_cross))
         hidden_states = self.dolphin.decoder.output_layer(self.dolphin.decoder.after_norm(hidden_states[:, -1]))
         max_logit_ids = torch.argmax(hidden_states[:, language_start: language_end], dim=-1, keepdim=True).int()
-        return *self.save_de_keys, *self.save_de_values, max_logit_ids, kv_seq_len
+        return *self.save_de_keys, *self.save_de_values, kv_seq_len, max_logit_ids
 
 
 print('\nExport start...\n')
@@ -535,10 +538,10 @@ with torch.inference_mode():
         output_names.append(name)
         dynamic_axes[name] = {1: 'history_len_plus_ids_len'}
 
-    input_names.append('input_ids')
-    all_inputs.append(input_ids)
     input_names.append('history_len')
     all_inputs.append(history_len)
+    input_names.append('input_ids')
+    all_inputs.append(input_ids)
     input_names.append('ids_len')
     all_inputs.append(ids_len)
 
@@ -642,7 +645,7 @@ num_layers_2_plus_2 = num_layers_2 + 2
 language_start_indices = amount_of_inputs - 3
 language_end_indices = amount_of_inputs - 2
 attention_mask_indices = amount_of_inputs - 1
-max_logit_ids_indices = amount_of_outputs - 2
+max_logit_ids_indices = amount_of_outputs - 1
 
 language_region = LANGUAGE_REGION.get(TARGET_LANGUAGE, "NONE")
 if language_region == "NONE":
@@ -712,7 +715,7 @@ for test in test_audio:
         all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], 'cpu', 0)})
         input_feed_B = {
             input_names_B[attention_mask_indices]: init_attention_mask,
-            input_names_B[num_layers_2_plus_1]: init_history_len,
+            input_names_B[num_layers_2]: init_history_len,
         }
         for i in range(num_layers):
             input_feed_B[input_names_B[i]] = init_past_keys_B
@@ -725,7 +728,7 @@ for test in test_audio:
             print("\nAutomatically detect which language it is.")
             input_feed_B[input_names_B[language_start_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([7], dtype=np.int64), 'cpu', 0)
             input_feed_B[input_names_B[language_end_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([145], dtype=np.int64), 'cpu', 0)
-            input_feed_B[input_names_B[num_layers_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[39999]], dtype=np.int32), 'cpu', 0)
+            input_feed_B[input_names_B[num_layers_2_plus_1]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[39999]], dtype=np.int32), 'cpu', 0)
             input_feed_B[input_names_B[num_layers_2_plus_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), 'cpu', 0)
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
             lang_id = onnxruntime.OrtValue.numpy(all_outputs_B[max_logit_ids_indices])[0][0] + 7
@@ -738,7 +741,7 @@ for test in test_audio:
             print("\nAutomatically detect which region it is.")
             input_feed_B[input_names_B[language_start_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([145], dtype=np.int64), 'cpu', 0)
             input_feed_B[input_names_B[language_end_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([324], dtype=np.int64), 'cpu', 0)
-            input_feed_B[input_names_B[num_layers_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[39999, lang_id]], dtype=np.int32), 'cpu', 0)
+            input_feed_B[input_names_B[num_layers_2_plus_1]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([[39999, lang_id]], dtype=np.int32), 'cpu', 0)
             input_feed_B[input_names_B[num_layers_2_plus_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([2], dtype=np.int64), 'cpu', 0)
             all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
             region_id = onnxruntime.OrtValue.numpy(all_outputs_B[max_logit_ids_indices])[0][0] + 145
@@ -758,7 +761,7 @@ for test in test_audio:
             
         input_ids = np.array([[39999, lang_id, region_id, 6, 324]], dtype=np.int32)  # start_id = 39999; itn = 5; asr = 6; no_timestamp = 324
         ids_len = np.array([input_ids.shape[1]], dtype=np.int64)
-        input_feed_B[input_names_B[num_layers_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, 'cpu', 0)
+        input_feed_B[input_names_B[num_layers_2_plus_1]] = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, 'cpu', 0)
         input_feed_B[input_names_B[num_layers_2_plus_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(ids_len, 'cpu', 0)
         input_feed_B[input_names_B[language_start_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), 'cpu', 0)
         input_feed_B[input_names_B[language_end_indices]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([40002], dtype=np.int64), 'cpu', 0)
