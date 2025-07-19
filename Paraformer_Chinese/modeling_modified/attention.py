@@ -524,20 +524,19 @@ class MultiHeadedAttentionCrossAtt(nn.Module):
         self.d_k_factor = 1.0 / math.sqrt(self.d_k)
 
     def forward_qkv(self, x, memory):
-        q = self.linear_q(x)
-        q_h = torch.reshape(q, (1, -1, self.h, self.d_k)).transpose(1, 2)  # (batch, head, time1, d_k)
-        k_v = self.linear_k_v(memory)
-        k, v = torch.split(k_v, int(self.h * self.d_k), dim=-1)
-        k_h = torch.reshape(k, (1, -1, self.h, self.d_k)).permute(0, 2, 3, 1)  # (batch, head, time2, d_k)
-        v_h = torch.reshape(v, (1, -1, self.h, self.d_k)).transpose(1, 2)  # (batch, head, time2, d_k)
-        return q_h, k_h, v_h
+        q = torch.matmul(x, self.linear_q_w) + self.linear_q_b
+        k = (torch.matmul(memory, self.linear_k_w) + self.linear_k_b).transpose(1, 2)
+        v = torch.matmul(memory, self.linear_v_w) + self.linear_v_b
+        return q, k, v
 
     def forward_attention(self, value, scores, mask=None, ret_attn=False):
-        return self.linear_out(torch.matmul(torch.softmax(scores, dim=-1), value).transpose(1, 2).contiguous().view(1, -1, self.h * self.d_k))
+        attn = torch.matmul(torch.softmax(scores, dim=-1), value)
+        attn = torch.matmul(attn, self.linear_out_w).sum(dim=0, keepdim=True) + self.linear_out_b
+        return attn
 
     def forward(self, x, memory, memory_mask=None, ret_attn=False):
         q_h, k_h, v_h = self.forward_qkv(x, memory)
-        return self.forward_attention(v_h, torch.matmul(q_h * self.d_k_factor, k_h), None, ret_attn=ret_attn)
+        return self.forward_attention(v_h, torch.matmul(q_h, k_h), None, ret_attn=ret_attn)
 
     def forward_chunk(self, x, memory, cache=None, chunk_size=None, look_back=0):
         """Compute scaled dot product attention.
@@ -594,7 +593,6 @@ class MultiHeadedAttentionCrossAttExport(nn.Module):
 
     def forward_qkv(self, x, memory):
         q = self.linear_q(x)
-
         k_v = self.linear_k_v(memory)
         k, v = torch.split(k_v, int(self.h * self.d_k), dim=-1)
         q = self.transpose_for_scores(q)
