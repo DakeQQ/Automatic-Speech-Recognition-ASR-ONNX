@@ -6,7 +6,7 @@ from sentencepiece import SentencePieceProcessor
 
 
 tokenizer_path = "/home/DakeQQ/Downloads/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model"   # The SenseVoice download path.
-onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoiceSmall.ort"                 # The exported onnx model path.
+onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoiceSmall.onnx"                # The exported onnx model path.
 test_audio = "./test_sample.wav"                                                                 # The test audio path.
 
 
@@ -29,7 +29,7 @@ def normalize_to_int16(audio):
 
 # ONNX Runtime settings
 session_opts = onnxruntime.SessionOptions()
-session_opts.log_severity_level = 3         # error level, it an adjustable value.
+session_opts.log_severity_level = 4         # Fatal level, it an adjustable value.
 session_opts.inter_op_num_threads = 0       # Run different nodes with num_threads. Set 0 for auto.
 session_opts.intra_op_num_threads = 0       # Under the node, execute the operators with num_threads. Set 0 for auto.
 session_opts.enable_cpu_mem_arena = True    # True for execute speed; False for less memory usage.
