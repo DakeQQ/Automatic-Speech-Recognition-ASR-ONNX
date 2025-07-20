@@ -1,13 +1,12 @@
 import gc
 import time
-import site
-import shutil
 import onnxruntime
 import torch
 import torchaudio
 import numpy as np
 from pydub import AudioSegment
 from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported in ONNX format.
+from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
 
 
 model_path = "/home/DakeQQ/Downloads/whisper-large-v3-turbo"                                          # The Whisper project download path.
@@ -37,10 +36,6 @@ STOP_TOKEN = [50257]                                        # 50257 is the end t
 
 if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
-
-
-shutil.copyfile('./modeling_modified/modeling_whisper.py', site.getsitepackages()[-1] + "/transformers/models/whisper/modeling_whisper.py")
-from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
 
 
 model_path_lower = model_path.lower()
@@ -168,7 +163,6 @@ class WHISPER_ENCODER(torch.nn.Module):
         self.stft_model = stft_model
         self.pre_emphasis = float(pre_emphasis)
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, "slaney", 'slaney')).transpose(0, 1).unsqueeze(0)
-        self.nfft_stft = nfft_stft
         self.save_encoder_key = [None] * num_layers_de
         self.save_encoder_value = [None] * num_layers_de
         self.inv_int16 = float(1.0 / 32768.0)
@@ -182,10 +176,21 @@ class WHISPER_ENCODER(torch.nn.Module):
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-5).log10()
         mel_features = torch.maximum(mel_features, mel_features.max() - 8.0)
         mel_features = mel_features * 0.25 + 1.0
-        encoder_hidden_states = self.encoder(mel_features)
+        hidden_states = torch.nn.functional.gelu(self.encoder.conv2(torch.nn.functional.gelu(self.encoder.conv1(mel_features)))).transpose(1, 2)
+        hidden_states = hidden_states + self.encoder.embed_positions.weight[:hidden_states.shape[1]].float()
+        for encoder_layer in self.encoder.layers:
+            hidden_states_norm = encoder_layer.self_attn_layer_norm(hidden_states)
+            q = torch.matmul(hidden_states_norm, encoder_layer.self_attn.q_proj.weight) + encoder_layer.self_attn.q_proj.bias
+            k = torch.matmul(hidden_states_norm, encoder_layer.self_attn.k_proj.weight).transpose(1, 2)
+            v = torch.matmul(hidden_states_norm, encoder_layer.self_attn.v_proj.weight) + encoder_layer.self_attn.v_proj.bias
+            attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k), dim=-1), v)
+            hidden_states_attn = torch.matmul(attn, encoder_layer.self_attn.out_proj.weight).sum(dim=0, keepdim=True) + encoder_layer.self_attn.out_proj.bias
+            hidden_states_attn += hidden_states
+            hidden_states = hidden_states_attn + encoder_layer.fc2(encoder_layer.activation_fn(encoder_layer.fc1(encoder_layer.final_layer_norm(hidden_states_attn))))
+        hidden_states = self.encoder.layer_norm(hidden_states)
         for idx, decoder_layer in enumerate(self.decoder.layers):
-            self.save_encoder_key[idx] = torch.matmul(encoder_hidden_states, decoder_layer.encoder_attn.k_proj.weight.data).transpose(1, 2)
-            self.save_encoder_value[idx] = torch.matmul(encoder_hidden_states, decoder_layer.encoder_attn.v_proj.weight.data) + decoder_layer.encoder_attn.v_proj.bias.data
+            self.save_encoder_key[idx] = torch.matmul(hidden_states, decoder_layer.encoder_attn.k_proj.weight).transpose(1, 2)
+            self.save_encoder_value[idx] = torch.matmul(hidden_states, decoder_layer.encoder_attn.v_proj.weight) + decoder_layer.encoder_attn.v_proj.bias
         return *self.save_encoder_key, *self.save_encoder_value
 
 
@@ -195,9 +200,14 @@ class WHISPER_DECODER(torch.nn.Module):
         self.whisper = whisper
         self.decoder = whisper.model.decoder
         self.suppress_tokens = suppress_tokens
+        self.num_layers_de = num_layers_de
         self.num_layers_de_2 = num_layers_de + num_layers_de
         self.num_layers_de_2_plus_1 = self.num_layers_de_2 + 1
         self.num_layers_de_2_plus_2 = self.num_layers_de_2 + 2
+        self.num_layers_de_2_plus_3 = self.num_layers_de_2 + 3
+        self.num_layers_de_3_plus = self.num_layers_de_2_plus_3 + num_layers_de
+        self.save_de_keys = [None] * num_layers_de
+        self.save_de_values = [None] * num_layers_de
         self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
         self.suppress_tokens_penality = torch.ones((1, self.whisper.proj_out.out_features), dtype=torch.float32)
         if self.suppress_tokens is not None:
@@ -208,14 +218,31 @@ class WHISPER_DECODER(torch.nn.Module):
         input_ids = all_inputs[self.num_layers_de_2_plus_1]
         ids_len = all_inputs[self.num_layers_de_2_plus_2]
         kv_seq_len = history_len + ids_len
-        task_embeds = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len: kv_seq_len]
+        hidden_states = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len: kv_seq_len]
         attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * all_inputs[-1]).float()
-        outputs = self.decoder(*(all_inputs + tuple([task_embeds, attention_mask])))
-        lm_logits = self.whisper.proj_out(outputs[0][:, -1])
+        for idx, decoder_layer in enumerate(self.decoder.layers):
+            hidden_states_norm = decoder_layer.self_attn_layer_norm(hidden_states)
+            q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.q_proj.weight) + decoder_layer.self_attn.q_proj.bias
+            k = torch.matmul(hidden_states_norm, decoder_layer.self_attn.k_proj.weight).transpose(1, 2)
+            v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.v_proj.weight) + decoder_layer.self_attn.v_proj.bias
+            k = torch.cat((all_inputs[idx], k), dim=2)
+            v = torch.cat((all_inputs[idx + self.num_layers_de], v), dim=1)
+            self.save_de_keys[idx] = k
+            self.save_de_values[idx] = v
+            attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k) + attention_mask, dim=-1), v)
+            hidden_states_attn = torch.matmul(attn, decoder_layer.self_attn.out_proj.weight).sum(dim=0, keepdim=True) + decoder_layer.self_attn.out_proj.bias
+            hidden_states_attn += hidden_states
+            q = torch.matmul(decoder_layer.encoder_attn_layer_norm(hidden_states_attn), decoder_layer.encoder_attn.q_proj.weight) + decoder_layer.encoder_attn.q_proj.bias
+            attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, all_inputs[idx + self.num_layers_de_2_plus_3]), dim=-1), all_inputs[idx + self.num_layers_de_3_plus])
+            hidden_state_cross = torch.matmul(attn, decoder_layer.encoder_attn.out_proj.weight).sum(dim=0, keepdim=True) + decoder_layer.encoder_attn.out_proj.bias
+            hidden_state_cross += hidden_states_attn
+            hidden_states = hidden_state_cross + decoder_layer.fc2(decoder_layer.activation_fn(decoder_layer.fc1(decoder_layer.final_layer_norm(hidden_state_cross))))
+        hidden_states = self.decoder.layer_norm(hidden_states)
+        lm_logits = self.whisper.proj_out(hidden_states[:, -1])
         if self.suppress_tokens is not None:
             lm_logits = lm_logits + self.suppress_tokens_penality
         max_logit_ids = torch.argmax(lm_logits, dim=-1, keepdim=True).int()
-        return outputs[1:], kv_seq_len, max_logit_ids
+        return *self.save_de_keys, *self.save_de_values, kv_seq_len, max_logit_ids
 
 
 print('\nExport start...\n')
