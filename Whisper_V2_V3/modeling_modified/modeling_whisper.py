@@ -282,11 +282,11 @@ class WhisperAttention(nn.Module):
         output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tensor:
-        query_states = torch.matmul(hidden_states, self.q_proj.weight.data) + self.q_proj.bias.data
-        key_states = torch.matmul(hidden_states, self.k_proj.weight.data).transpose(1, 2)
-        value_states = torch.matmul(hidden_states, self.v_proj.weight.data) + self.v_proj.bias.data
+        query_states = torch.matmul(hidden_states, self.q_proj.weight) + self.q_proj.bias
+        key_states = torch.matmul(hidden_states, self.k_proj.weight).transpose(1, 2)
+        value_states = torch.matmul(hidden_states, self.v_proj.weight) + self.v_proj.bias
         attn = torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states), dim=-1), value_states)
-        attn = torch.matmul(attn, self.out_proj.weight.data).sum(dim=0, keepdim=True) + self.out_proj.bias.data
+        attn = torch.matmul(attn, self.out_proj.weight).sum(dim=0, keepdim=True) + self.out_proj.bias
         return attn
 
 
@@ -312,9 +312,9 @@ class WhisperFlashAttention2(WhisperAttention):
         output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
-        query_states = torch.matmul(hidden_states, self.q_proj.weight.data) + self.q_proj.bias.data
+        query_states = torch.matmul(hidden_states, self.q_proj.weight) + self.q_proj.bias
         attn = torch.matmul(nn.functional.softmax(torch.matmul(query_states, past_key_en), dim=-1), past_value_en)
-        attn = torch.matmul(attn, self.out_proj.weight.data).sum(dim=0, keepdim=True) + self.out_proj.bias.data
+        attn = torch.matmul(attn, self.out_proj.weight).sum(dim=0, keepdim=True) + self.out_proj.bias
         return attn
 
 
@@ -330,13 +330,13 @@ class WhisperSdpaAttention(WhisperAttention):
         output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        query_states = torch.matmul(hidden_states, self.q_proj.weight.data) + self.q_proj.bias.data
-        key_states = torch.matmul(hidden_states, self.k_proj.weight.data).transpose(1, 2)
-        value_states = torch.matmul(hidden_states, self.v_proj.weight.data) + self.v_proj.bias.data
+        query_states = torch.matmul(hidden_states, self.q_proj.weight) + self.q_proj.bias
+        key_states = torch.matmul(hidden_states, self.k_proj.weight).transpose(1, 2)
+        value_states = torch.matmul(hidden_states, self.v_proj.weight) + self.v_proj.bias
         key_states = torch.cat((past_key_de, key_states), dim=2)
         value_states = torch.cat((past_value_de, value_states), dim=1)
         attn = torch.matmul(nn.functional.softmax(torch.matmul(query_states, key_states) + attention_mask, dim=-1), value_states)
-        attn = torch.matmul(attn, self.out_proj.weight.data).sum(dim=0, keepdim=True) + self.out_proj.bias.data
+        attn = torch.matmul(attn, self.out_proj.weight).sum(dim=0, keepdim=True) + self.out_proj.bias
         return attn, key_states, value_states
 
 
@@ -457,13 +457,13 @@ class WhisperPreTrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         std = self.config.init_std
         if isinstance(module, (nn.Linear, nn.Conv1d)):
-            module.weight.data.normal_(mean=0.0, std=std)
+            module.weight.normal_(mean=0.0, std=std)
             if module.bias is not None:
-                module.bias.data.zero_()
+                module.bias.zero_()
         elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
+            module.weight.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+                module.weight[module.padding_idx].zero_()
         elif isinstance(module, WhisperEncoder):
             with torch.no_grad():
                 embed_positions = module.embed_positions.weight
