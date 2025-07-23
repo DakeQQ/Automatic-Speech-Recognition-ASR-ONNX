@@ -27,7 +27,7 @@ target_platform = "amd64"                                                       
 slim(
     model=quant_utils.load_model_with_shape_infer(Path(model_path)),
     output_model=optimized_model_path,
-    no_shape_infer=False,                                   # False for more optimize but may get errors.
+    no_shape_infer=True,                                    # False for more optimize but may get errors.
     skip_fusion_patterns=False,
     no_constant_folding=False,
     save_as_external_data=False,
