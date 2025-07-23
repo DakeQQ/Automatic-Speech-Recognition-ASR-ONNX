@@ -49,7 +49,7 @@ if quant_int8:
     slim(
         model=quanted_model_path,
         output_model=quanted_model_path,
-        no_shape_infer=True if "Encoder" in model_path else False,  # False for more optimize but may get errors.
+        no_shape_infer=True,  # False for more optimize but may get errors.
         skip_fusion_patterns=False,
         no_constant_folding=False,
         save_as_external_data=use_low_memory_mode_in_Android,
@@ -60,7 +60,7 @@ else:
     slim(
         model=quant_utils.load_model_with_shape_infer(Path(model_path)),
         output_model=quanted_model_path,
-        no_shape_infer=True if "Encoder" in model_path else False,  # False for more optimize but may get errors.
+        no_shape_infer=True,  # False for more optimize but may get errors.
         skip_fusion_patterns=False,
         no_constant_folding=False,
         save_as_external_data=use_low_memory_mode_in_Android,
