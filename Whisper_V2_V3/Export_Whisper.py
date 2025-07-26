@@ -210,6 +210,7 @@ class WHISPER_DECODER(torch.nn.Module):
         self.save_de_values = [None] * num_layers_de
         self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
         self.suppress_tokens_penality = torch.ones((1, self.whisper.proj_out.out_features), dtype=torch.float32)
+        self.decoder.embed_positions.weight.data = self.decoder.embed_positions.weight.data.unsqueeze(0)
         if self.suppress_tokens is not None:
             self.suppress_tokens_penality[:, self.suppress_tokens] = float(-9999.0)
 
@@ -218,7 +219,7 @@ class WHISPER_DECODER(torch.nn.Module):
         input_ids = all_inputs[self.num_layers_de_2_plus_1]
         ids_len = all_inputs[self.num_layers_de_2_plus_2]
         kv_seq_len = history_len + ids_len
-        hidden_states = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[history_len: kv_seq_len]
+        hidden_states = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[:, history_len: kv_seq_len]
         attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * all_inputs[-1]).float()
         for idx, decoder_layer in enumerate(self.decoder.layers):
             hidden_states_norm = decoder_layer.self_attn_layer_norm(hidden_states)
