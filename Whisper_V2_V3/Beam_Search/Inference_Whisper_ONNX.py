@@ -8,10 +8,11 @@ from transformers import AutoTokenizer
 tokenizer_path = "/home/DakeQQ/Downloads/whisper-large-v3-turbo"                       # The whisper model tokenizer folder path.
 onnx_model_A = "/home/DakeQQ/Downloads/Whisper_Optimized/Whisper_Encoder.onnx"         # The exported onnx model path.
 onnx_model_B = "/home/DakeQQ/Downloads/Whisper_Optimized/Whisper_Decoder.onnx"         # The exported onnx model path.
-onnx_model_C = '/home/DakeQQ/Downloads/Whisper_Optimized/Greedy_Search.onnx'           # Assign a path where the exported onnx model stored.
-onnx_model_D = '/home/DakeQQ/Downloads/Whisper_Optimized/First_Beam_Search.onnx'       # Assign a path where the exported onnx model stored.
-onnx_model_E = '/home/DakeQQ/Downloads/Whisper_Optimized/Second_Beam_Search.onnx'      # Assign a path where the exported onnx model stored.
-onnx_model_F = '/home/DakeQQ/Downloads/Whisper_Optimized/Reset_Penality.onnx'          # Assign a path where the exported onnx model stored.
+onnx_model_C = '/home/DakeQQ/Downloads/Whisper_Optimized/Greedy_Search.onnx'           # The exported onnx model path.
+onnx_model_D = '/home/DakeQQ/Downloads/Whisper_Optimized/First_Beam_Search.onnx'       # The exported onnx model path.
+onnx_model_E = '/home/DakeQQ/Downloads/Whisper_Optimized/Second_Beam_Search.onnx'      # The exported onnx model path.
+onnx_model_F = '/home/DakeQQ/Downloads/Whisper_Optimized/Reset_Penality.onnx'          # The exported onnx model path.
+
 test_audio = ["../example/zh.mp3", "../example/en.mp3", "../example/ja.mp3", "../example/ko.mp3"]     # The test audio list.
 
 
