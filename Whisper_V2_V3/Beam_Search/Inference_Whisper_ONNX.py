@@ -201,7 +201,7 @@ def remove_repeated_parts(ids, repeat_words_threshold, ids_len):
 
 # ONNX Runtime settings
 session_opts = onnxruntime.SessionOptions()
-session_opts.log_severity_level = 0                   # Fatal level, it an adjustable value.
+session_opts.log_severity_level = 4                   # Fatal level, it an adjustable value.
 session_opts.log_verbosity_level = 4                  # Fatal level, it an adjustable value.
 session_opts.inter_op_num_threads = MAX_THREADS       # Run different nodes with num_threads. Set 0 for auto.
 session_opts.intra_op_num_threads = MAX_THREADS       # Under the node, execute the operators with num_threads. Set 0 for auto.
