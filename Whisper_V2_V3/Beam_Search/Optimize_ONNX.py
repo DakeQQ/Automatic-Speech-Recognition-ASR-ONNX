@@ -184,12 +184,12 @@ if is_main_part:
         except Exception as e:
             print(f"Error deleting {file_path}: {e}")
 
-# if not use_low_memory_mode_in_Android and not quant_float16:
-#     # Convert the simplified model to ORT format.
-#     if use_gpu:
-#         optimization_style = "Runtime"      # ['Runtime', 'Fixed']; Runtime for XNNPACK/NNAPI/QNN/CoreML..., Fixed for CPU provider
-#     else:
-#         optimization_style = "Fixed"
-#
-#     # Call subprocess may get permission failed on Windows system.
-#     subprocess.run([f'python -m onnxruntime.tools.convert_onnx_models_to_ort --output_dir {quanted_folder_path} --optimization_style {optimization_style} --target_platform {target_platform} --enable_type_reduction {quanted_folder_path}'], shell=True)
+if not use_low_memory_mode_in_Android and not quant_float16:
+    # Convert the simplified model to ORT format.
+    if use_gpu:
+        optimization_style = "Runtime"      # ['Runtime', 'Fixed']; Runtime for XNNPACK/NNAPI/QNN/CoreML..., Fixed for CPU provider
+    else:
+        optimization_style = "Fixed"
+
+    # Call subprocess may get permission failed on Windows system.
+    subprocess.run([f'python -m onnxruntime.tools.convert_onnx_models_to_ort --output_dir {quanted_folder_path} --optimization_style {optimization_style} --target_platform {target_platform} --enable_type_reduction {quanted_folder_path}'], shell=True)
