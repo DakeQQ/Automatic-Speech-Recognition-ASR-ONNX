@@ -239,12 +239,6 @@ amount_of_outputs_B = len(out_name_B)
 in_name_B = [in_name_B[i].name for i in range(len(in_name_B))]
 out_name_B = [out_name_B[i].name for i in range(amount_of_outputs_B)]
 
-ort_session_F = onnxruntime.InferenceSession(onnx_model_F, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
-in_name_F = ort_session_F.get_inputs()
-out_name_F = ort_session_F.get_outputs()
-in_name_F = [in_name_F[i].name for i in range(len(in_name_F))]
-out_name_F = [out_name_F[i].name for i in range(len(out_name_F))]
-
 generate_limit = MAX_SEQ_LEN - 5  # 5 = length of inital input_ids
 num_layers = (amount_of_outputs_B - 2) // 2
 num_keys_values = num_layers + num_layers
@@ -277,6 +271,12 @@ if USE_BEAM_SEARCH:
     out_name_E = ort_session_E.get_outputs()
     in_name_E = [in_name_E[i].name for i in range(len(in_name_E))]
     out_name_E = [out_name_E[i].name for i in range(len(out_name_E))]
+  
+    ort_session_F = onnxruntime.InferenceSession(onnx_model_F, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
+    in_name_F = ort_session_F.get_inputs()
+    out_name_F = ort_session_F.get_outputs()
+    in_name_F = [in_name_F[i].name for i in range(len(in_name_F))]
+    out_name_F = [out_name_F[i].name for i in range(len(out_name_F))]
     
     input_feed_D = {
         in_name_D[-2]: penality_value,
