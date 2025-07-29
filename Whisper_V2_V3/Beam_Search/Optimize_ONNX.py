@@ -103,7 +103,7 @@ else:
         )
 
 # transformers.optimizer
-if "Reset_Penality" not in model_path or "First_Beam_Search" not in model_path:
+if "Reset_Penality" not in model_path and "First_Beam_Search" not in model_path:
     if download_path.lower() == "none" or download_path is None:
         num_heads = 0    # default
         hidden_size = 0  # default
