@@ -34,7 +34,7 @@ TOP_K = 3                                                   # The top k candidat
 BEAM_SIZE = 3                                               # Number of beams in searching.
 TARGET_LANGUAGE = "en"                                      # Choose a language listed in the get_language_id function's language_map.
 TASK = 'transcribe'                                         # Choose one of : ['transcribe', 'translate']
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
 # N_MELS = 80                                               # Setting by whisper model config. Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
@@ -156,13 +156,13 @@ def remove_repeated_parts(ids, repeat_words_threshold, ids_len):
         for j in range(i + repeat_words_threshold, boundary):
             check = []
             for k in range(-side_L, side_R):
-                if ids[:, j + k] == ids[:, i + k]:
+                if ids[j + k] == ids[i + k]:
                     check.append(True)
                 else:
                     check.append(False)
                     break
             if False not in check:
-                return ids[:, : j - side_L]
+                return ids[: j - side_L]
     return ids
 
 
@@ -174,14 +174,14 @@ class GREEDY_SEARCH(torch.nn.Module):
     def forward(self, logits, repeat_penality, penality_value, batch_size):
         max_logits_idx = torch.argmax(logits * repeat_penality, dim=-1, keepdim=True)
         batch_indices = self.batch_indices[:batch_size].long()
-        repeat_penality[batch_indices, [0], max_logits_idx.squeeze(-1)] *= penality_value
+        repeat_penality[batch_indices, max_logits_idx.squeeze(-1)] *= penality_value
         return max_logits_idx.int(), repeat_penality
 
 
 class FIRST_BEAM_SEARCH(torch.nn.Module):
-    def __init__(self, num_layers):
+    def __init__(self, num_layers, num_head_de):
         super(FIRST_BEAM_SEARCH, self).__init__()
-        self.num_keys_values = num_layers + num_layers
+        self.num_keys_values = (num_layers + num_layers) * num_head_de
         self.save_keys_values = [None] * self.num_keys_values
         self.batch_indices = torch.arange(MAX_BEAM_SIZE, dtype=torch.int8)
 
@@ -195,19 +195,19 @@ class FIRST_BEAM_SEARCH(torch.nn.Module):
         top_beam_prob, top_beam_indices = torch.topk(logits, dim=-1, k=beam_size, sorted=False, largest=True)
         for i in range(self.num_keys_values):
             self.save_keys_values[i] = all_inputs[i].repeat(beam_size, *([1] * (all_inputs[i].dim() - 1)))
-        top_beam_indices = top_beam_indices.transpose(0, 2)
+        top_beam_indices = top_beam_indices.transpose(0, 1)
         batch_indices = self.batch_indices[:beam_size].long()
-        repeat_penality[batch_indices, [0], top_beam_indices] *= penality_value
+        repeat_penality[batch_indices, top_beam_indices] *= penality_value
         top_beam_indices = top_beam_indices.int()
         save_id = torch.cat([save_id, top_beam_indices], dim=-1)
-        max_logits_idx = top_beam_indices[0].view(-1)
-        return *self.save_keys_values, top_beam_indices, save_id, repeat_penality, top_beam_prob.transpose(0, 2), batch_indices, max_logits_idx
+        max_logits_idx = top_beam_indices[0]
+        return *self.save_keys_values, top_beam_indices, save_id, repeat_penality, top_beam_prob.transpose(0, 1), batch_indices, max_logits_idx
 
 
 class SECOND_BEAM_SEARCH(torch.nn.Module):
-    def __init__(self, num_layers):
+    def __init__(self, num_layers, num_head_de):
         super(SECOND_BEAM_SEARCH, self).__init__()
-        self.num_keys_values = num_layers + num_layers
+        self.num_keys_values = (num_layers + num_layers) * num_head_de
         self.save_keys_values = [None] * self.num_keys_values
         self.batch_indices = torch.arange(MAX_BEAM_SIZE, dtype=torch.int8)
 
@@ -229,12 +229,12 @@ class SECOND_BEAM_SEARCH(torch.nn.Module):
         for i in range(self.num_keys_values):
             self.save_keys_values[i] = all_inputs[i][beam_index]
         repeat_penality = repeat_penality[beam_index]
-        repeat_penality[batch_indices, [0], top_beam_indices] *= penality_value
+        repeat_penality[batch_indices, top_beam_indices] *= penality_value
         top_beam_indices = top_beam_indices.int()
-        max_logits_idx = top_beam_indices[0]
-        top_beam_indices = top_beam_indices.view(-1, 1, 1)
+        max_logits_idx = top_beam_indices[[0]]
+        top_beam_indices = top_beam_indices.unsqueeze(-1)
         save_id = torch.cat([save_id[beam_index], top_beam_indices], dim=-1)
-        return *self.save_keys_values, top_beam_indices, save_id, repeat_penality, top_beam_prob.view(-1, 1, 1), max_logits_idx
+        return *self.save_keys_values, top_beam_indices, save_id, repeat_penality, top_beam_prob.unsqueeze(-1), max_logits_idx
 
 
 class RESET_PENALITY(torch.nn.Module):
@@ -243,22 +243,25 @@ class RESET_PENALITY(torch.nn.Module):
         pass
 
     def forward(self, save_id, repeat_penality, penality_reset_count, batch_indices):
-        repeat_penality[batch_indices, [0], save_id[batch_indices, [0], penality_reset_count[batch_indices]]] = 1.0
+        repeat_penality[batch_indices, save_id[batch_indices, penality_reset_count[batch_indices]]] = 1.0
         penality_reset_count += 1
         return save_id, repeat_penality, penality_reset_count
 
 
 class WHISPER_ENCODER(torch.nn.Module):
-    def __init__(self, whisper, stft_model, nfft_stft, n_mels, sample_rate, pre_emphasis, num_layers_de):
+    def __init__(self, whisper, stft_model, nfft_stft, n_mels, sample_rate, pre_emphasis, num_layers_de, num_head_en, num_head_de):
         super(WHISPER_ENCODER, self).__init__()
         self.encoder = whisper.encoder
         self.decoder = whisper.decoder
         self.stft_model = stft_model
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, "slaney", 'slaney')).transpose(0, 1).unsqueeze(0)
-        self.save_encoder_key = [None] * num_layers_de
-        self.save_encoder_value = [None] * num_layers_de
+        self.save_encoder_key = [None] * num_layers_de * num_head_de
+        self.save_encoder_value = [None] * num_layers_de * num_head_de
         self.inv_int16 = float(1.0 / 32768.0)
         self.pre_emphasis = float(pre_emphasis)
+        self.num_head_en = num_head_en
+        self.num_head_de = num_head_de
+        self.num_layers_de = num_layers_de
 
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
@@ -273,65 +276,96 @@ class WHISPER_ENCODER(torch.nn.Module):
         hidden_states = hidden_states + self.encoder.embed_positions.weight[:hidden_states.shape[1]].float()
         for encoder_layer in self.encoder.layers:
             hidden_states_norm = encoder_layer.self_attn_layer_norm(hidden_states)
-            q = torch.matmul(hidden_states_norm, encoder_layer.self_attn.q_proj.weight) + encoder_layer.self_attn.q_proj.bias
-            k = torch.matmul(hidden_states_norm, encoder_layer.self_attn.k_proj.weight).transpose(1, 2)
-            v = torch.matmul(hidden_states_norm, encoder_layer.self_attn.v_proj.weight) + encoder_layer.self_attn.v_proj.bias
+            q = torch.matmul(hidden_states_norm, encoder_layer.self_attn.q_proj.weight[0]) + encoder_layer.self_attn.q_proj.bias[0]
+            k = torch.matmul(hidden_states_norm, encoder_layer.self_attn.k_proj.weight[0]).transpose(1, 2)
+            v = torch.matmul(hidden_states_norm, encoder_layer.self_attn.v_proj.weight[0]) + encoder_layer.self_attn.v_proj.bias[0]
             attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k), dim=-1), v)
-            hidden_states_attn = torch.matmul(attn, encoder_layer.self_attn.out_proj.weight).sum(dim=0, keepdim=True) + encoder_layer.self_attn.out_proj.bias
-            hidden_states_attn += hidden_states
+            hidden_states_attn = torch.matmul(attn, encoder_layer.self_attn.out_proj.weight[0])
+            for i in range(1, self.num_head_en):
+                q = torch.matmul(hidden_states_norm, encoder_layer.self_attn.q_proj.weight[i]) + encoder_layer.self_attn.q_proj.bias[i]
+                k = torch.matmul(hidden_states_norm, encoder_layer.self_attn.k_proj.weight[i]).transpose(1, 2)
+                v = torch.matmul(hidden_states_norm, encoder_layer.self_attn.v_proj.weight[i]) + encoder_layer.self_attn.v_proj.bias[i]
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k), dim=-1), v)
+                hidden_states_attn += torch.matmul(attn, encoder_layer.self_attn.out_proj.weight[i])
+            hidden_states_attn = hidden_states_attn + encoder_layer.self_attn.out_proj.bias + hidden_states
             hidden_states = hidden_states_attn + encoder_layer.fc2(encoder_layer.activation_fn(encoder_layer.fc1(encoder_layer.final_layer_norm(hidden_states_attn))))
         hidden_states = self.encoder.layer_norm(hidden_states)
-        for idx, decoder_layer in enumerate(self.decoder.layers):
-            self.save_encoder_key[idx] = torch.matmul(hidden_states, decoder_layer.encoder_attn.k_proj.weight).transpose(1, 2)
-            self.save_encoder_value[idx] = torch.matmul(hidden_states, decoder_layer.encoder_attn.v_proj.weight) + decoder_layer.encoder_attn.v_proj.bias
+        count = 0
+        for decoder_layer in self.decoder.layers:
+            for i in range(self.num_head_de):
+                self.save_encoder_key[count] = torch.matmul(hidden_states, decoder_layer.encoder_attn.k_proj.weight[i]).transpose(1, 2)
+                self.save_encoder_value[count] = torch.matmul(hidden_states, decoder_layer.encoder_attn.v_proj.weight[i]) + decoder_layer.encoder_attn.v_proj.bias[i]
+                count += 1
         return *self.save_encoder_key, *self.save_encoder_value
 
 
 class WHISPER_DECODER(torch.nn.Module):
-    def __init__(self, whisper, max_seq_len, suppress_tokens, num_layers_de):
+    def __init__(self, whisper, max_seq_len, suppress_tokens, num_layers_de, num_head_de):
         super(WHISPER_DECODER, self).__init__()
         self.whisper = whisper
         self.decoder = whisper.model.decoder
         self.suppress_tokens = suppress_tokens
         self.num_layers_de = num_layers_de
-        self.num_layers_de_2 = num_layers_de + num_layers_de
-        self.num_layers_de_2_plus_1 = self.num_layers_de_2 + 1
-        self.num_layers_de_2_plus_2 = self.num_layers_de_2 + 2
-        self.num_layers_de_3_plus = self.num_layers_de_2_plus_2 + num_layers_de
-        self.save_de_keys = [None] * num_layers_de
-        self.save_de_values = [None] * num_layers_de
-        self.attention_mask = (1 - torch.tril(torch.ones([1, 1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
-        self.suppress_tokens_penality = torch.ones((1, 1, self.whisper.proj_out.out_features), dtype=torch.float32)
-        self.decoder.embed_positions.weight.data = self.decoder.embed_positions.weight.data.unsqueeze(0).unsqueeze(0)
+        self.num_layers_head_de = num_layers_de * num_head_de
+        self.num_layers_head_de_2 = self. num_layers_head_de + self.num_layers_head_de
+        self.num_layers_head_de_2_plus_1 = self.num_layers_head_de_2 + 1
+        self.num_layers_head_de_2_plus_2 = self.num_layers_head_de_2 + 2
+        self.num_layers_head_de_3_plus = self.num_layers_head_de_2_plus_2 + self.num_layers_head_de
+        self.save_de_keys = [None] * self.num_layers_head_de
+        self.save_de_values = [None] * self.num_layers_head_de
+        self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
+        self.suppress_tokens_penality = torch.ones((1, self.whisper.proj_out.out_features), dtype=torch.float32)
+        self.decoder.embed_positions.weight.data = self.decoder.embed_positions.weight.data.unsqueeze(0)
+        self.num_head_de = num_head_de
         if self.suppress_tokens is not None:
-            self.suppress_tokens_penality[:, :, self.suppress_tokens] = float(-128.0)
+            self.suppress_tokens_penality[:, self.suppress_tokens] = float(-128.0)
 
     def forward(self, *all_inputs):
-        input_ids = all_inputs[self.num_layers_de_2]
-        history_len = all_inputs[self.num_layers_de_2_plus_1]
+        input_ids = all_inputs[self.num_layers_head_de_2]
+        history_len = all_inputs[self.num_layers_head_de_2_plus_1]
         ids_len = all_inputs[-2]
         kv_seq_len = history_len + ids_len
-        hidden_states = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[:, :, history_len: kv_seq_len]
-        attention_mask = (self.attention_mask[:, :, :ids_len, :kv_seq_len] * all_inputs[-1]).float()
+        hidden_states = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[:, history_len: kv_seq_len]
+        attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * all_inputs[-1]).float()
+        count = 0
         for idx, decoder_layer in enumerate(self.decoder.layers):
+            idx *= self.num_head_de
             hidden_states_norm = decoder_layer.self_attn_layer_norm(hidden_states)
-            q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.q_proj.weight) + decoder_layer.self_attn.q_proj.bias
-            k = torch.matmul(hidden_states_norm, decoder_layer.self_attn.k_proj.weight).transpose(2, 3)
-            v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.v_proj.weight) + decoder_layer.self_attn.v_proj.bias
-            k = torch.cat((all_inputs[idx], k), dim=3)
-            v = torch.cat((all_inputs[idx + self.num_layers_de], v), dim=2)
-            self.save_de_keys[idx] = k
-            self.save_de_values[idx] = v
+            q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.q_proj.weight[0]) + decoder_layer.self_attn.q_proj.bias[0]
+            k = torch.matmul(hidden_states_norm, decoder_layer.self_attn.k_proj.weight[0]).transpose(1, 2)
+            v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.v_proj.weight[0]) + decoder_layer.self_attn.v_proj.bias[0]
+            k = torch.cat((all_inputs[idx], k), dim=2)
+            v = torch.cat((all_inputs[idx + self.num_layers_head_de], v), dim=1)
+            self.save_de_keys[count] = k
+            self.save_de_values[count] = v
             attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k) + attention_mask, dim=-1), v)
-            hidden_states_attn = torch.matmul(attn, decoder_layer.self_attn.out_proj.weight).sum(dim=1, keepdim=True) + decoder_layer.self_attn.out_proj.bias
-            hidden_states_attn += hidden_states
-            q = torch.matmul(decoder_layer.encoder_attn_layer_norm(hidden_states_attn), decoder_layer.encoder_attn.q_proj.weight) + decoder_layer.encoder_attn.q_proj.bias
-            attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, all_inputs[idx + self.num_layers_de_2_plus_2]), dim=-1), all_inputs[idx + self.num_layers_de_3_plus])
-            hidden_state_cross = torch.matmul(attn, decoder_layer.encoder_attn.out_proj.weight).sum(dim=1, keepdim=True) + decoder_layer.encoder_attn.out_proj.bias
-            hidden_state_cross += hidden_states_attn
+            hidden_states_attn = torch.matmul(attn, decoder_layer.self_attn.out_proj.weight[0])
+            count += 1
+            for i in range(1, self.num_head_de):
+                q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.q_proj.weight[i]) + decoder_layer.self_attn.q_proj.bias[i]
+                k = torch.matmul(hidden_states_norm, decoder_layer.self_attn.k_proj.weight[i]).transpose(1, 2)
+                v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.v_proj.weight[i]) + decoder_layer.self_attn.v_proj.bias[i]
+                k = torch.cat((all_inputs[idx + i], k), dim=2)
+                v = torch.cat((all_inputs[idx + i + self.num_layers_head_de], v), dim=1)
+                self.save_de_keys[count] = k
+                self.save_de_values[count] = v
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k) + attention_mask, dim=-1), v)
+                hidden_states_attn += torch.matmul(attn, decoder_layer.self_attn.out_proj.weight[i])
+                count += 1
+            hidden_states_attn = hidden_states_attn + decoder_layer.self_attn.out_proj.bias + hidden_states
+            hidden_states_attn_norm = decoder_layer.encoder_attn_layer_norm(hidden_states_attn)
+            q = torch.matmul(hidden_states_attn_norm, decoder_layer.encoder_attn.q_proj.weight[0]) + decoder_layer.encoder_attn.q_proj.bias[0]
+            attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, all_inputs[idx + self.num_layers_head_de_2_plus_2]), dim=-1), all_inputs[idx + self.num_layers_head_de_3_plus])
+            hidden_state_cross = torch.matmul(attn, decoder_layer.encoder_attn.out_proj.weight[0])
+            for i in range(1, self.num_head_de):
+                q = torch.matmul(hidden_states_attn_norm, decoder_layer.encoder_attn.q_proj.weight[i]) + decoder_layer.encoder_attn.q_proj.bias[i]
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, all_inputs[idx + i + self.num_layers_head_de_2_plus_2]), dim=-1), all_inputs[idx + i + self.num_layers_head_de_3_plus])
+                hidden_state_cross += torch.matmul(attn, decoder_layer.encoder_attn.out_proj.weight[i])
+            hidden_state_cross = hidden_state_cross + decoder_layer.encoder_attn.out_proj.bias + hidden_states_attn
             hidden_states = hidden_state_cross + decoder_layer.fc2(decoder_layer.activation_fn(decoder_layer.fc1(decoder_layer.final_layer_norm(hidden_state_cross))))
+
         hidden_states = self.decoder.layer_norm(hidden_states)
-        logits = self.whisper.proj_out(hidden_states[:, :, -1])
+        logits = self.whisper.proj_out(hidden_states[:, -1])
         if self.suppress_tokens is not None:
             logits = logits + self.suppress_tokens_penality
         return *self.save_de_keys, *self.save_de_values, logits, kv_seq_len
@@ -398,19 +432,21 @@ with torch.inference_mode():
         model.model.decoder.layers._modules[i].encoder_attn.out_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.out_proj.bias.data.view(1, 1, -1).contiguous()
         
     custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
-    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
+    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE, NUM_HEAD_EN, NUM_HEAD_DE)
 
     output_names = []
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     dynamic_axes = {'audio': {2: 'audio_len'}}
     for i in range(NUM_LAYER_DE):
-        name = f'en_key_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {2: 'signal_len'}
+        for j in range(NUM_HEAD_EN):
+            name = f'en_key_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {2: 'signal_len'}
     for i in range(NUM_LAYER_DE):
-        name = f'en_value_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {1: 'signal_len'}
+        for j in range(NUM_HEAD_EN):
+            name = f'en_value_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {1: 'signal_len'}
       
     torch.onnx.export(
         whisper_encoder,
@@ -435,38 +471,40 @@ with torch.inference_mode():
         suppress_tokens = torch.tensor(generation_config.suppress_tokens, dtype=torch.int64)
     else:
         suppress_tokens = None
-    whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN, suppress_tokens, NUM_LAYER_DE)
-    input_ids = torch.ones((3, 1, 1), dtype=torch.int32)  # '3' is a dummy value
+    whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN, suppress_tokens, NUM_LAYER_DE, NUM_HEAD_DE)
+    input_ids = torch.ones((3, 1), dtype=torch.int32)  # '3' is a dummy value
     ids_len = torch.tensor([input_ids.shape[-1]], dtype=torch.int64)
     history_len = torch.tensor([0], dtype=torch.int64)
-    save_encoder_key = torch.zeros((NUM_HEAD_EN, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float32)
-    save_encoder_value = torch.zeros((NUM_HEAD_EN, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float32)
+    save_encoder_key = torch.zeros((1, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float32)
+    save_encoder_value = torch.zeros((1, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float32)
     batch_size = input_ids.shape[0]
-    past_key_de = torch.zeros((batch_size, NUM_HEAD_DE, HEAD_DIM_DE, 0), dtype=torch.float32)
-    past_value_de = torch.zeros((batch_size, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float32)
+    past_key_de = torch.zeros((batch_size, HEAD_DIM_DE, 0), dtype=torch.float32)
+    past_value_de = torch.zeros((batch_size, 0, HEAD_DIM_DE), dtype=torch.float32)
     attention_mask = torch.tensor([1], dtype=torch.int8)
 
     input_names = []
     all_inputs = []
     output_names = []
-    dynamic_axes = {'input_ids': {0: 'batch', 2: 'ids_len'}}
+    dynamic_axes = {'input_ids': {0: 'batch', 1: 'ids_len'}}
 
     for i in range(NUM_LAYER_DE):
-        name = f'in_de_key_{i}'
-        input_names.append(name)
-        all_inputs.append(past_key_de)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len'}
-        name = f'out_de_key_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len_plus_ids_len'}
+        for j in range(NUM_HEAD_DE):
+            name = f'in_de_key_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(past_key_de)
+            dynamic_axes[name] = {0: 'batch', 2: 'history_len'}
+            name = f'out_de_key_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {0: 'batch', 2: 'history_len_plus_ids_len'}
     for i in range(NUM_LAYER_DE):
-        name = f'in_de_value_{i}'
-        input_names.append(name)
-        all_inputs.append(past_value_de)
-        dynamic_axes[name] = {0: 'batch', 2: 'history_len'}
-        name = f'out_de_value_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 2: 'history_len_plus_ids_len'}
+        for j in range(NUM_HEAD_DE):
+            name = f'in_de_value_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(past_value_de)
+            dynamic_axes[name] = {0: 'batch', 1: 'history_len'}
+            name = f'out_de_value_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {0: 'batch', 1: 'history_len_plus_ids_len'}
 
     input_names.append('input_ids')
     all_inputs.append(input_ids)
@@ -474,15 +512,17 @@ with torch.inference_mode():
     all_inputs.append(history_len)
 
     for i in range(NUM_LAYER_DE):
-        name = f'en_key_{i}'
-        input_names.append(name)
-        all_inputs.append(save_encoder_key)
-        dynamic_axes[name] = {2: 'signal_len'}
+        for j in range(NUM_HEAD_EN):
+            name = f'en_key_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(save_encoder_key)
+            dynamic_axes[name] = {2: 'signal_len'}
     for i in range(NUM_LAYER_DE):
-        name = f'en_value_{i}'
-        input_names.append(name)
-        all_inputs.append(save_encoder_value)
-        dynamic_axes[name] = {1: 'signal_len'}
+        for j in range(NUM_HEAD_EN):
+            name = f'en_value_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(save_encoder_value)
+            dynamic_axes[name] = {1: 'signal_len'}
 
     input_names.append('ids_len')
     all_inputs.append(ids_len)
@@ -513,12 +553,12 @@ with torch.inference_mode():
     del input_names
     del output_names
     del dynamic_axes
-    
+
     greedy = GREEDY_SEARCH()
     beam_size = torch.tensor([BEAM_SIZE], dtype=torch.int64)
-    repeat_penality = torch.ones((beam_size, 1, VOCAB_SIZE), dtype=torch.float32)
+    repeat_penality = torch.ones((beam_size, VOCAB_SIZE), dtype=torch.float32)
     penality_reset_count = torch.zeros(beam_size, dtype=torch.int32)
-    logits = torch.ones((beam_size, 1, VOCAB_SIZE), dtype=torch.float32)
+    logits = torch.ones((beam_size, VOCAB_SIZE), dtype=torch.float32)
     penality_value = torch.tensor(REPEAT_PENALITY, dtype=torch.float32)
     batch_indices = torch.arange(BEAM_SIZE, dtype=torch.int64)
 
@@ -539,33 +579,35 @@ with torch.inference_mode():
     )
     del greedy
 
-    first_beam_search = FIRST_BEAM_SEARCH(NUM_LAYER_DE)
+    first_beam_search = FIRST_BEAM_SEARCH(NUM_LAYER_DE, NUM_HEAD_DE)
     topK = torch.tensor([TOP_K], dtype=torch.int64)
-    save_id = torch.zeros((beam_size, 1, 10), dtype=torch.int32)
-    previous_prob = torch.zeros((beam_size, 1, 1), dtype=torch.float32)
+    save_id = torch.zeros((beam_size, 10), dtype=torch.int32)
+    previous_prob = torch.zeros((beam_size, 1), dtype=torch.float32)
     past_keys_greedy = past_key_de[[0]]
     past_values_greedy = past_value_de[[0]]
 
     all_inputs = []
     input_names = []
     output_names = []
-    dynamic_axes = {'save_id_in': {0: 'batch', 2: 'history_len'}}
+    dynamic_axes = {}
     for i in range(NUM_LAYER_DE):
-        name = f'in_key_{i}'
-        input_names.append(name)
-        all_inputs.append(past_keys_greedy)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len'}
-        name = f'out_key_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len_plus_ids_len'}
+        for j in range(NUM_HEAD_DE):
+            name = f'in_key_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(past_keys_greedy)
+            dynamic_axes[name] = {0: 'batch', 2: 'history_len'}
+            name = f'out_key_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {0: 'batch', 2: 'history_len_plus_ids_len'}
     for i in range(NUM_LAYER_DE):
-        name = f'in_value_{i}'
-        input_names.append(name)
-        all_inputs.append(past_values_greedy)
-        dynamic_axes[name] = {0: 'batch', 2: 'history_len'}
-        name = f'out_value_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 2: 'history_len_plus_ids_len'}
+        for j in range(NUM_HEAD_DE):
+            name = f'in_value_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(past_values_greedy)
+            dynamic_axes[name] = {0: 'batch', 1: 'history_len'}
+            name = f'out_value_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {0: 'batch', 1: 'history_len_plus_ids_len'}
     input_names.append('logits')
     all_inputs.append(logits[[0]])
     input_names.append('save_id_in')
@@ -582,8 +624,8 @@ with torch.inference_mode():
     output_names.append('batch_indices')
     output_names.append('top_beam_prob')
     output_names.append('max_logits_idx')
-    dynamic_axes['save_id_in'] = {0: 'batch', 2: 'history_len'}
-    dynamic_axes['save_id_out'] = {0: 'batch', 2: 'history_len'}
+    dynamic_axes['save_id_in'] = {0: 'batch', 1: 'history_len'}
+    dynamic_axes['save_id_out'] = {0: 'batch', 1: 'history_len'}
     dynamic_axes['repeat_penality_in'] = {0: 'batch'}
     dynamic_axes['repeat_penality_out'] = {0: 'batch'}
     dynamic_axes['logits'] = {0: 'batch'}
@@ -606,13 +648,15 @@ with torch.inference_mode():
     all_inputs = []
     input_names = []
     for i in range(NUM_LAYER_DE):
-        name = f'in_key_{i}'
-        input_names.append(name)
-        all_inputs.append(past_key_de)
+        for j in range(NUM_HEAD_DE):
+            name = f'in_key_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(past_key_de)
     for i in range(NUM_LAYER_DE):
-        name = f'in_value_{i}'
-        input_names.append(name)
-        all_inputs.append(past_value_de)
+        for j in range(NUM_HEAD_DE):
+            name = f'in_value_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(past_value_de)
     input_names.append('logits')
     all_inputs.append(logits)
     input_names.append('save_id_in')
@@ -632,7 +676,7 @@ with torch.inference_mode():
     dynamic_axes['previous_prob'] = {0: 'batch'}
     output_names.remove("batch_indices")
 
-    second_beam_search = SECOND_BEAM_SEARCH(NUM_LAYER_DE)
+    second_beam_search = SECOND_BEAM_SEARCH(NUM_LAYER_DE, NUM_HEAD_DE)
     torch.onnx.export(
         second_beam_search,
         tuple(all_inputs),
@@ -652,8 +696,8 @@ with torch.inference_mode():
         input_names=['save_id_in', 'repeat_penality_in', 'penality_reset_count_in', 'batch_indices'],
         output_names=['save_id_out', 'repeat_penality_out', 'penality_reset_count_out'],
         dynamic_axes={
-            'save_id_in': {0: 'batch', 2: 'history_len'},
-            'save_id_out': {0: 'batch', 2: 'history_len'},
+            'save_id_in': {0: 'batch', 1: 'history_len'},
+            'save_id_out': {0: 'batch', 1: 'history_len'},
             'repeat_penality_in': {0: 'batch'},
             'repeat_penality_out': {0: 'batch'},
             'penality_reset_count_in': {0: 'batch'},
@@ -725,7 +769,7 @@ num_keys_values = num_layers + num_layers
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
 num_keys_values_plus_3 = num_keys_values + 3
-vocab_size = ort_session_B._outputs_meta[num_keys_values].shape[2]
+vocab_size = ort_session_B._outputs_meta[num_keys_values].shape[-1]
 topK = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([TOP_K], dtype=np.int64), 'cpu', 0)
 beam_size = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([BEAM_SIZE], dtype=np.int64), 'cpu', 0)
 penality_value = onnxruntime.OrtValue.ortvalue_from_numpy(np.array(REPEAT_PENALITY, dtype=np.float32), 'cpu', 0)
@@ -757,7 +801,7 @@ if USE_BEAM_SEARCH:
     out_name_F = ort_session_F.get_outputs()
     in_name_F = [in_name_F[i].name for i in range(len(in_name_F))]
     out_name_F = [out_name_F[i].name for i in range(len(out_name_F))]
-
+    
     input_feed_D = {
         in_name_D[-2]: penality_value,
         in_name_D[-1]: beam_size
@@ -782,7 +826,7 @@ if REPEAT_PENALITY != 1.0:
     if USE_BEAM_SEARCH:
         penality_reset_count_beam_init = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32), 'cpu', 0)
     else:
-        save_id_greedy = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
+        save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
 else:
     do_repeat_penality = False
 
@@ -823,18 +867,17 @@ for language_idx, test in enumerate(test_audio):
     # Start to run Whisper
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = np.array([[[50258, get_language_id(language), get_task_id(TASK, is_v3)[0]]]], dtype=np.int32)
-
+    input_ids = np.array([[50258, get_language_id(language), get_task_id(TASK, is_v3)[0]]], dtype=np.int32)
     batch_size = input_ids.shape[0]
-    repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, 1, vocab_size), dtype=np.float32), 'cpu', 0)
+    repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, vocab_size), dtype=np.float32), 'cpu', 0)
     ids_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([input_ids.shape[-1]], dtype=np.int64), 'cpu', 0)
     ids_len_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), 'cpu', 0)
     input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, 'cpu', 0)
     history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), 'cpu', 0)
     attention_mask_0 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), 'cpu', 0)
     attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
-    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._inputs_meta[0].shape[1], ort_session_B._inputs_meta[0].shape[2], 0), dtype=np.float32), 'cpu', 0)
-    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._inputs_meta[num_layers].shape[1], 0, ort_session_B._inputs_meta[num_layers].shape[3]), dtype=np.float32), 'cpu', 0)
+    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1], 0), dtype=np.float32), 'cpu', 0)
+    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, 0, ort_session_B._outputs_meta[num_layers].shape[2]), dtype=np.float32), 'cpu', 0)
     layer_indices = np.arange(num_keys_values_plus_2, num_keys_values_plus_2 + num_keys_values, dtype=np.int32)
 
     input_feed_B = {
@@ -849,7 +892,7 @@ for language_idx, test in enumerate(test_audio):
         input_feed_B[in_name_B[i]] = past_values_B
 
     if USE_BEAM_SEARCH:
-        save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 1, 0), dtype=np.int32), 'cpu', 0)
+        save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 0), dtype=np.int32), 'cpu', 0)
         input_feed_D[in_name_D[num_keys_values_plus_1]] = save_id_beam
         input_feed_D[in_name_D[num_keys_values_plus_2]] = repeat_penality
     else:
@@ -914,12 +957,12 @@ for language_idx, test in enumerate(test_audio):
                 if max_logits_idx in STOP_TOKEN:
                     break
                 input_feed_B[in_name_B[num_keys_values]] = all_outputs_C[0]
-                if do_repeat_penality and (num_decode >= PENALITY_RANGE) and (save_id_greedy[:, penality_reset_count_greedy] != max_logits_idx):
+                if do_repeat_penality and (num_decode >= PENALITY_RANGE) and (save_id_greedy[penality_reset_count_greedy] != max_logits_idx):
                     repeat_penality = onnxruntime.OrtValue.numpy(all_outputs_C[1])
                     repeat_penality[..., penality_reset_count_greedy] = 1.0
                     penality_reset_count_greedy += 1
                 input_feed_C[in_name_C[1]] = all_outputs_C[1]
-                save_id_greedy[:, num_decode] = max_logits_idx
+                save_id_greedy[num_decode] = max_logits_idx
                 for i in range(num_keys_values):
                     input_feed_B[in_name_B[i]] = all_outputs_B[i]
             input_feed_B[in_name_B[num_keys_values_plus_1]] = all_outputs_B[num_keys_values_plus_1]
@@ -935,15 +978,15 @@ for language_idx, test in enumerate(test_audio):
     if USE_BEAM_SEARCH:
         save_id_beam = onnxruntime.OrtValue.numpy(all_outputs_E[num_keys_values_plus_1])[0]
         for i in range(num_decode, -1, -1):
-            if save_id_beam[:, i] not in STOP_TOKEN:
-                save_id_beam = save_id_beam[:, :i + 1]
+            if save_id_beam[i] not in STOP_TOKEN:
+                save_id_beam = save_id_beam[:i + 1]
                 break
-        save_token_array = remove_repeated_parts(save_id_beam, 3, save_id_beam.shape[-1])          # To handle "over-talking".
+        save_token_array = remove_repeated_parts(save_id_beam, 3, save_id_beam.shape[-1])       # To handle "over-talking".
     else:
-        save_token_array = remove_repeated_parts(save_id_greedy[:, :num_decode], 3, num_decode)    # To handle "over-talking".
+        save_token_array = remove_repeated_parts(save_id_greedy[:num_decode], 3, num_decode)    # To handle "over-talking".
     text, _ = tokenizer._decode_asr(
         [{
-            "tokens": save_token_array
+            "tokens": save_token_array.reshape(1, -1)
         }],
         return_timestamps=None,  # Do not support return timestamps
         return_language=None,
