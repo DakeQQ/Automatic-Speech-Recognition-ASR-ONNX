@@ -189,13 +189,13 @@ def remove_repeated_parts(ids, repeat_words_threshold, ids_len):
         for j in range(i + repeat_words_threshold, boundary):
             check = []
             for k in range(-side_L, side_R):
-                if ids[:, j + k] == ids[:, i + k]:
+                if ids[j + k] == ids[i + k]:
                     check.append(True)
                 else:
                     check.append(False)
                     break
             if False not in check:
-                return ids[:, : j - side_L]
+                return ids[: j - side_L]
     return ids
 
 
@@ -245,7 +245,7 @@ num_keys_values = num_layers + num_layers
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
 num_keys_values_plus_3 = num_keys_values + 3
-vocab_size = ort_session_B._outputs_meta[num_keys_values].shape[2]
+vocab_size = ort_session_B._outputs_meta[num_keys_values].shape[1]
 topK = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([TOP_K], dtype=np.int64), device_type, DEVICE_ID)
 beam_size = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([BEAM_SIZE], dtype=np.int64), device_type, DEVICE_ID)
 penality_value = onnxruntime.OrtValue.ortvalue_from_numpy(np.array(REPEAT_PENALITY, dtype=model_dtype), device_type, DEVICE_ID)
@@ -271,13 +271,13 @@ if USE_BEAM_SEARCH:
     out_name_E = ort_session_E.get_outputs()
     in_name_E = [in_name_E[i].name for i in range(len(in_name_E))]
     out_name_E = [out_name_E[i].name for i in range(len(out_name_E))]
-  
+    
     ort_session_F = onnxruntime.InferenceSession(onnx_model_F, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
     in_name_F = ort_session_F.get_inputs()
     out_name_F = ort_session_F.get_outputs()
     in_name_F = [in_name_F[i].name for i in range(len(in_name_F))]
     out_name_F = [out_name_F[i].name for i in range(len(out_name_F))]
-    
+
     input_feed_D = {
         in_name_D[-2]: penality_value,
         in_name_D[-1]: beam_size
@@ -303,7 +303,7 @@ if REPEAT_PENALITY != 1.0:
     if USE_BEAM_SEARCH:
         penality_reset_count_beam_init = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32), device_type, DEVICE_ID)
     else:
-        save_id_greedy = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
+        save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
 else:
     do_repeat_penality = False
 
@@ -344,10 +344,10 @@ for language_idx, test in enumerate(test_audio):
     # Start to run Whisper
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
-    input_ids = np.array([[[50258, get_language_id(language), get_task_id(TASK, is_v3)[0]]]], dtype=np.int32)
+    input_ids = np.array([[50258, get_language_id(language), get_task_id(TASK, is_v3)[0]]], dtype=np.int32)
 
     batch_size = input_ids.shape[0]
-    repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, 1, vocab_size), dtype=model_dtype), device_type, DEVICE_ID)
+    repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, vocab_size), dtype=model_dtype), device_type, DEVICE_ID)
     ids_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([input_ids.shape[-1]], dtype=np.int64), device_type, DEVICE_ID)
     ids_len_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), device_type, DEVICE_ID)
     input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, device_type, DEVICE_ID)
@@ -356,11 +356,11 @@ for language_idx, test in enumerate(test_audio):
     attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
     layer_indices = np.arange(num_keys_values_plus_2, num_keys_values_plus_2 + num_keys_values, dtype=np.int32)
     if device_type != 'dml':
-        past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._inputs_meta[0].shape[1], ort_session_B._inputs_meta[0].shape[2], 0), dtype=model_dtype), device_type, DEVICE_ID)
-        past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._inputs_meta[num_layers].shape[1], 0, ort_session_B._inputs_meta[num_layers].shape[3]), dtype=model_dtype), device_type, DEVICE_ID)
+        past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1],  0), dtype=model_dtype), device_type, DEVICE_ID)
+        past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, 0, ort_session_B._outputs_meta[num_layers].shape[2]), dtype=model_dtype), device_type, DEVICE_ID)
     else:
-        past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._inputs_meta[0].shape[1], ort_session_B._inputs_meta[0].shape[2], 0), dtype=model_dtype), 'cpu', DEVICE_ID)
-        past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._inputs_meta[num_layers].shape[1], 0, ort_session_B._inputs_meta[num_layers].shape[3]), dtype=model_dtype), 'cpu', DEVICE_ID)
+        past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1], 0), dtype=model_dtype), 'cpu', DEVICE_ID)
+        past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, 0, ort_session_B._outputs_meta[num_layers].shape[2]), dtype=model_dtype), 'cpu', DEVICE_ID)
 
     input_feed_B = {
         in_name_B[num_keys_values]: input_ids,
@@ -374,7 +374,7 @@ for language_idx, test in enumerate(test_audio):
         input_feed_B[in_name_B[i]] = past_values_B
 
     if USE_BEAM_SEARCH:
-        save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 1, 0), dtype=np.int32), device_type, DEVICE_ID)
+        save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 0), dtype=np.int32), device_type, DEVICE_ID)
         input_feed_D[in_name_D[num_keys_values_plus_1]] = save_id_beam
         input_feed_D[in_name_D[num_keys_values_plus_2]] = repeat_penality
     else:
@@ -439,12 +439,12 @@ for language_idx, test in enumerate(test_audio):
                 if max_logits_idx in STOP_TOKEN:
                     break
                 input_feed_B[in_name_B[num_keys_values]] = all_outputs_C[0]
-                if do_repeat_penality and (num_decode >= PENALITY_RANGE) and (save_id_greedy[:, penality_reset_count_greedy] != max_logits_idx):
+                if do_repeat_penality and (num_decode >= PENALITY_RANGE) and (save_id_greedy[penality_reset_count_greedy] != max_logits_idx):
                     repeat_penality = onnxruntime.OrtValue.numpy(all_outputs_C[1])
                     repeat_penality[..., penality_reset_count_greedy] = 1.0
                     penality_reset_count_greedy += 1
                 input_feed_C[in_name_C[1]] = all_outputs_C[1]
-                save_id_greedy[:, num_decode] = max_logits_idx
+                save_id_greedy[num_decode] = max_logits_idx
                 for i in range(num_keys_values):
                     input_feed_B[in_name_B[i]] = all_outputs_B[i]
             input_feed_B[in_name_B[num_keys_values_plus_1]] = all_outputs_B[num_keys_values_plus_1]
@@ -460,15 +460,15 @@ for language_idx, test in enumerate(test_audio):
     if USE_BEAM_SEARCH:
         save_id_beam = onnxruntime.OrtValue.numpy(all_outputs_E[num_keys_values_plus_1])[0]
         for i in range(num_decode, -1, -1):
-            if save_id_beam[:, i] not in STOP_TOKEN:
-                save_id_beam = save_id_beam[:, :i + 1]
+            if save_id_beam[i] not in STOP_TOKEN:
+                save_id_beam = save_id_beam[:i + 1]
                 break
         save_token_array = remove_repeated_parts(save_id_beam, 3, save_id_beam.shape[-1])          # To handle "over-talking".
     else:
-        save_token_array = remove_repeated_parts(save_id_greedy[:, :num_decode], 3, num_decode)    # To handle "over-talking".
+        save_token_array = remove_repeated_parts(save_id_greedy[:num_decode], 3, num_decode)    # To handle "over-talking".
     text, _ = tokenizer._decode_asr(
         [{
-            "tokens": save_token_array
+            "tokens": save_token_array.reshape(1, -1)
         }],
         return_timestamps=None,  # Do not support return timestamps
         return_language=None,
