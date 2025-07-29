@@ -261,7 +261,6 @@ class WHISPER_ENCODER(torch.nn.Module):
         self.pre_emphasis = float(pre_emphasis)
         self.num_head_en = num_head_en
         self.num_head_de = num_head_de
-        self.num_layers_de = num_layers_de
 
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
@@ -305,9 +304,8 @@ class WHISPER_DECODER(torch.nn.Module):
         self.whisper = whisper
         self.decoder = whisper.model.decoder
         self.suppress_tokens = suppress_tokens
-        self.num_layers_de = num_layers_de
         self.num_layers_head_de = num_layers_de * num_head_de
-        self.num_layers_head_de_2 = self. num_layers_head_de + self.num_layers_head_de
+        self.num_layers_head_de_2 = self.num_layers_head_de + self.num_layers_head_de
         self.num_layers_head_de_2_plus_1 = self.num_layers_head_de_2 + 1
         self.num_layers_head_de_2_plus_2 = self.num_layers_head_de_2 + 2
         self.num_layers_head_de_3_plus = self.num_layers_head_de_2_plus_2 + self.num_layers_head_de
