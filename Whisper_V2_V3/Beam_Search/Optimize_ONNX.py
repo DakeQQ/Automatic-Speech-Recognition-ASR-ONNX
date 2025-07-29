@@ -36,25 +36,21 @@ quanted_model_path = os.path.join(quanted_folder_path, "Whisper_Encoder.onnx")  
 # model_path = os.path.join(original_folder_path, "Reset_Penality.onnx")                # The original fp32 model path.
 # quanted_model_path = os.path.join(quanted_folder_path, "Reset_Penality.onnx")         # The optimized model stored path.
 
+
 quant_int8 = True                                                                # Quant the model to int8 format.
 quant_float16 = False                                                            # Quant the model to float16 format.
-use_gpu = False                                                                  # If true, the transformers.optimizer will save the moodl with GPU device only format.
+use_gpu = False                                                                  # If true, the transformers.optimizer will save the model with GPU device only format.
 use_low_memory_mode_in_Android = False                                           # # If True, save the model into 2 parts.
 upgrade_opset = 17                                                               # Optional process. Set 0 for close.
 target_platform = "arm"                                                          # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
 
 
-if "decoder" in model_path.lower() or "encoder" in model_path.lower():
-    is_main_part = True
-else:
-    is_main_part = False
-
 # Start Quantize
-if quant_int8 and is_main_part:
+if quant_int8 and "Reset_Penality" not in model_path:
     quantize_dynamic(
         model_input=quant_utils.load_model_with_shape_infer(Path(model_path)),
         model_output=quanted_model_path,
-        per_channel=False,                                       # True for model accuracy but cost a lot of time during quanting process.
+        per_channel=True,                                       # True for model accuracy but cost a lot of time during quanting process.
         reduce_range=False,                                      # True for some x86_64 platform.
         weight_type=QuantType.QUInt8,                            # It is recommended using uint8 + Symmetric False
         extra_options={'ActivationSymmetric': False,             # True for inference speed. False may keep more accuracy.
@@ -78,17 +74,7 @@ if quant_int8 and is_main_part:
     )
 else:
     # ONNX Model Optimizer
-    if is_main_part:
-        slim(
-            model=quant_utils.load_model_with_shape_infer(Path(model_path)),
-            output_model=quanted_model_path,
-            no_shape_infer=True,  # False for more optimize but may get errors.
-            skip_fusion_patterns=False,
-            no_constant_folding=False,
-            save_as_external_data=use_low_memory_mode_in_Android,
-            verbose=False
-        )
-    else:    
+    if "Reset_Penality" in model_path:
         model = optimize_model(model_path,
                                use_gpu=use_gpu,
                                opt_level=2,
@@ -102,14 +88,22 @@ else:
                 force_fp16_initializers=True,
                 use_symbolic_shape_infer=True,  # True for more optimize but may get errors.
                 max_finite_val=65504.0,
-                op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'Range',
-                               'MatMulIntegerToFloat']
+                op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'Range', 'MatMulIntegerToFloat']
             )
         model.save_model_to_file(quanted_model_path, use_external_data_format=use_low_memory_mode_in_Android)
-
+    else:
+        slim(
+            model=quant_utils.load_model_with_shape_infer(Path(model_path)),
+            output_model=quanted_model_path,
+            no_shape_infer=True,                # False for more optimize but may get errors.
+            skip_fusion_patterns=False,
+            no_constant_folding=False,
+            save_as_external_data=use_low_memory_mode_in_Android,
+            verbose=False
+        )
 
 # transformers.optimizer
-if is_main_part:
+if "Reset_Penality" not in model_path or "First_Beam_Search" not in model_path:
     if download_path.lower() == "none" or download_path is None:
         num_heads = 0    # default
         hidden_size = 0  # default
@@ -123,7 +117,6 @@ if is_main_part:
             hidden_size = 0
         del model
         gc.collect()
-
 
     model = optimize_model(quanted_model_path,
                            use_gpu=use_gpu,
@@ -144,7 +137,6 @@ if is_main_part:
     del model
     gc.collect()
 
-
     # onnxslim 2nd
     slim(
         model=quanted_model_path,
@@ -155,7 +147,6 @@ if is_main_part:
         save_as_external_data=use_low_memory_mode_in_Android,
         verbose=False
     )
-
 
     # Upgrade the Opset version. (optional process)
     if upgrade_opset > 0:
