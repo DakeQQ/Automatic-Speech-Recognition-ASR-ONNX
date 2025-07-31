@@ -13,7 +13,7 @@ model_path = "/home/DakeQQ/Downloads/whisper-large-v3-turbo"                    
 onnx_model_A = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Encoder.onnx"                             # The exported onnx model path.
 onnx_model_B = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Decoder.onnx"                             # The exported onnx model path.
 if "3.5" in model_path:
-    test_audio = ["../example/en.mp3"]                                                                 # The test audio list.
+    test_audio = ["../example/en.mp3"]                                                                    # The test audio list.
 else:
     test_audio = ["../example/zh.mp3", "../example/en.mp3", "../example/ja.mp3", "../example/ko.mp3"]     # The test audio list.
 
@@ -39,7 +39,7 @@ if HOP_LENGTH > INPUT_AUDIO_LENGTH:
 
 
 model_path_lower = model_path.lower()
-if ("v3" in model_path_lower) or ("crisperwhisper" in model_path_lower) or ("anime" in model_path_lower):
+if ("v3" in model_path_lower) or ("crisperwhisper" in model_path_lower) or ("anime" in model_path_lower) or ("belle" in model_path_lower) or ("turbo" in model_path_lower) or ("distil" in model_path_lower):
     is_v3 = True
     print("\nExport the Whisper-V3")
 else:
@@ -134,8 +134,7 @@ def get_task_id(task_input, is_v3):
         return task_map[task_input], 50362, 50363
 
 
-def remove_repeated_parts(ids, repeat_words_threshold):
-    ids_len = len(ids)
+def remove_repeated_parts(ids, repeat_words_threshold, ids_len):
     if ids_len <= repeat_words_threshold:
         return np.array([ids], dtype=np.int32)
     side_L = repeat_words_threshold // 2
@@ -156,16 +155,18 @@ def remove_repeated_parts(ids, repeat_words_threshold):
 
 
 class WHISPER_ENCODER(torch.nn.Module):
-    def __init__(self, whisper, stft_model, nfft_stft, n_mels, sample_rate, pre_emphasis, num_layers_de):
+    def __init__(self, whisper, stft_model, nfft_stft, n_mels, sample_rate, pre_emphasis, num_layers_de, num_head_en, num_head_de):
         super(WHISPER_ENCODER, self).__init__()
         self.encoder = whisper.encoder
         self.decoder = whisper.decoder
         self.stft_model = stft_model
         self.pre_emphasis = float(pre_emphasis)
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, "slaney", 'slaney')).transpose(0, 1).unsqueeze(0)
-        self.save_encoder_key = [None] * num_layers_de
-        self.save_encoder_value = [None] * num_layers_de
+        self.save_encoder_key = [None] * num_layers_de * num_head_de
+        self.save_encoder_value = [None] * num_layers_de * num_head_de
         self.inv_int16 = float(1.0 / 32768.0)
+        self.num_head_en = num_head_en
+        self.num_head_de = num_head_de
 
     def forward(self, audio):
         audio = audio.float() * self.inv_int16
@@ -180,70 +181,98 @@ class WHISPER_ENCODER(torch.nn.Module):
         hidden_states = hidden_states + self.encoder.embed_positions.weight[:hidden_states.shape[1]].float()
         for encoder_layer in self.encoder.layers:
             hidden_states_norm = encoder_layer.self_attn_layer_norm(hidden_states)
-            q = torch.matmul(hidden_states_norm, encoder_layer.self_attn.q_proj.weight) + encoder_layer.self_attn.q_proj.bias
-            k = torch.matmul(hidden_states_norm, encoder_layer.self_attn.k_proj.weight).transpose(1, 2)
-            v = torch.matmul(hidden_states_norm, encoder_layer.self_attn.v_proj.weight) + encoder_layer.self_attn.v_proj.bias
+            q = torch.matmul(hidden_states_norm, encoder_layer.self_attn.q_proj.weight[0]) + encoder_layer.self_attn.q_proj.bias[0]
+            k = torch.matmul(hidden_states_norm, encoder_layer.self_attn.k_proj.weight[0]).transpose(1, 2)
+            v = torch.matmul(hidden_states_norm, encoder_layer.self_attn.v_proj.weight[0]) + encoder_layer.self_attn.v_proj.bias[0]
             attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k), dim=-1), v)
-            hidden_states_attn = torch.matmul(attn, encoder_layer.self_attn.out_proj.weight).sum(dim=0, keepdim=True) + encoder_layer.self_attn.out_proj.bias
-            hidden_states_attn += hidden_states
+            hidden_states_attn = torch.matmul(attn, encoder_layer.self_attn.out_proj.weight[0])
+            for i in range(1, self.num_head_en):
+                q = torch.matmul(hidden_states_norm, encoder_layer.self_attn.q_proj.weight[i]) + encoder_layer.self_attn.q_proj.bias[i]
+                k = torch.matmul(hidden_states_norm, encoder_layer.self_attn.k_proj.weight[i]).transpose(1, 2)
+                v = torch.matmul(hidden_states_norm, encoder_layer.self_attn.v_proj.weight[i]) + encoder_layer.self_attn.v_proj.bias[i]
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k), dim=-1), v)
+                hidden_states_attn += torch.matmul(attn, encoder_layer.self_attn.out_proj.weight[i])
+            hidden_states_attn = hidden_states_attn + encoder_layer.self_attn.out_proj.bias + hidden_states
             hidden_states = hidden_states_attn + encoder_layer.fc2(encoder_layer.activation_fn(encoder_layer.fc1(encoder_layer.final_layer_norm(hidden_states_attn))))
         hidden_states = self.encoder.layer_norm(hidden_states)
-        for idx, decoder_layer in enumerate(self.decoder.layers):
-            self.save_encoder_key[idx] = torch.matmul(hidden_states, decoder_layer.encoder_attn.k_proj.weight).transpose(1, 2)
-            self.save_encoder_value[idx] = torch.matmul(hidden_states, decoder_layer.encoder_attn.v_proj.weight) + decoder_layer.encoder_attn.v_proj.bias
+        count = 0
+        for decoder_layer in self.decoder.layers:
+            for i in range(self.num_head_de):
+                self.save_encoder_key[count] = torch.matmul(hidden_states, decoder_layer.encoder_attn.k_proj.weight[i]).transpose(1, 2)
+                self.save_encoder_value[count] = torch.matmul(hidden_states, decoder_layer.encoder_attn.v_proj.weight[i]) + decoder_layer.encoder_attn.v_proj.bias[i]
+                count += 1
         return *self.save_encoder_key, *self.save_encoder_value
 
 
 class WHISPER_DECODER(torch.nn.Module):
-    def __init__(self, whisper, max_seq_len, suppress_tokens, num_layers_de):
+    def __init__(self, whisper, max_seq_len, suppress_tokens, num_layers_de, num_head_de):
         super(WHISPER_DECODER, self).__init__()
         self.whisper = whisper
         self.decoder = whisper.model.decoder
         self.suppress_tokens = suppress_tokens
-        self.num_layers_de = num_layers_de
-        self.num_layers_de_2 = num_layers_de + num_layers_de
-        self.num_layers_de_2_plus_1 = self.num_layers_de_2 + 1
-        self.num_layers_de_2_plus_2 = self.num_layers_de_2 + 2
-        self.num_layers_de_2_plus_3 = self.num_layers_de_2 + 3
-        self.num_layers_de_3_plus = self.num_layers_de_2_plus_3 + num_layers_de
-        self.save_de_keys = [None] * num_layers_de
-        self.save_de_values = [None] * num_layers_de
+        self.num_layers_head_de = num_layers_de * num_head_de
+        self.num_layers_head_de_2 = self.num_layers_head_de + self.num_layers_head_de
+        self.num_layers_head_de_2_plus_1 = self.num_layers_head_de_2 + 1
+        self.num_layers_head_de_2_plus_2 = self.num_layers_head_de_2 + 2
+        self.num_layers_head_de_3_plus = self.num_layers_head_de_2_plus_2 + self.num_layers_head_de
+        self.save_de_keys = [None] * self.num_layers_head_de
+        self.save_de_values = [None] * self.num_layers_head_de
+        self.num_head_de = num_head_de
         self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
         self.suppress_tokens_penality = torch.ones((1, self.whisper.proj_out.out_features), dtype=torch.float32)
         self.decoder.embed_positions.weight.data = self.decoder.embed_positions.weight.data.unsqueeze(0)
         if self.suppress_tokens is not None:
-            self.suppress_tokens_penality[:, self.suppress_tokens] = float(-9999.0)
+            self.suppress_tokens_penality[:, self.suppress_tokens] = float(-128.0)
 
     def forward(self, *all_inputs):
-        history_len = all_inputs[self.num_layers_de_2]
-        input_ids = all_inputs[self.num_layers_de_2_plus_1]
-        ids_len = all_inputs[self.num_layers_de_2_plus_2]
+        input_ids = all_inputs[self.num_layers_head_de_2]
+        history_len = all_inputs[self.num_layers_head_de_2_plus_1]
+        ids_len = all_inputs[-2]
         kv_seq_len = history_len + ids_len
         hidden_states = self.decoder.embed_tokens(input_ids) + self.decoder.embed_positions.weight[:, history_len: kv_seq_len]
         attention_mask = (self.attention_mask[:, :ids_len, :kv_seq_len] * all_inputs[-1]).float()
+        count = 0
         for idx, decoder_layer in enumerate(self.decoder.layers):
+            idx *= self.num_head_de
             hidden_states_norm = decoder_layer.self_attn_layer_norm(hidden_states)
-            q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.q_proj.weight) + decoder_layer.self_attn.q_proj.bias
-            k = torch.matmul(hidden_states_norm, decoder_layer.self_attn.k_proj.weight).transpose(1, 2)
-            v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.v_proj.weight) + decoder_layer.self_attn.v_proj.bias
+            q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.q_proj.weight[0]) + decoder_layer.self_attn.q_proj.bias[0]
+            k = torch.matmul(hidden_states_norm, decoder_layer.self_attn.k_proj.weight[0]).transpose(1, 2)
+            v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.v_proj.weight[0]) + decoder_layer.self_attn.v_proj.bias[0]
             k = torch.cat((all_inputs[idx], k), dim=2)
-            v = torch.cat((all_inputs[idx + self.num_layers_de], v), dim=1)
-            self.save_de_keys[idx] = k
-            self.save_de_values[idx] = v
+            v = torch.cat((all_inputs[idx + self.num_layers_head_de], v), dim=1)
+            self.save_de_keys[count] = k
+            self.save_de_values[count] = v
             attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k) + attention_mask, dim=-1), v)
-            hidden_states_attn = torch.matmul(attn, decoder_layer.self_attn.out_proj.weight).sum(dim=0, keepdim=True) + decoder_layer.self_attn.out_proj.bias
-            hidden_states_attn += hidden_states
-            q = torch.matmul(decoder_layer.encoder_attn_layer_norm(hidden_states_attn), decoder_layer.encoder_attn.q_proj.weight) + decoder_layer.encoder_attn.q_proj.bias
-            attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, all_inputs[idx + self.num_layers_de_2_plus_3]), dim=-1), all_inputs[idx + self.num_layers_de_3_plus])
-            hidden_state_cross = torch.matmul(attn, decoder_layer.encoder_attn.out_proj.weight).sum(dim=0, keepdim=True) + decoder_layer.encoder_attn.out_proj.bias
-            hidden_state_cross += hidden_states_attn
+            hidden_states_attn = torch.matmul(attn, decoder_layer.self_attn.out_proj.weight[0])
+            count += 1
+            for i in range(1, self.num_head_de):
+                q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.q_proj.weight[i]) + decoder_layer.self_attn.q_proj.bias[i]
+                k = torch.matmul(hidden_states_norm, decoder_layer.self_attn.k_proj.weight[i]).transpose(1, 2)
+                v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.v_proj.weight[i]) + decoder_layer.self_attn.v_proj.bias[i]
+                k = torch.cat((all_inputs[idx + i], k), dim=2)
+                v = torch.cat((all_inputs[idx + i + self.num_layers_head_de], v), dim=1)
+                self.save_de_keys[count] = k
+                self.save_de_values[count] = v
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k) + attention_mask, dim=-1), v)
+                hidden_states_attn += torch.matmul(attn, decoder_layer.self_attn.out_proj.weight[i])
+                count += 1
+            hidden_states_attn = hidden_states_attn + decoder_layer.self_attn.out_proj.bias + hidden_states
+            hidden_states_attn_norm = decoder_layer.encoder_attn_layer_norm(hidden_states_attn)
+            q = torch.matmul(hidden_states_attn_norm, decoder_layer.encoder_attn.q_proj.weight[0]) + decoder_layer.encoder_attn.q_proj.bias[0]
+            attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, all_inputs[idx + self.num_layers_head_de_2_plus_2]), dim=-1), all_inputs[idx + self.num_layers_head_de_3_plus])
+            hidden_state_cross = torch.matmul(attn, decoder_layer.encoder_attn.out_proj.weight[0])
+            for i in range(1, self.num_head_de):
+                q = torch.matmul(hidden_states_attn_norm, decoder_layer.encoder_attn.q_proj.weight[i]) + decoder_layer.encoder_attn.q_proj.bias[i]
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, all_inputs[idx + i + self.num_layers_head_de_2_plus_2]), dim=-1), all_inputs[idx + i + self.num_layers_head_de_3_plus])
+                hidden_state_cross += torch.matmul(attn, decoder_layer.encoder_attn.out_proj.weight[i])
+            hidden_state_cross = hidden_state_cross + decoder_layer.encoder_attn.out_proj.bias + hidden_states_attn
             hidden_states = hidden_state_cross + decoder_layer.fc2(decoder_layer.activation_fn(decoder_layer.fc1(decoder_layer.final_layer_norm(hidden_state_cross))))
         hidden_states = self.decoder.layer_norm(hidden_states)
         lm_logits = self.whisper.proj_out(hidden_states[:, -1])
         if self.suppress_tokens is not None:
             lm_logits = lm_logits + self.suppress_tokens_penality
         max_logit_ids = torch.argmax(lm_logits, dim=-1, keepdim=True).int()
-        return *self.save_de_keys, *self.save_de_values, kv_seq_len, max_logit_ids
+        return *self.save_de_keys, *self.save_de_values, max_logit_ids, kv_seq_len
 
 
 print('\nExport start...\n')
@@ -306,19 +335,21 @@ with torch.inference_mode():
         model.model.decoder.layers._modules[i].encoder_attn.out_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.out_proj.bias.data.view(1, 1, -1).contiguous()
         
     custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
-    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
+    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE, NUM_HEAD_EN, NUM_HEAD_DE)
 
     output_names = []
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     dynamic_axes = {'audio': {2: 'audio_len'}}
     for i in range(NUM_LAYER_DE):
-        name = f'en_key_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {2: 'signal_len'}
+        for j in range(NUM_HEAD_EN):
+            name = f'en_key_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {2: 'signal_len'}
     for i in range(NUM_LAYER_DE):
-        name = f'en_value_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {1: 'signal_len'}
+        for j in range(NUM_HEAD_EN):
+            name = f'en_value_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {1: 'signal_len'}
       
     torch.onnx.export(
         whisper_encoder,
@@ -343,14 +374,14 @@ with torch.inference_mode():
         suppress_tokens = torch.tensor(generation_config.suppress_tokens, dtype=torch.int64)
     else:
         suppress_tokens = None
-    whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN, suppress_tokens, NUM_LAYER_DE)
+    whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN, suppress_tokens, NUM_LAYER_DE, NUM_HEAD_DE)
     input_ids = torch.tensor([[50258, get_language_id(TARGET_LANGUAGE), get_task_id(TASK, True)[0]]], dtype=torch.int32)
     ids_len = torch.tensor([input_ids.shape[-1]], dtype=torch.int64)
     history_len = torch.tensor([0], dtype=torch.int64)
-    save_encoder_key = torch.zeros((NUM_HEAD_EN, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float32)
-    save_encoder_value = torch.zeros((NUM_HEAD_EN, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float32)
-    past_key_de = torch.zeros((NUM_HEAD_DE, HEAD_DIM_DE, 0), dtype=torch.float32)
-    past_value_de = torch.zeros((NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float32)
+    save_encoder_key = torch.zeros((1, HEAD_DIM_EN, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float32)
+    save_encoder_value = torch.zeros((1, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_EN), dtype=torch.float32)
+    past_key_de = torch.zeros((1, HEAD_DIM_DE, 0), dtype=torch.float32)
+    past_value_de = torch.zeros((1, 0, HEAD_DIM_DE), dtype=torch.float32)
     attention_mask = torch.tensor([1], dtype=torch.int8)
 
     input_names = []
@@ -359,40 +390,44 @@ with torch.inference_mode():
     dynamic_axes = {'input_ids': {1: 'ids_len'}}
 
     for i in range(NUM_LAYER_DE):
-        name = f'in_de_key_{i}'
-        input_names.append(name)
-        all_inputs.append(past_key_de)
-        dynamic_axes[name] = {2: 'history_len'}
-        name = f'out_de_key_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {2: 'history_len_plus_ids_len'}
+        for j in range(NUM_HEAD_DE):
+            name = f'in_de_key_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(past_key_de)
+            dynamic_axes[name] = {2: 'history_len'}
+            name = f'out_de_key_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {2: 'history_len_plus_ids_len'}
     for i in range(NUM_LAYER_DE):
-        name = f'in_de_value_{i}'
-        input_names.append(name)
-        all_inputs.append(past_value_de)
-        dynamic_axes[name] = {1: 'history_len'}
-        name = f'out_de_value_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {1: 'history_len_plus_ids_len'}
+        for j in range(NUM_HEAD_DE):
+            name = f'in_de_value_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(past_value_de)
+            dynamic_axes[name] = {1: 'history_len'}
+            name = f'out_de_value_layer_{i}_head_{j}'
+            output_names.append(name)
+            dynamic_axes[name] = {1: 'history_len_plus_ids_len'}
 
-    input_names.append('history_len')
-    all_inputs.append(history_len)
     input_names.append('input_ids')
     all_inputs.append(input_ids)
+    input_names.append('history_len')
+    all_inputs.append(history_len)
+
+    for i in range(NUM_LAYER_DE):
+        for j in range(NUM_HEAD_EN):
+            name = f'en_key_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(save_encoder_key)
+            dynamic_axes[name] = {2: 'signal_len'}
+    for i in range(NUM_LAYER_DE):
+        for j in range(NUM_HEAD_EN):
+            name = f'en_value_layer_{i}_head_{j}'
+            input_names.append(name)
+            all_inputs.append(save_encoder_value)
+            dynamic_axes[name] = {1: 'signal_len'}
+
     input_names.append('ids_len')
     all_inputs.append(ids_len)
-
-    for i in range(NUM_LAYER_DE):
-        name = f'en_key_{i}'
-        input_names.append(name)
-        all_inputs.append(save_encoder_key)
-        dynamic_axes[name] = {2: 'signal_len'}
-    for i in range(NUM_LAYER_DE):
-        name = f'en_value_{i}'
-        input_names.append(name)
-        all_inputs.append(save_encoder_value)
-        dynamic_axes[name] = {1: 'signal_len'}
-
     all_inputs.append(attention_mask)
     input_names.append('attention_mask')
     output_names.append('kv_seq_len')
@@ -457,20 +492,16 @@ for i in range(len(out_name_A)):
 ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=['CPUExecutionProvider'])
 in_name_B = ort_session_B.get_inputs()
 out_name_B = ort_session_B.get_outputs()
-input_names_B = []
-output_names_B = []
-amount_of_outputs = len(out_name_B)
-for i in range(len(in_name_B)):
-    input_names_B.append(in_name_B[i].name)
-for i in range(amount_of_outputs):
-    output_names_B.append(out_name_B[i].name)
+amount_of_outputs_B = len(out_name_B)
+in_name_B = [in_name_B[i].name for i in range(len(in_name_B))]
+out_name_B = [out_name_B[i].name for i in range(amount_of_outputs_B)]
 
-generate_limit = MAX_SEQ_LEN - 5  # 5 = length of inital input_ids
-num_layers = (amount_of_outputs - 2) // 2
-num_layers_2 = num_layers + num_layers
-num_layers_4 = num_layers_2 + num_layers_2
-num_layers_2_plus_1 = num_layers_2 + 1
-num_layers_2_plus_2 = num_layers_2 + 2
+generate_limit = MAX_SEQ_LEN - 5  # 5 = length of initial input_ids
+num_layers = (amount_of_outputs_B - 2) // 2
+num_keys_values = num_layers + num_layers
+num_keys_values_plus_1 = num_keys_values + 1
+num_keys_values_plus_2 = num_keys_values + 2
+num_keys_values_plus_3 = num_keys_values + 3
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 
 # Load the input audio
@@ -511,45 +542,48 @@ for language_idx, test in enumerate(test_audio):
     slice_end = INPUT_AUDIO_LENGTH
     input_ids = np.array([[50258, get_language_id(language), get_task_id(TASK, is_v3)[0]]], dtype=np.int32)
     ids_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([input_ids.shape[-1]], dtype=np.int64), 'cpu', 0)
+    ids_len_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), 'cpu', 0)
     input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, 'cpu', 0)
     history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), 'cpu', 0)
-    attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
-    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=np.float32), 'cpu', 0)
-    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=np.float32), 'cpu', 0)
-    layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 3
+    attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
+    attention_mask_0 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), 'cpu', 0)
+    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_B._outputs_meta[0].shape[1], 0), dtype=np.float32), 'cpu', 0)
+    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, 0, ort_session_B._outputs_meta[num_layers].shape[2]), dtype=np.float32), 'cpu', 0)
+    layer_indices = np.arange(num_keys_values_plus_2, num_keys_values_plus_2 + num_keys_values, dtype=np.int32)
     input_feed_B = {
-        in_name_B[-1].name: attention_mask,
-        in_name_B[num_layers_2].name: history_len,
-        in_name_B[num_layers_2_plus_1].name: input_ids,
-        in_name_B[num_layers_2_plus_2].name: ids_len
+        in_name_B[num_keys_values]: input_ids,
+        in_name_B[num_keys_values_plus_1]: history_len,
+        in_name_B[-2]: ids_len,
+        in_name_B[-1]: attention_mask_1,
     }
     for i in range(num_layers):
-        input_feed_B[in_name_B[i].name] = past_keys_B
-    for i in range(num_layers, num_layers_2):
-        input_feed_B[in_name_B[i].name] = past_values_B
+        input_feed_B[in_name_B[i]] = past_keys_B
+    for i in range(num_layers, num_keys_values):
+        input_feed_B[in_name_B[i]] = past_values_B
+
     num_decode = 0
     save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
         all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start:slice_end], 'cpu', 0)})
-        for i in range(num_layers_2):
-            input_feed_B[in_name_B[layer_indices[i]].name] = all_outputs_A[i]
+        for i in range(num_keys_values):
+            input_feed_B[in_name_B[layer_indices[i]]] = all_outputs_A[i]
         while num_decode < generate_limit:
-            all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
-            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])[0][0]
-            num_decode += 1
+            all_outputs_B = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)
+            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-2])[0, 0]
             if max_logit_ids in STOP_TOKEN:
                 break
-            for i in range(amount_of_outputs):
-                input_feed_B[in_name_B[i].name] = all_outputs_B[i]
+            for i in range(amount_of_outputs_B):
+                input_feed_B[in_name_B[i]] = all_outputs_B[i]
             if num_decode < 2:
-                input_feed_B[in_name_B[-1].name] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), 'cpu', 0)
-                input_feed_B[in_name_B[num_layers_2_plus_2].name] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), 'cpu', 0)
+                input_feed_B[in_name_B[-1]] = attention_mask_0
+                input_feed_B[in_name_B[-2]] = ids_len_1
             save_token.append(max_logit_ids)
+            num_decode += 1
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
-    save_token_array = remove_repeated_parts(save_token, 3)  # To handle "over-talking".
+    save_token_array = remove_repeated_parts(save_token, 3, num_decode)  # To handle "over-talking".
     text, _ = tokenizer._decode_asr(
         [{
             "tokens": save_token_array
@@ -558,5 +592,5 @@ for language_idx, test in enumerate(test_audio):
         return_language=None,
         time_precision=0
     )
-    print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
+    print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {(num_decode + 1) / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
