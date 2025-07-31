@@ -275,26 +275,24 @@ class WHISPER_ENCODER(torch.nn.Module):
         hidden_states = hidden_states + self.encoder.embed_positions.weight[:hidden_states.shape[1]].float()
         for encoder_layer in self.encoder.layers:
             hidden_states_norm = encoder_layer.self_attn_layer_norm(hidden_states)
-            hidden_states_norm_T = hidden_states_norm.transpose(1, 2)
             q = torch.matmul(hidden_states_norm, encoder_layer.self_attn.q_proj.weight[0]) + encoder_layer.self_attn.q_proj.bias[0]
-            k = torch.matmul(encoder_layer.self_attn.k_proj.weight[0], hidden_states_norm_T)
+            k = torch.matmul(hidden_states_norm, encoder_layer.self_attn.k_proj.weight[0]).transpose(1, 2)
             v = torch.matmul(hidden_states_norm, encoder_layer.self_attn.v_proj.weight[0]) + encoder_layer.self_attn.v_proj.bias[0]
             attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k), dim=-1), v)
             hidden_states_attn = torch.matmul(attn, encoder_layer.self_attn.out_proj.weight[0])
             for i in range(1, self.num_head_en):
                 q = torch.matmul(hidden_states_norm, encoder_layer.self_attn.q_proj.weight[i]) + encoder_layer.self_attn.q_proj.bias[i]
-                k = torch.matmul(encoder_layer.self_attn.k_proj.weight[i], hidden_states_norm_T)
+                k = torch.matmul(hidden_states_norm, encoder_layer.self_attn.k_proj.weight[i]).transpose(1, 2)
                 v = torch.matmul(hidden_states_norm, encoder_layer.self_attn.v_proj.weight[i]) + encoder_layer.self_attn.v_proj.bias[i]
                 attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k), dim=-1), v)
                 hidden_states_attn += torch.matmul(attn, encoder_layer.self_attn.out_proj.weight[i])
             hidden_states_attn = hidden_states_attn + encoder_layer.self_attn.out_proj.bias + hidden_states
             hidden_states = hidden_states_attn + encoder_layer.fc2(encoder_layer.activation_fn(encoder_layer.fc1(encoder_layer.final_layer_norm(hidden_states_attn))))
         hidden_states = self.encoder.layer_norm(hidden_states)
-        hidden_states_T = hidden_states.transpose(1, 2)
         count = 0
         for decoder_layer in self.decoder.layers:
             for i in range(self.num_head_de):
-                self.save_encoder_key[count] = torch.matmul(decoder_layer.encoder_attn.k_proj.weight[i], hidden_states_T)
+                self.save_encoder_key[count] = torch.matmul(hidden_states, decoder_layer.encoder_attn.k_proj.weight[i]).transpose(1, 2)
                 self.save_encoder_value[count] = torch.matmul(hidden_states, decoder_layer.encoder_attn.v_proj.weight[i]) + decoder_layer.encoder_attn.v_proj.bias[i]
                 count += 1
         return *self.save_encoder_key, *self.save_encoder_value
@@ -313,10 +311,10 @@ class WHISPER_DECODER(torch.nn.Module):
         self.num_layers_head_de_3_plus = self.num_layers_head_de_2_plus_2 + self.num_layers_head_de
         self.save_de_keys = [None] * self.num_layers_head_de
         self.save_de_values = [None] * self.num_layers_head_de
+        self.num_head_de = num_head_de
         self.attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
         self.suppress_tokens_penality = torch.ones((1, self.whisper.proj_out.out_features), dtype=torch.float32)
         self.decoder.embed_positions.weight.data = self.decoder.embed_positions.weight.data.unsqueeze(0)
-        self.num_head_de = num_head_de
         if self.suppress_tokens is not None:
             self.suppress_tokens_penality[:, self.suppress_tokens] = float(-128.0)
 
@@ -331,9 +329,8 @@ class WHISPER_DECODER(torch.nn.Module):
         for idx, decoder_layer in enumerate(self.decoder.layers):
             idx *= self.num_head_de
             hidden_states_norm = decoder_layer.self_attn_layer_norm(hidden_states)
-            hidden_states_norm_T = hidden_states_norm.transpose(1, 2)
             q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.q_proj.weight[0]) + decoder_layer.self_attn.q_proj.bias[0]
-            k = torch.matmul(decoder_layer.self_attn.k_proj.weight[0], hidden_states_norm_T)
+            k = torch.matmul(hidden_states_norm, decoder_layer.self_attn.k_proj.weight[0]).transpose(1, 2)
             v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.v_proj.weight[0]) + decoder_layer.self_attn.v_proj.bias[0]
             k = torch.cat((all_inputs[idx], k), dim=2)
             v = torch.cat((all_inputs[idx + self.num_layers_head_de], v), dim=1)
@@ -344,7 +341,7 @@ class WHISPER_DECODER(torch.nn.Module):
             count += 1
             for i in range(1, self.num_head_de):
                 q = torch.matmul(hidden_states_norm, decoder_layer.self_attn.q_proj.weight[i]) + decoder_layer.self_attn.q_proj.bias[i]
-                k = torch.matmul(decoder_layer.self_attn.k_proj.weight[i], hidden_states_norm_T)
+                k = torch.matmul(hidden_states_norm, decoder_layer.self_attn.k_proj.weight[i]).transpose(1, 2)
                 v = torch.matmul(hidden_states_norm, decoder_layer.self_attn.v_proj.weight[i]) + decoder_layer.self_attn.v_proj.bias[i]
                 k = torch.cat((all_inputs[idx + i], k), dim=2)
                 v = torch.cat((all_inputs[idx + i + self.num_layers_head_de], v), dim=1)
@@ -397,7 +394,7 @@ with torch.inference_mode():
 
         model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
-        model.model.encoder.layers._modules[i].self_attn.k_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.k_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).contiguous()
+        model.model.encoder.layers._modules[i].self_attn.k_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.k_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.encoder.layers._modules[i].self_attn.v_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.v_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.encoder.layers._modules[i].self_attn.v_proj.bias.data = model.model.encoder.layers._modules[i].self_attn.v_proj.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
         model.model.encoder.layers._modules[i].self_attn.out_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.out_proj.weight.data.view(HIDDEN_SIZE, NUM_HEAD_EN, HEAD_DIM_EN).permute(1, 2, 0).contiguous()
@@ -411,7 +408,7 @@ with torch.inference_mode():
 
         model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
-        model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).contiguous()
+        model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.decoder.layers._modules[i].self_attn.v_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.v_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.decoder.layers._modules[i].self_attn.v_proj.bias.data = model.model.decoder.layers._modules[i].self_attn.v_proj.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
         model.model.decoder.layers._modules[i].self_attn.out_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.out_proj.weight.data.view(HIDDEN_SIZE, NUM_HEAD_DE, HEAD_DIM_DE).permute(1, 2, 0).contiguous()
@@ -425,7 +422,7 @@ with torch.inference_mode():
         
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
-        model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).contiguous()
+        model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.decoder.layers._modules[i].encoder_attn.v_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.v_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.decoder.layers._modules[i].encoder_attn.v_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.v_proj.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
         model.model.decoder.layers._modules[i].encoder_attn.out_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.out_proj.weight.data.view(HIDDEN_SIZE, NUM_HEAD_EN, HEAD_DIM_DE).permute(1, 2, 0).contiguous()
@@ -763,7 +760,7 @@ amount_of_outputs_B = len(out_name_B)
 in_name_B = [in_name_B[i].name for i in range(len(in_name_B))]
 out_name_B = [out_name_B[i].name for i in range(amount_of_outputs_B)]
 
-generate_limit = MAX_SEQ_LEN - 5  # 5 = length of inital input_ids
+generate_limit = MAX_SEQ_LEN - 5  # 5 = length of initial input_ids
 num_layers = (amount_of_outputs_B - 2) // 2
 num_keys_values = num_layers + num_layers
 num_keys_values_plus_1 = num_keys_values + 1
