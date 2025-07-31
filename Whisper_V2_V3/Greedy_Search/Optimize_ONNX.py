@@ -16,17 +16,20 @@ from transformers import AutoModelForCausalLM
 # Path Setting
 original_folder_path = r"/home/DakeQQ/Downloads/Whisper_ONNX"                    # The original folder.
 quanted_folder_path = r"/home/DakeQQ/Downloads/Whisper_Optimized"                # The optimized folder.
-model_path = os.path.join(original_folder_path, "Whisper_Encoder.onnx")          # The original fp32 model path.
-quanted_model_path = os.path.join(quanted_folder_path, "Whisper_Encoder.onnx")   # The optimized model stored path.
-# model_path = os.path.join(original_folder_path, "Whisper_Decoder.onnx")          # The original fp32 model path.
-# quanted_model_path = os.path.join(quanted_folder_path, "Whisper_Decoder.onnx")   # The optimized model stored path.
-download_path = r'/home/DakeQQ/Downloads/whisper-large-v3'                       # Set the folder path where the LLM whole project downloaded, otherwise set "NONE".
+download_path = r'/home/DakeQQ/Downloads/whisper-large-v3-turbo'                 # Set the folder path where the LLM whole project downloaded, otherwise set "NONE".
+
+# model_path = os.path.join(original_folder_path, "Whisper_Encoder.onnx")          # The original fp32 model path.
+# quanted_model_path = os.path.join(quanted_folder_path, "Whisper_Encoder.onnx")   # The optimized model stored path.
+model_path = os.path.join(original_folder_path, "Whisper_Decoder.onnx")          # The original fp32 model path.
+quanted_model_path = os.path.join(quanted_folder_path, "Whisper_Decoder.onnx")   # The optimized model stored path.
+
 quant_int8 = True                                                                # Quant the model to int8 format.
 quant_float16 = False                                                            # Quant the model to float16 format.
 use_gpu = False                                                                  # If true, the transformers.optimizer will remain the FP16 processes.
 provider = 'CPUExecutionProvider'                                                # ['CPUExecutionProvider', 'CUDAExecutionProvider']
 use_low_memory_mode_in_Android = False                                           # # If True, save the model into 2 parts.
 upgrade_opset = 17                                                               # Optional process. Set 0 for close.
+target_platform = "arm"                                                          # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
 
 
 # Start Quantize
@@ -34,7 +37,7 @@ if quant_int8:
     quantize_dynamic(
         model_input=quant_utils.load_model_with_shape_infer(Path(model_path)),
         model_output=quanted_model_path,
-        per_channel=False,                                       # True for model accuracy but cost a lot of time during quanting process.
+        per_channel=True,                                        # True for model accuracy but cost a lot of time during quanting process.
         reduce_range=False,                                      # True for some x86_64 platform.
         weight_type=QuantType.QUInt8,                            # It is recommended using uint8 + Symmetric False
         extra_options={'ActivationSymmetric': False,             # True for inference speed. False may keep more accuracy.
@@ -68,7 +71,7 @@ else:
         verbose=False
     )
 
-if download_path == "NONE":
+if download_path.lower() == "none" or download_path is None:
     num_heads = 0    # default
     hidden_size = 0  # default
 else:
@@ -143,13 +146,12 @@ for file_path in files_to_delete:
         os.remove(file_path)
     except Exception as e:
         print(f"Error deleting {file_path}: {e}")
-        
-if not use_low_memory_mode_in_Android:
+
+if not use_low_memory_mode_in_Android and not quant_float16:
     # Convert the simplified model to ORT format.
     if provider == 'CPUExecutionProvider':
         optimization_style = "Fixed"
     else:
         optimization_style = "Runtime"      # ['Runtime', 'Fixed']; Runtime for XNNPACK/NNAPI/QNN/CoreML..., Fixed for CPU provider
-    target_platform = "arm"                 # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
     # Call subprocess may get permission failed on Windows system.
     subprocess.run([f'python -m onnxruntime.tools.convert_onnx_models_to_ort --output_dir {quanted_folder_path} --optimization_style {optimization_style} --target_platform {target_platform} --enable_type_reduction {quanted_folder_path}'], shell=True)
