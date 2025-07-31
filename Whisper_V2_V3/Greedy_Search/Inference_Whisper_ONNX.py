@@ -5,9 +5,9 @@ from pydub import AudioSegment
 from transformers import AutoTokenizer
 
 
-download_path = "/home/DakeQQ/Downloads/whisper-large-v3-turbo"                                   # The whisper model download path.
-onnx_model_A = "/home/DakeQQ/Downloads/Whisper_Optimized/Whisper_Encoder.onnx"                    # The exported onnx model path.
-onnx_model_B = "/home/DakeQQ/Downloads/Whisper_Optimized/Whisper_Decoder.onnx"                    # The exported onnx model path.
+tokenizer_path = "/home/DakeQQ/Downloads/whisper-large-v3-turbo"                                      # The whisper model tokenizer folder path.
+onnx_model_A = "/home/DakeQQ/Downloads/Whisper_Optimized/Whisper_Encoder.onnx"                        # The exported onnx model path.
+onnx_model_B = "/home/DakeQQ/Downloads/Whisper_Optimized/Whisper_Decoder.onnx"                        # The exported onnx model path.
 test_audio = ["../example/zh.mp3", "../example/en.mp3", "../example/ja.mp3", "../example/ko.mp3"]     # The test audio list.
 
 
@@ -21,6 +21,7 @@ SLIDING_WINDOW = 0                      # Set the sliding window step for test a
 MAX_SEQ_LEN = 80                        # It should keep the same with exported model.
 SAMPLE_RATE = 16000                     # The model parameter, do not edit the value.
 STOP_TOKEN = [50257]                    # 50257 is the end token for common Whisper series model.
+
 
 if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
     provider_options = [
@@ -73,8 +74,8 @@ else:
     provider_options = None
 
 
-download_path_lower = download_path.lower()
-if ("v3" in download_path_lower) or ("crisperwhisper" in download_path_lower) or ("anime" in download_path_lower):
+tokenizer_path_lower = tokenizer_path.lower()
+if ("v3" in tokenizer_path_lower) or ("crisperwhisper" in tokenizer_path_lower) or ("anime" in tokenizer_path_lower) or ("belle" in tokenizer_path_lower) or ("turbo" in tokenizer_path_lower) or ("distil" in tokenizer_path_lower):
     is_v3 = True
 else:
     is_v3 = False
@@ -167,8 +168,7 @@ def get_task_id(task_input, use_v3):
         return task_map[task_input], 50362, 50363
 
 
-def remove_repeated_parts(ids, repeat_words_threshold):
-    ids_len = len(ids)
+def remove_repeated_parts(ids, repeat_words_threshold, ids_len):
     if ids_len <= repeat_words_threshold:
         return np.array([ids], dtype=np.int32)
     side_L = repeat_words_threshold // 2
@@ -225,22 +225,17 @@ else:
 
 in_name_B = ort_session_B.get_inputs()
 out_name_B = ort_session_B.get_outputs()
-input_names_B = []
-output_names_B = []
-amount_of_outputs = len(out_name_B)
-for i in range(len(in_name_B)):
-    input_names_B.append(in_name_B[i].name)
-for i in range(amount_of_outputs):
-    output_names_B.append(out_name_B[i].name)
+amount_of_outputs_B = len(out_name_B)
+in_name_B = [in_name_B[i].name for i in range(len(in_name_B))]
+out_name_B = [out_name_B[i].name for i in range(amount_of_outputs_B)]
 
-generate_limit = MAX_SEQ_LEN - 5  # 5 = length of inital input_ids
-num_layers = (amount_of_outputs - 2) // 2
-num_layers_2 = num_layers + num_layers
-num_layers_4 = num_layers_2 + num_layers_2
-num_layers_2_plus_1 = num_layers_2 + 1
-num_layers_2_plus_2 = num_layers_2 + 2
-
-tokenizer = AutoTokenizer.from_pretrained(download_path)
+generate_limit = MAX_SEQ_LEN - 5  # 5 = length of initial input_ids
+num_layers = (amount_of_outputs_B - 2) // 2
+num_keys_values = num_layers + num_layers
+num_keys_values_plus_1 = num_keys_values + 1
+num_keys_values_plus_2 = num_keys_values + 2
+num_keys_values_plus_3 = num_keys_values + 3
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
 # Load the input audio
 for language_idx, test in enumerate(test_audio):
@@ -280,46 +275,49 @@ for language_idx, test in enumerate(test_audio):
     slice_end = INPUT_AUDIO_LENGTH
     input_ids = np.array([[50258, get_language_id(language), get_task_id(TASK, is_v3)[0]]], dtype=np.int32)
     ids_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([input_ids.shape[-1]], dtype=np.int64), device_type, DEVICE_ID)
+    ids_len_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), device_type, DEVICE_ID)
     input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(input_ids, device_type, DEVICE_ID)
     history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), device_type, DEVICE_ID)
-    attention_mask = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
-    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=model_dtype), device_type, DEVICE_ID)
-    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=model_dtype), device_type, DEVICE_ID)
+    attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
+    attention_mask_0 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
+    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_B._inputs_meta[0].shape[1], 0), dtype=model_dtype), device_type, DEVICE_ID)
+    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=model_dtype), device_type, DEVICE_ID)
 
-    layer_indices = np.arange(num_layers_2, num_layers_4, dtype=np.int32) + 3
+    layer_indices = np.arange(num_keys_values_plus_2, num_keys_values_plus_2 + num_keys_values, dtype=np.int32)
     input_feed_B = {
-        input_names_B[-1]: attention_mask,
-        input_names_B[num_layers_2]: history_len,
-        input_names_B[num_layers_2_plus_1]: input_ids,
-        input_names_B[num_layers_2_plus_2]: ids_len
+        in_name_B[num_keys_values]: input_ids,
+        in_name_B[num_keys_values_plus_1]: history_len,
+        in_name_B[-2]: ids_len,
+        in_name_B[-1]: attention_mask_1,
     }
     for i in range(num_layers):
-        input_feed_B[input_names_B[i]] = past_keys_B
-    for i in range(num_layers, num_layers_2):
-        input_feed_B[input_names_B[i]] = past_values_B
+        input_feed_B[in_name_B[i]] = past_keys_B
+    for i in range(num_layers, num_keys_values):
+        input_feed_B[in_name_B[i]] = past_values_B
+
     num_decode = 0
     save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
         all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], device_type, DEVICE_ID)})
-        for i in range(num_layers_2):
-            input_feed_B[input_names_B[layer_indices[i]]] = all_outputs_A[i]
+        for i in range(num_keys_values):
+            input_feed_B[in_name_B[layer_indices[i]]] = all_outputs_A[i]
         while num_decode < generate_limit:
-            all_outputs_B = ort_session_B.run_with_ort_values(output_names_B, input_feed_B)
-            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-1])[0][0]
-            num_decode += 1
+            all_outputs_B = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)
+            max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-2])[0, 0]
             if max_logit_ids in STOP_TOKEN:
                 break
-            for i in range(amount_of_outputs):
-                input_feed_B[input_names_B[i]] = all_outputs_B[i]
+            for i in range(amount_of_outputs_B):
+                input_feed_B[in_name_B[i]] = all_outputs_B[i]
             if num_decode < 2:
-                input_feed_B[input_names_B[-1]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
-                input_feed_B[input_names_B[num_layers_2_plus_2]] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), device_type, DEVICE_ID)
+                input_feed_B[in_name_B[-1]] = attention_mask_0
+                input_feed_B[in_name_B[-2]] = ids_len_1
             save_token.append(max_logit_ids)
+            num_decode += 1
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
-    save_token_array = remove_repeated_parts(save_token, 3)  # To handle "over-talking".
+    save_token_array = remove_repeated_parts(save_token, 3, num_decode)  # To handle "over-talking".
     text, _ = tokenizer._decode_asr(
         [{
             "tokens": save_token_array
@@ -328,5 +326,5 @@ for language_idx, test in enumerate(test_audio):
         return_language=None,
         time_precision=0
     )
-    print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
+    print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {(num_decode + 1) / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
