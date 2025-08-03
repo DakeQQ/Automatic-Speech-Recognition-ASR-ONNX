@@ -935,9 +935,9 @@ for language_idx, test in enumerate(test_audio):
         num_decode -= 1
     if USE_BEAM_SEARCH:
         save_id_beam = onnxruntime.OrtValue.numpy(all_outputs_E[num_keys_values_plus_1])[0]
-        for i in range(num_decode, -1, -1):
-            if save_id_beam[i] not in STOP_TOKEN:
-                save_id_beam = save_id_beam[:i + 1]
+        for i in range(num_decode):
+            if save_id_beam[i] in STOP_TOKEN:
+                save_id_beam = save_id_beam[:i]
                 break
         save_token_array = remove_repeated_parts(save_id_beam, 3, save_id_beam.shape[-1])       # To handle "over-talking".
     else:
