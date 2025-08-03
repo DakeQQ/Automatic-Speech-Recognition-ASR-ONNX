@@ -465,8 +465,8 @@ if device_type != 'dml':
     init_past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((init_BATCH, ort_session_B._outputs_meta[0].shape[1], ort_session_B._outputs_meta[0].shape[2], 0), dtype=np.float32), device_type, DEVICE_ID)
     init_past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((init_BATCH, ort_session_B._outputs_meta[num_layers].shape[1], 0, ort_session_B._outputs_meta[num_layers].shape[3]), dtype=np.float32), device_type, DEVICE_ID)
 else:
-    init_past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((init_BATCH, ort_session_B._outputs_meta[0].shape[1], ort_session_B._outputs_meta[0].shape[2], 0), dtype=np.float32), device_type, DEVICE_ID)
-    init_past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((init_BATCH, ort_session_B._outputs_meta[num_layers].shape[1], 0, ort_session_B._outputs_meta[num_layers].shape[3]), dtype=np.float32), device_type, DEVICE_ID)
+    init_past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((init_BATCH, ort_session_B._outputs_meta[0].shape[1], ort_session_B._outputs_meta[0].shape[2], 0), dtype=np.float32), 'cpu', 0)
+    init_past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((init_BATCH, ort_session_B._outputs_meta[num_layers].shape[1], 0, ort_session_B._outputs_meta[num_layers].shape[3]), dtype=np.float32), 'cpu', 0)
 layer_indices = np.arange(num_keys_values_plus_2, num_keys_values_plus_2 + num_keys_values, dtype=np.int32)
 
 # Load the input audio
