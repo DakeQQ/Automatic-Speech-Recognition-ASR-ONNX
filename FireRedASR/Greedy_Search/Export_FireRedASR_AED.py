@@ -118,8 +118,8 @@ class FIRE_RED_DECODER(torch.nn.Module):
             hidden_state_cross = torch.matmul(attn, decoder_layer.cross_attn.fc.weight).sum(dim=0, keepdim=True) + decoder_layer.cross_attn.fc.bias
             hidden_state_cross += hidden_state_attn
             hidden_state = hidden_state_cross + decoder_layer.mlp(decoder_layer.mlp_norm(hidden_state_cross))
-        hidden_state = self.model.decoder.layer_norm_out(hidden_state)
-        logits = self.model.decoder.tgt_word_prj(hidden_state[:, -1])
+        hidden_state = self.model.decoder.layer_norm_out(hidden_state[:, -1])
+        logits = self.model.decoder.tgt_word_prj(hidden_state)
         max_logit_idx = torch.argmax(logits, dim=-1, keepdim=True).int()
         return *self.save_de_keys, *self.save_de_values, max_logit_idx, kv_seq_len
 
