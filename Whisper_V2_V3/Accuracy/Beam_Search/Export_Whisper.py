@@ -971,13 +971,11 @@ for language_idx, test in enumerate(test_audio):
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
-    if num_decode == generate_limit:
-        num_decode -= 1
     if USE_BEAM_SEARCH:
         save_id_beam = onnxruntime.OrtValue.numpy(all_outputs_E[num_keys_values_plus_1])[0]
-        for i in range(num_decode):
-            if save_id_beam[i] in STOP_TOKEN:
-                save_id_beam = save_id_beam[:i]
+        for i, idx in enumerate(save_id_beam):
+            if idx in STOP_TOKEN:
+                save_token_array = save_id_beam[:i]
                 break
         save_token_array = remove_repeated_parts(save_id_beam, 3, save_id_beam.shape[-1])       # To handle "over-talking".
     else:
