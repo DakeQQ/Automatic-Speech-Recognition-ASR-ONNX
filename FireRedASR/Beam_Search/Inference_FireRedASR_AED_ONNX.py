@@ -352,9 +352,9 @@ for language_idx, test in enumerate(test_audio):
         num_decode -= 1
     if USE_BEAM_SEARCH:
         save_id_beam = onnxruntime.OrtValue.numpy(all_outputs_E[num_keys_values_plus_1])[0]
-        for i in range(num_decode, -1, -1):
-            if save_id_beam[i] not in STOP_TOKEN:
-                save_token_array = save_id_beam[:i + 1]
+        for i in range(num_decode):
+            if save_id_beam[i] in STOP_TOKEN:
+                save_token_array = save_id_beam[:i]
                 break
     else:
         save_token_array = save_id_greedy[:num_decode]
