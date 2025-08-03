@@ -262,17 +262,22 @@ class Tokenizer:
     def __init__(self, filename):
         self.str_to_idx = {}
         self.idx_to_str = {}
+        self.num_vocab = 0
         with open(filename, 'r', encoding='utf-8') as file:
             for idx, line in enumerate(file):
                 token = line.rstrip('\n')
                 self.str_to_idx[token] = idx
                 self.idx_to_str[idx] = token
+        self.num_vocab = len(self.idx_to_str)
 
     def encode(self, token):
         return self.str_to_idx.get(token)
 
     def decode(self, idx):
         return self.idx_to_str.get(idx)
+
+    def num_vocab(self):
+        return self.num_vocab
         
 
 def rel_shift(x, x_len, zero_pad, n_head):
@@ -925,11 +930,11 @@ num_keys_values = num_layers + num_layers
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
 num_keys_values_plus_3 = num_keys_values + 3
-vocab_size = 40002
 topK = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([TOP_K], dtype=np.int64), 'cpu', 0)
 beam_size = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([BEAM_SIZE], dtype=np.int64), 'cpu', 0)
 penality_value = onnxruntime.OrtValue.ortvalue_from_numpy(np.array(REPEAT_PENALITY, dtype=np.float32), 'cpu', 0)
 tokenizer = Tokenizer(save_vocab)
+vocab_size = tokenizer.num_vocab
 
 # Pre-process inputs
 if USE_BEAM_SEARCH and (TOP_K < BEAM_SIZE):
