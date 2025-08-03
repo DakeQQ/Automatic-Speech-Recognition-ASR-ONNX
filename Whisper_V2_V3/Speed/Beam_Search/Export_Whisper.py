@@ -332,8 +332,8 @@ class WHISPER_DECODER(torch.nn.Module):
             hidden_state_cross = torch.matmul(attn, decoder_layer.encoder_attn.out_proj.weight).sum(dim=1, keepdim=True) + decoder_layer.encoder_attn.out_proj.bias
             hidden_state_cross +=  hidden_states_attn
             hidden_states = hidden_state_cross + decoder_layer.fc2(decoder_layer.activation_fn(decoder_layer.fc1(decoder_layer.final_layer_norm(hidden_state_cross))))
-        hidden_states = self.decoder.layer_norm(hidden_states.squeeze(1))
-        logits = self.whisper.proj_out(hidden_states[:, -1])
+        hidden_states = self.decoder.layer_norm(hidden_states.squeeze(1)[:, -1])
+        logits = self.whisper.proj_out(hidden_states)
         if self.suppress_tokens is not None:
             logits = logits + self.suppress_tokens_penality
         return *self.save_de_keys, *self.save_de_values, logits, kv_seq_len
