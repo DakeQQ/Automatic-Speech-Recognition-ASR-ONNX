@@ -465,7 +465,6 @@ num_layers = (amount_of_outputs_B - 2) // 2
 num_keys_values = num_layers + num_layers
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
-num_keys_values_plus_3 = num_keys_values + 3
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 
 # Load the input audio
