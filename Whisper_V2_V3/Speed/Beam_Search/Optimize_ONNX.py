@@ -15,8 +15,8 @@ from transformers import AutoModelForCausalLM
 
 # Path Setting
 download_path = r'/home/DakeQQ/Downloads/whisper-large-v3-turbo'                        # Set the folder path where the whole project downloaded, otherwise set "NONE".
-original_folder_path = r"/DakeQQ/iamj/Downloads/Whisper_ONNX"                           # The original folder.
-quanted_folder_path = r"/DakeQQ/iamj/Downloads/Whisper_Optimized"                       # The optimized folder.
+original_folder_path = r"/home/DakeQQ/Downloads/Whisper_ONNX"                           # The original folder.
+quanted_folder_path = r"/home/DakeQQ/Downloads/Whisper_Optimized"                       # The optimized folder.
 
 model_path = os.path.join(original_folder_path, "Whisper_Encoder.onnx")               # The original fp32 model path.
 quanted_model_path = os.path.join(quanted_folder_path, "Whisper_Encoder.onnx")        # The optimized model stored path.
