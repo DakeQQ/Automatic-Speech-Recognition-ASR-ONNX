@@ -932,8 +932,6 @@ for language_idx, test in enumerate(test_audio):
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
-    if num_decode == generate_limit:
-        num_decode -= 1
     if USE_BEAM_SEARCH:
         save_id_beam = onnxruntime.OrtValue.numpy(all_outputs_E[num_keys_values_plus_1])[0]
         for i, idx in enumerate(save_id_beam):
