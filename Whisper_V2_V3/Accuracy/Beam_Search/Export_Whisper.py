@@ -709,6 +709,8 @@ with torch.inference_mode():
     del reset_penality
     del second_beam_search
     del batch_indices
+    del past_key_de
+    del past_value_de
     del past_keys_greedy
     del past_values_greedy
     del logits
