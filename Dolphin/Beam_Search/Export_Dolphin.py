@@ -869,6 +869,8 @@ with torch.inference_mode():
     del second_beam_search
     del argmax
     del batch_indices
+    del past_key_de
+    del past_value_de
     del past_keys_greedy
     del past_values_greedy
     del logits
