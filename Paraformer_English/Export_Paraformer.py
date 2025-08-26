@@ -61,6 +61,7 @@ class PARAFORMER(torch.nn.Module):
     def __init__(self, paraformer, stft_model, nfft_stft, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size):
         super(PARAFORMER, self).__init__()
         self.encoder = paraformer.encoder
+        self.decoder = paraformer.decoder
         self.calc_predictor = paraformer.calc_predictor
         self.cal_decoder_with_predictor = paraformer.cal_decoder_with_predictor
         self.stft_model = stft_model
