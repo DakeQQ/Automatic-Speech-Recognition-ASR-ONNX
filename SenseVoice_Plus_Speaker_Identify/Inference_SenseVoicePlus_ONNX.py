@@ -6,7 +6,7 @@ from sentencepiece import SentencePieceProcessor
 
 
 tokenizer_path = "/home/DakeQQ/Downloads/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model"     # The SenseVoice download path.
-onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoiceSmallPlus.ort"               # The exported onnx model path.
+onnx_model_A = "/home/DakeQQ/Downloads/SenseVoice_Optimized/SenseVoiceSmallPlus.onnx"              # The exported onnx model path.
 test_audio = "./test_sample.wav"                                                                   # The test audio path.
 
 
