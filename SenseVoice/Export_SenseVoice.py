@@ -80,6 +80,8 @@ class SENSE_VOICE(torch.nn.Module):
             encoder_layer.self_attn.linear_v_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size_2:].view(1, 1, -1).contiguous()
             encoder_layer.self_attn.linear_out_w = encoder_layer.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
             encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
+        self.ctc_lo.weight.data = self.ctc_lo.weight.data.transpose(0, 1).unsqueeze(0).contiguous()
+        self.ctc_lo.bias.data = self.ctc_lo.bias.data.view(1, 1, -1)
   
     def forward(self, audio, language_idx):
         audio = audio.float()
