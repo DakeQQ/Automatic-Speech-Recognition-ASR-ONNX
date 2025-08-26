@@ -91,6 +91,8 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
             encoder_layer.self_attn.linear_v_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size_2:].view(1, 1, -1).contiguous()
             encoder_layer.self_attn.linear_out_w = encoder_layer.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
             encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
+        self.ctc_lo.weight.data = self.ctc_lo.weight.data.transpose(0, 1).unsqueeze(0)
+        self.ctc_lo.bias.data = self.ctc_lo.bias.data.view(1, 1, -1)
   
     def forward(self, audio, language_idx, saved_embed, saved_dot, num_speakers):
         audio = audio.float()
@@ -114,8 +116,8 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
         mel_features = torch.cat((self.language_embed[:, language_idx].float(), self.system_embed, mel_features), dim=1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
-        token_ids = self.ctc_lo(encoder_out).argmax(dim=-1)
-        not_blank = token_ids != self.blank_id
+        ctc_lo_out = torch.matmul(encoder_out, self.ctc_lo.weight) + self.ctc_lo.bias
+        token_ids = ctc_lo_out.argmax(dim=-1)
         token_ids = token_ids.int()
         shifted_tensor = torch.roll(token_ids, shifts=-1, dims=-1)
         mask = (token_ids != shifted_tensor) & not_blank
