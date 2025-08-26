@@ -115,8 +115,10 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         mel_features = torch.cat((self.language_embed[:, language_idx].float(), self.system_embed, mel_features), dim=1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
         token_ids = self.ctc_lo(encoder_out).argmax(dim=-1)
+        not_blank = token_ids != self.blank_id
+        token_ids = token_ids.int()
         shifted_tensor = torch.roll(token_ids, shifts=-1, dims=-1)
-        mask = ((token_ids != shifted_tensor) & (token_ids != self.blank_id))
+        mask = (token_ids != shifted_tensor) & not_blank
         return token_ids.index_select(-1, torch.nonzero(mask, as_tuple=True)[-1]), target_speaker_id.int(), speaker_score, speaker_embed_T, speaker_embed_dot
 
 
