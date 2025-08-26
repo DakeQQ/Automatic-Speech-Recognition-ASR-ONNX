@@ -23,7 +23,7 @@ ORT_Accelerate_Providers = []                               # If you have accele
                                                             # else keep empty.
 DYNAMIC_AXES = True                                         # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
 INPUT_AUDIO_LENGTH = 160000                                 # The maximum input audio length.
-WINDOW_TYPE = 'hann'                                        # Type of window function used in the STFT
+WINDOW_TYPE = 'hamming'                                     # Type of window function used in the STFT
 N_MELS = 80                                                 # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT = 512                                             # Number of FFT components for the STFT process, edit it carefully.
 WINDOW_LENGTH = 400                                         # Length of windowing, edit it carefully.
@@ -75,7 +75,6 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
-        self.inv_int16 = float(1.0 / 32768.0)
         num_head = self.encoder.encoders._modules["0"].self_attn.h
         head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
         factor = float(head_dim ** (-0.25))
@@ -94,12 +93,12 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
             encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
   
     def forward(self, audio, language_idx, saved_embed, saved_dot, num_speakers):
-        audio = audio.float() * self.inv_int16 
+        audio = audio.float()
         audio = audio - torch.mean(audio)  # Remove DC Offset
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
+        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-6).log()
         speaker_embed = self.eres2netv2.forward(mel_features - mel_features.mean(dim=-1, keepdim=True))
         speaker_embed_T = speaker_embed.transpose(0, 1)
         speaker_embed_dot = torch.matmul(speaker_embed, speaker_embed_T)
@@ -114,11 +113,10 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
         mel_features = torch.cat((self.language_embed[:, language_idx].float(), self.system_embed, mel_features), dim=1)
-        encoder_out = self.encoder((mel_features - self.cmvn_means) * self.cmvn_vars)
-        token_ids = self.ctc_lo(encoder_out).argmax(dim=-1).int()
+        encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
+        token_ids = self.ctc_lo(encoder_out).argmax(dim=-1)
         shifted_tensor = torch.roll(token_ids, shifts=-1, dims=-1)
-        mask = ((token_ids != shifted_tensor) & (token_ids != self.blank_id)).to(torch.int32)
-        mask[..., 0] = 1
+        mask = ((token_ids != shifted_tensor) & (token_ids != self.blank_id))
         return token_ids.index_select(-1, torch.nonzero(mask, as_tuple=True)[-1]), target_speaker_id.int(), speaker_score, speaker_embed_T, speaker_embed_dot
 
 
@@ -139,7 +137,7 @@ with torch.inference_mode():
     model_asr.model.embed.weight.data *= encoder_output_size_factor
     CMVN_MEANS = model_asr.kwargs['frontend'].cmvn[0].repeat(1, 1, 1)
     CMVN_VARS = (model_asr.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
-    CIF_HIDDEN_SIZE = model.model.encoder.encoders0._modules["0"].size
+    CIF_HIDDEN_SIZE = model_asr.model.encoder.encoders0._modules["0"].size
     tokenizer = model_asr.kwargs['tokenizer']
     model_speaker = Model.from_pretrained(
         model_name_or_path=model_path_speaker,
