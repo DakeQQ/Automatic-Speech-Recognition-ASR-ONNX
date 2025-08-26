@@ -54,7 +54,6 @@ def normalize_to_int16(audio):
 class PARAFORMER_ENCODER(torch.nn.Module):
     def __init__(self, paraformer, stft_model, nfft_stft, stft_signal_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size, fsmn_hidden_size, feature_size, look_back_A, look_back_B, look_back_C, look_back_en, max_continue_streaming):
         super(PARAFORMER_ENCODER, self).__init__()
-        self.inv_int16 = float(1.0 / 32768.0)
         self.threshold = float(1.0)
         self.look_back_A = look_back_A
         self.look_back_B = look_back_B
@@ -103,7 +102,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         cif_alphas = all_inputs[-3]
         start_idx = all_inputs[-2]
         audio = all_inputs[-1]
-        audio = audio.float() * self.inv_int16
+        audio = audio.float()
         audio = audio - torch.mean(audio)  # Remove DC Offset
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
@@ -113,7 +112,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
         mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
-        mel_features = (mel_features - self.cmvn_means) * self.cmvn_vars
+        mel_features = (mel_features + self.cmvn_means) * self.cmvn_vars
         end_idx = start_idx + mel_features.shape[1]
         mel_features += self.position_encoding[:, start_idx:end_idx]
         x = torch.cat([previous_mel_features, mel_features], dim=1)
