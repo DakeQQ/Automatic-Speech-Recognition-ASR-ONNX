@@ -906,7 +906,6 @@ for language_idx, test in enumerate(test_audio):
             penality_reset_count_greedy = 0
 
     num_decode = 0
-    save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
         all_outputs_A = ort_session_A.run_with_ort_values(out_name_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], 'cpu', 0)})
