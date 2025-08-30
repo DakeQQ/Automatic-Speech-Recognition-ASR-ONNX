@@ -303,7 +303,7 @@ for language_idx, test in enumerate(test_audio):
         for i in range(num_keys_values):
             input_feed_B[in_name_B[layer_indices[i]]] = all_outputs_A[i]
         while num_decode < generate_limit:
-            all_outputs_B = ort_session_B.run_with_ort_values(out_name_B, input_feed_B, device_type, DEVICE_ID)
+            all_outputs_B = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)
             max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-2])[0, 0]
             if max_logit_ids in STOP_TOKEN:
                 break
