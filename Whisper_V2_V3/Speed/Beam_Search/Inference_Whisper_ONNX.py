@@ -401,7 +401,7 @@ for language_idx, test in enumerate(test_audio):
                 if num_decode < 1:
                     for i in range(num_keys_values_plus_1):
                         input_feed_D[in_name_D[i]] = all_outputs_B[i]
-                    all_outputs_D = ort_session_D.run_with_ort_values(out_name_D, input_feed_D, device_type, DEVICE_ID)
+                    all_outputs_D = ort_session_D.run_with_ort_values(out_name_D, input_feed_D)
                     max_logits_idx = onnxruntime.OrtValue.numpy(all_outputs_D[-1])
                     input_feed_E[in_name_E[-4]] = all_outputs_D[-2]
                     if do_repeat_penality:
@@ -409,14 +409,14 @@ for language_idx, test in enumerate(test_audio):
                 else:
                     for i in range(num_keys_values_plus_1):
                         input_feed_E[in_name_E[i]] = all_outputs_B[i]
-                    all_outputs_E = ort_session_E.run_with_ort_values(out_name_E, input_feed_E, device_type, DEVICE_ID)
+                    all_outputs_E = ort_session_E.run_with_ort_values(out_name_E, input_feed_E)
                     max_logits_idx = onnxruntime.OrtValue.numpy(all_outputs_E[-1])
                 if max_logits_idx in STOP_TOKEN:
                     break
                 if do_repeat_penality and (num_decode >= PENALITY_RANGE):
                     input_feed_F[in_name_F[0]] = all_outputs_E[num_keys_values_plus_1]
                     input_feed_F[in_name_F[1]] = all_outputs_E[num_keys_values_plus_2]
-                    all_outputs_F = ort_session_F.run_with_ort_values(out_name_F, input_feed_F, device_type, DEVICE_ID)
+                    all_outputs_F = ort_session_F.run_with_ort_values(out_name_F, input_feed_F)
                     input_feed_F[in_name_F[2]] = all_outputs_F[2]
                     input_feed_E[in_name_E[num_keys_values_plus_1]] = all_outputs_F[0]
                     input_feed_E[in_name_E[num_keys_values_plus_2]] = all_outputs_F[1]
@@ -434,7 +434,7 @@ for language_idx, test in enumerate(test_audio):
                     input_feed_E[in_name_E[num_keys_values_plus_3]] = all_outputs_E[num_keys_values_plus_3]
             else:
                 input_feed_C[in_name_C[0]] = all_outputs_B[num_keys_values]
-                all_outputs_C = ort_session_C.run_with_ort_values(out_name_C, input_feed_C, device_type, DEVICE_ID)
+                all_outputs_C = ort_session_C.run_with_ort_values(out_name_C, input_feed_C)
                 max_logits_idx = onnxruntime.OrtValue.numpy(all_outputs_C[0])[0, 0]
                 if max_logits_idx in STOP_TOKEN:
                     break
