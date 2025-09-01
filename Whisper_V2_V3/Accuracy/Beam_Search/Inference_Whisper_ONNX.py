@@ -455,22 +455,23 @@ for language_idx, test in enumerate(test_audio):
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
-    if USE_BEAM_SEARCH:
-        save_id_beam = onnxruntime.OrtValue.numpy(all_outputs_E[num_keys_values_plus_1])[0]
-        for i, idx in enumerate(save_id_beam):
-            if idx in STOP_TOKEN:
-                save_id_beam = save_id_beam[:i]
-                break
-        save_token_array = remove_repeated_parts(save_id_beam, 3, save_id_beam.shape[-1])          # To handle "over-talking".
-    else:
-        save_token_array = remove_repeated_parts(save_id_greedy[:num_decode], 3, num_decode)    # To handle "over-talking".
-    text, _ = tokenizer._decode_asr(
-        [{
-            "tokens": save_token_array.reshape(1, -1)
-        }],
-        return_timestamps=None,  # Do not support return timestamps
-        return_language=None,
-        time_precision=0
-    )
-    print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
-    print("----------------------------------------------------------------------------------------------------------")
+    if num_decode > 0:
+      if USE_BEAM_SEARCH:
+          save_id_beam = onnxruntime.OrtValue.numpy(all_outputs_E[num_keys_values_plus_1])[0]
+          for i, idx in enumerate(save_id_beam):
+              if idx in STOP_TOKEN:
+                  save_id_beam = save_id_beam[:i]
+                  break
+          save_token_array = remove_repeated_parts(save_id_beam, 3, save_id_beam.shape[-1])          # To handle "over-talking".
+      else:
+          save_token_array = remove_repeated_parts(save_id_greedy[:num_decode], 3, num_decode)    # To handle "over-talking".
+      text, _ = tokenizer._decode_asr(
+          [{
+              "tokens": save_token_array.reshape(1, -1)
+          }],
+          return_timestamps=None,  # Do not support return timestamps
+          return_language=None,
+          time_precision=0
+      )
+      print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
+      print("----------------------------------------------------------------------------------------------------------")
