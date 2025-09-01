@@ -120,7 +120,7 @@ def get_language_id(language_input):
         'sr': 50303, 'su': 50357, 'sv': 50273, 'sw': 50318, 'ta': 50287,
         'te': 50299, 'tg': 50331, 'th': 50289, 'tk': 50341, 'tl': 50348,
         'tr': 50268, 'tt': 50351, 'uk': 50280, 'ur': 50290, 'uz': 50337,
-        'vi': 50278, 'yi': 50335, 'yo': 50325, 'zh': 50260
+        'vi': 50278, 'yi': 50335, 'yo': 50325, 'yue': 50358, 'zh': 50260
     }
 
     # Normalize the input to lowercase
@@ -152,7 +152,7 @@ def get_language_id(language_input):
         'tamil':          'ta',   'telugu':         'te',  'tajik':          'tg',  'thai':           'th',
         'turkmen':        'tk',   'tagalog':        'tl',  'turkish':        'tr',  'tatar':          'tt',
         'ukrainian':      'uk',   'urdu':           'ur',  'uzbek':          'uz',  'vietnamese':     'vi',
-        'yiddish':        'yi',   'yoruba':         'yo',  'chinese':        'zh'
+        'yiddish':        'yi',   'yoruba':         'yo',  'cantonese':      'yue', 'chinese':        'zh'
     }
 
     # Check if the input is a full language name and convert to code
