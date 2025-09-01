@@ -338,10 +338,14 @@ with torch.inference_mode():
     gc.collect()
 
     if is_v3:
-        generation_config = GenerationConfig.from_pretrained(model_path)
-        suppress_tokens = torch.tensor(generation_config.suppress_tokens, dtype=torch.int64)
+        try:
+            generation_config = GenerationConfig.from_pretrained(model_path)
+            suppress_tokens = torch.tensor(generation_config.suppress_tokens, dtype=torch.int64)
+        except:
+            suppress_tokens = None
     else:
         suppress_tokens = None
+        
     whisper_decoder = WHISPER_DECODER(model, MAX_SEQ_LEN, suppress_tokens, NUM_LAYER_DE)
     input_ids = torch.tensor([[50258, get_language_id(TARGET_LANGUAGE), get_task_id(TASK, True)[0]]], dtype=torch.int32)
     ids_len = torch.tensor([input_ids.shape[-1]], dtype=torch.int64)
@@ -546,14 +550,15 @@ for language_idx, test in enumerate(test_audio):
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
     count_time = time.time() - start_time
-    save_token_array = remove_repeated_parts(save_token, 3, num_decode)  # To handle "over-talking".
-    text, _ = tokenizer._decode_asr(
-        [{
-            "tokens": save_token_array
-        }],
-        return_timestamps=None,  # Do not support return timestamps
-        return_language=None,
-        time_precision=0
-    )
-    print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {(num_decode + 1) / count_time:.3f} tokens/s")
-    print("----------------------------------------------------------------------------------------------------------")
+    if num_decode > 0:
+        save_token_array = remove_repeated_parts(save_token, 3, num_decode)  # To handle "over-talking".
+        text, _ = tokenizer._decode_asr(
+            [{
+                "tokens": save_token_array
+            }],
+            return_timestamps=None,  # Do not support return timestamps
+            return_language=None,
+            time_precision=0
+        )
+        print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {(num_decode + 1) / count_time:.3f} tokens/s")
+        print("----------------------------------------------------------------------------------------------------------")
