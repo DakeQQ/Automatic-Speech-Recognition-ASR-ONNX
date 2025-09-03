@@ -40,7 +40,7 @@ if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
             'precision': 'ACCURACY',                      # [FP32, FP16, ACCURACY]
             'num_of_threads': MAX_THREADS,
             'num_streams': 1,
-            'enable_opencl_throttling': True,
+            'enable_opencl_throttling': False,
             'enable_qdq_optimizer': False,                # Enable it carefully
             'disable_dynamic_shapes': False
         }
@@ -381,19 +381,19 @@ if (TOP_K < 2) or (BEAM_SIZE < 2):
     print("\nInappropriate Beam Search setting detected. Falling back to Greedy Search.")
 
 if USE_BEAM_SEARCH:
-    ort_session_D = onnxruntime.InferenceSession(onnx_model_D, providers=ORT_Accelerate_Providers, provider_options=provider_options)
+    ort_session_D = onnxruntime.InferenceSession(onnx_model_D, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
     in_name_D = ort_session_D.get_inputs()
     out_name_D = ort_session_D.get_outputs()
     in_name_D = [in_name_D[i].name for i in range(len(in_name_D))]
     out_name_D = [out_name_D[i].name for i in range(len(out_name_D))]
     
-    ort_session_E = onnxruntime.InferenceSession(onnx_model_E, providers=ORT_Accelerate_Providers, provider_options=provider_options)
+    ort_session_E = onnxruntime.InferenceSession(onnx_model_E, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
     in_name_E = ort_session_E.get_inputs()
     out_name_E = ort_session_E.get_outputs()
     in_name_E = [in_name_E[i].name for i in range(len(in_name_E))]
     out_name_E = [out_name_E[i].name for i in range(len(out_name_E))]
 
-    ort_session_F = onnxruntime.InferenceSession(onnx_model_F, providers=ORT_Accelerate_Providers, provider_options=provider_options)
+    ort_session_F = onnxruntime.InferenceSession(onnx_model_F, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
     in_name_F = ort_session_F.get_inputs()
     out_name_F = ort_session_F.get_outputs()
     in_name_F = [in_name_F[i].name for i in range(len(in_name_F))]
@@ -411,7 +411,7 @@ if USE_BEAM_SEARCH:
 
 else:
     BEAM_SIZE = 1
-    ort_session_C = onnxruntime.InferenceSession(onnx_model_C, providers=ORT_Accelerate_Providers, provider_options=provider_options)
+    ort_session_C = onnxruntime.InferenceSession(onnx_model_C, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options)
     in_name_C = ort_session_C.get_inputs()
     out_name_C = ort_session_C.get_outputs()
     in_name_C = [in_name_C[i].name for i in range(len(in_name_C))]
@@ -652,3 +652,4 @@ for test in test_audio:
     text = text.replace("▁", " ")
     print(f"\nASR Result:\n{text}\n\nTime Cost: {count_time:.3f} Seconds\n\nDecode Speed: {num_decode / count_time:.3f} tokens/s")
     print("----------------------------------------------------------------------------------------------------------")
+
