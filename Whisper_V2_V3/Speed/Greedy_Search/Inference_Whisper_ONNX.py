@@ -298,7 +298,7 @@ for language_idx, test in enumerate(test_audio):
     save_token = []
     start_time = time.time()
     while slice_end <= aligned_len:
-        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], device_type, DEVICE_ID)})
+        all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end])})
         for i in range(num_keys_values):
             input_feed_B[in_name_B[layer_indices[i]]] = all_outputs_A[i]
         while num_decode < generate_limit:
