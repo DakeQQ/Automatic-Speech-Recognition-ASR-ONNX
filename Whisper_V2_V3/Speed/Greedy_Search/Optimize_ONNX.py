@@ -127,11 +127,12 @@ for model_name in model_names:
 
         model = optimize_model(quanted_model_path,
                                use_gpu=False,
-                               opt_level=1 if use_openvino else 2,
+                               opt_level=2,
                                num_heads=num_heads,
                                hidden_size=hidden_size,
                                verbose=False,
-                               model_type='bert')
+                               model_type='bert',
+                               only_onnxruntime=use_openvino)
         if quant_float16:
             print("Converting model to Float16...")
             model.convert_float_to_float16(
