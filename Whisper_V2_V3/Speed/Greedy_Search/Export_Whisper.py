@@ -9,9 +9,9 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
 
 
-model_path = "/home/iamj/Downloads/whisper-tiny"                                          # The Whisper project download path.
-onnx_model_A = "/home/iamj/Downloads/Whisper_ONNX/Whisper_Encoder.onnx"                             # The exported onnx model path.
-onnx_model_B = "/home/iamj/Downloads/Whisper_ONNX/Whisper_Decoder.onnx"                             # The exported onnx model path.
+model_path = "/home/DakeQQ/Downloads/whisper-large-v3-turbo"                                          # The Whisper project download path.
+onnx_model_A = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Encoder.onnx"                             # The exported onnx model path.
+onnx_model_B = "/home/DakeQQ/Downloads/Whisper_ONNX/Whisper_Decoder.onnx"                             # The exported onnx model path.
 if "3.5" in model_path:
     test_audio = ["../example/en.mp3"]                                                                    # The test audio list.
 else:
