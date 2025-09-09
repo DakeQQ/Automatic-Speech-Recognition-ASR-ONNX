@@ -1,28 +1,6 @@
 import os
 import gc
 import glob
-import sys
-import onnx
-import subprocess
-import onnx.version_converter
-from pathlib import Path
-from onnxslim import slim
-from onnxruntime.quantization import QuantType, quantize_dynamic, quant_utils
-from onnxruntime.transformers.optimizer import optimize_model
-
-
-# Path Setting
-original_folder_path = r"/home/DakeQQ/Downloads/FireRedASR_ONNX"                              # The original folder.
-quanted_folder_path = r"/home/DakeQQ/Downloads/FireRedASR_Optimized"                          # The optimized folder.
-project_path = "/home/DakeQQ/Downloads/FireRedASR-main"                                       # The FireRedASR Github project path.
-model_path = os.path.join(original_folder_path, "FireRedASR_AED_L-Encoder.onnx")              # The original fp32 model path.
-quanted_model_path = os.path.join(quanted_folder_path, "FireRedASR_AED_L-Encoder.onnx")       # The optimized model stored path.
-# model_path = os.path.join(original_folder_path, "FireRedASR_AED_L-Decoder.onnx")            # The original fp32 model path.
-# quanted_model_path = os.path.join(quanted_folder_path, "FireRedASR_AED_L-Decoder.onnx")     # The optimized model stored path.
-
-import os
-import gc
-import glob
 import torch
 import subprocess
 import onnx.version_converter
@@ -138,16 +116,16 @@ for model_name in model_names:
             hidden_size = 0
         else:
             try:
-                if project_path not in sys.path:
-                    sys.path.append(project_path)
+                if download_path not in sys.path:
+                    sys.path.append(download_path)
                 from fireredasr.models.fireredasr import FireRedAsr
                 model_for_config = FireRedAsr.from_pretrained("aed", download_path).model.half()
                 num_heads = model_for_config.encoder.layer_stack._modules['0'].mhsa.n_head
                 hidden_size = model_for_config.odim
                 del model_for_config
                 gc.collect()
-                if project_path in sys.path:
-                    sys.path.remove(project_path)
+                if download_path in sys.path:
+                    sys.path.remove(download_path)
             except:
                 num_heads = 0
                 hidden_size = 0
