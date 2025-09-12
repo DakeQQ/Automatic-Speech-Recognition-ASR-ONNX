@@ -391,8 +391,7 @@ for language_idx, test in enumerate(test_audio):
             max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-2])[0, 0]
             if max_logit_ids in STOP_TOKEN:
                 break
-            for i in range(amount_of_outputs_B):
-                input_feed_B[in_name_B[i]] = all_outputs_B[i]
+            input_feed_B.update(zip(in_name_B[:amount_of_outputs_B], all_outputs_B))
             if num_decode < 2:
                 input_feed_B[in_name_B[-1]] = attention_mask_0
                 input_feed_B[in_name_B[-2]] = ids_len_1
