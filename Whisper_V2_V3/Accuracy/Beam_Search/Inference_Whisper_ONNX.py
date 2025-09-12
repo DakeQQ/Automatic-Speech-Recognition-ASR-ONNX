@@ -482,16 +482,14 @@ for language_idx, test in enumerate(test_audio):
             all_outputs_B = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)
             if USE_BEAM_SEARCH:
                 if num_decode < 1:
-                    for i in range(num_keys_values_plus_1):
-                        input_feed_D[in_name_D[i]] = all_outputs_B[i]
+                    input_feed_D.update(zip(in_name_D[:num_keys_values_plus_1], all_outputs_B))
                     all_outputs_D = ort_session_D.run_with_ort_values(out_name_D, input_feed_D)
                     max_logits_idx = onnxruntime.OrtValue.numpy(all_outputs_D[-1])
                     input_feed_E[in_name_E[-4]] = all_outputs_D[-2]
                     if do_repeat_penality:
                         input_feed_F[in_name_F[3]] = all_outputs_D[-2]
                 else:
-                    for i in range(num_keys_values_plus_1):
-                        input_feed_E[in_name_E[i]] = all_outputs_B[i]
+                    input_feed_E.update(zip(in_name_E[:num_keys_values_plus_1], all_outputs_B))
                     all_outputs_E = ort_session_E.run_with_ort_values(out_name_E, input_feed_E)
                     max_logits_idx = onnxruntime.OrtValue.numpy(all_outputs_E[-1])
                 if max_logits_idx in STOP_TOKEN:
@@ -504,14 +502,12 @@ for language_idx, test in enumerate(test_audio):
                     input_feed_E[in_name_E[num_keys_values_plus_1]] = all_outputs_F[0]
                     input_feed_E[in_name_E[num_keys_values_plus_2]] = all_outputs_F[1]
                 if num_decode < 1:
-                    for i in range(num_keys_values_plus_1):
-                        input_feed_B[in_name_B[i]] = all_outputs_D[i]
+                    input_feed_B.update(zip(in_name_B[:num_keys_values_plus_1], all_outputs_D))
                     input_feed_E[in_name_E[num_keys_values_plus_1]] = all_outputs_D[num_keys_values_plus_1]
                     input_feed_E[in_name_E[num_keys_values_plus_2]] = all_outputs_D[num_keys_values_plus_2]
                     input_feed_E[in_name_E[num_keys_values_plus_3]] = all_outputs_D[num_keys_values_plus_3]
                 else:
-                    for i in range(num_keys_values_plus_1):
-                        input_feed_B[in_name_B[i]] = all_outputs_E[i]
+                    input_feed_B.update(zip(in_name_B[:num_keys_values_plus_1], all_outputs_E))
                     input_feed_E[in_name_E[num_keys_values_plus_1]] = all_outputs_E[num_keys_values_plus_1]
                     input_feed_E[in_name_E[num_keys_values_plus_2]] = all_outputs_E[num_keys_values_plus_2]
                     input_feed_E[in_name_E[num_keys_values_plus_3]] = all_outputs_E[num_keys_values_plus_3]
@@ -529,8 +525,7 @@ for language_idx, test in enumerate(test_audio):
                     penality_reset_count_greedy += 1
                 input_feed_C[in_name_C[1]] = all_outputs_C[1]
                 save_id_greedy[num_decode] = max_logits_idx
-                for i in range(num_keys_values):
-                    input_feed_B[in_name_B[i]] = all_outputs_B[i]
+                input_feed_B.update(zip(in_name_B[:num_keys_values], all_outputs_B))
             input_feed_B[in_name_B[num_keys_values_plus_1]] = all_outputs_B[num_keys_values_plus_1]
             if num_decode < 1:
                 input_feed_B[in_name_B[-1]] = attention_mask_0
