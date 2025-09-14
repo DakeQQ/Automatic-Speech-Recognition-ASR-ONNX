@@ -318,6 +318,7 @@ num_layers = (amount_of_outputs_B - 2) // 2
 num_keys_values = num_layers + num_layers
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
+num_keys_values2_plus_2 = num_keys_values_plus_2 + num_keys_values
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
 # Load the input audio
@@ -367,7 +368,6 @@ for language_idx, test in enumerate(test_audio):
     past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=model_dtype), device_type, DEVICE_ID)
     past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=model_dtype), device_type, DEVICE_ID)
 
-    layer_indices = np.arange(num_keys_values_plus_2, num_keys_values_plus_2 + num_keys_values, dtype=np.int32)
     input_feed_B = {
         in_name_B[num_keys_values]: input_ids,
         in_name_B[num_keys_values_plus_1]: history_len,
@@ -384,8 +384,7 @@ for language_idx, test in enumerate(test_audio):
     start_time = time.time()
     while slice_end <= aligned_len:
         all_outputs_A = ort_session_A.run_with_ort_values(output_names_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], device_type, DEVICE_ID)})
-        for i in range(num_keys_values):
-            input_feed_B[in_name_B[layer_indices[i]]] = all_outputs_A[i]
+        input_feed_B.update(zip(in_name_B[num_keys_values_plus_2: num_keys_values2_plus_2], all_outputs_A))
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)
             max_logit_ids = onnxruntime.OrtValue.numpy(all_outputs_B[-2])[0, 0]
