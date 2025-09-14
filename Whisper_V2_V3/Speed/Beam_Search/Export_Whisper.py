@@ -817,6 +817,7 @@ num_keys_values = num_layers + num_layers
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
 num_keys_values_plus_3 = num_keys_values + 3
+num_keys_values2_plus_2 = num_keys_values_plus_2 + num_keys_values
 vocab_size = ort_session_B._outputs_meta[num_keys_values].shape[-1]
 topK = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([TOP_K], dtype=np.int64), 'cpu', 0)
 beam_size = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([BEAM_SIZE], dtype=np.int64), 'cpu', 0)
@@ -927,7 +928,6 @@ for language_idx, test in enumerate(test_audio):
     attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), 'cpu', 0)
     past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1], ort_session_B._outputs_meta[0].shape[2], 0), dtype=np.float32), 'cpu', 0)
     past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[num_layers].shape[1], 0, ort_session_B._outputs_meta[num_layers].shape[3]), dtype=np.float32), 'cpu', 0)
-    layer_indices = np.arange(num_keys_values_plus_2, num_keys_values_plus_2 + num_keys_values, dtype=np.int32)
 
     input_feed_B = {
         in_name_B[num_keys_values]: input_ids,
@@ -959,8 +959,7 @@ for language_idx, test in enumerate(test_audio):
     start_time = time.time()
     while slice_end <= aligned_len:
         all_outputs_A = ort_session_A.run_with_ort_values(out_name_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], 'cpu', 0)})
-        for i in range(num_keys_values):
-            input_feed_B[in_name_B[layer_indices[i]]] = all_outputs_A[i]
+        input_feed_B.update(zip(in_name_B[num_keys_values_plus_2: num_keys_values2_plus_2], all_outputs_A))
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)
             if USE_BEAM_SEARCH:
