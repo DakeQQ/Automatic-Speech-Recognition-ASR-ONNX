@@ -423,7 +423,7 @@ class DOLPHIN_ENCODER(torch.nn.Module):
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-7).log()
+        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-5).log()
         mel_features = (mel_features - self.dolphin.normalize.mean) * self.inv_std
         embed = self.dolphin.encoder.embed.conv(mel_features.unsqueeze(0))
         embed_len = embed.shape[-2].unsqueeze(0)
@@ -984,12 +984,13 @@ else:
     out_name_C = [out_name_C[i].name for i in range(len(out_name_C))]
     input_feed_C = {in_name_C[2]: penality_value}
 
+if USE_BEAM_SEARCH:
+    penality_reset_count_beam_init = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32), 'cpu', 0)
+else:
+    save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
+
 if REPEAT_PENALITY != 1.0:
     do_repeat_penality = True
-    if USE_BEAM_SEARCH:
-        penality_reset_count_beam_init = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32), 'cpu', 0)
-    else:
-        save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
 else:
     do_repeat_penality = False
 
