@@ -60,7 +60,7 @@ else:
 
 # transformers.optimizer
 model = optimize_model(optimized_model_path,
-                       use_gpu=True,                                  # Set to True because the model uses float16.
+                       use_gpu=False,                                
                        opt_level=2,
                        num_heads=4,                                   # The Paraformer model parameter.
                        hidden_size=512 if is_large_model else 320,    # The Paraformer model parameter.
