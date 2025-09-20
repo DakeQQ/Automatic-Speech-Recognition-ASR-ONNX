@@ -79,7 +79,8 @@ for model_name in model_names:
             skip_fusion_patterns=False,
             no_constant_folding=False,
             save_as_external_data=use_low_memory_mode_in_Android,
-            verbose=False
+            verbose=False,
+            dtype='fp16' if quant_float16 and "First_Beam_Search" in model_path else 'fp32'
         )
     else:
         # ONNX Model Optimizer for non-INT8 or Reset_Penality model
