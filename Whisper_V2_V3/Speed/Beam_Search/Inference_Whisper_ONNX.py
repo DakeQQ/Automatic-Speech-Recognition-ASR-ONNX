@@ -523,7 +523,7 @@ for language_idx, test in enumerate(test_audio):
                     if reset_ids != max_logits_idx:
                         repeat_penality = onnxruntime.OrtValue.numpy(all_outputs_C[1])
                         repeat_penality[..., reset_ids] = 1.0
-                        all_outputs_C[1] = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, 'cpu', 0)
+                        all_outputs_C[1] = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
                     penality_reset_count_greedy += 1
                 input_feed_C[in_name_C[1]] = all_outputs_C[1]
                 save_id_greedy[num_decode] = max_logits_idx
