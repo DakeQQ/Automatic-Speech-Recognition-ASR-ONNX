@@ -1004,10 +1004,12 @@ for language_idx, test in enumerate(test_audio):
                 if max_logits_idx in STOP_TOKEN:
                     break
                 input_feed_B[in_name_B[num_keys_values]] = all_outputs_C[0]
-                if do_repeat_penality and (num_decode >= PENALITY_RANGE) and (save_id_greedy[penality_reset_count_greedy] != max_logits_idx):
-                    repeat_penality = onnxruntime.OrtValue.numpy(all_outputs_C[1])
-                    repeat_penality[..., penality_reset_count_greedy] = 1.0
-                    all_outputs_C[1] = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, 'cpu', 0)
+                if do_repeat_penality and (num_decode >= PENALITY_RANGE):
+                    reset_ids = save_id_greedy[penality_reset_count_greedy]
+                    if reset_ids != max_logits_idx:
+                        repeat_penality = onnxruntime.OrtValue.numpy(all_outputs_C[1])
+                        repeat_penality[..., reset_ids] = 1.0
+                        all_outputs_C[1] = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, 'cpu', 0)
                     penality_reset_count_greedy += 1
                 input_feed_C[in_name_C[1]] = all_outputs_C[1]
                 save_id_greedy[num_decode] = max_logits_idx
