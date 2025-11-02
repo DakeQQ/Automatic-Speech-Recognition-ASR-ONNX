@@ -860,7 +860,7 @@ if USE_BEAM_SEARCH:
         in_name_E[-2]: beam_size,
         in_name_E[-1]: topK
     }
-
+    
 else:
     BEAM_SIZE = 1
     ort_session_C = onnxruntime.InferenceSession(onnx_model_C, sess_options=session_opts, providers=['CPUExecutionProvider'])
@@ -870,15 +870,16 @@ else:
     out_name_C = [out_name_C[i].name for i in range(len(out_name_C))]
     input_feed_C = {in_name_C[2]: penality_value}
 
+
+if USE_BEAM_SEARCH:
+    penality_reset_count_beam_init = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32), 'cpu', 0)
+else:
+    save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
+
 if REPEAT_PENALITY != 1.0:
     do_repeat_penality = True
-    if USE_BEAM_SEARCH:
-        penality_reset_count_beam_init = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32), 'cpu', 0)
-    else:
-        save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
 else:
     do_repeat_penality = False
-
 
 # Load the input audio
 for language_idx, test in enumerate(test_audio):
