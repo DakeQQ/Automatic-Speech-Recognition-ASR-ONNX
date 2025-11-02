@@ -669,8 +669,8 @@ with torch.inference_mode():
     output_names.append('top_beam_indices')
     output_names.append('save_id_out')
     output_names.append('repeat_penality_out')
-    output_names.append('batch_indices')
     output_names.append('top_beam_prob')
+    output_names.append('batch_indices')
     output_names.append('max_logits_idx')
     dynamic_axes['save_id_in'] = {0: 'batch', 1: 'history_len'}
     dynamic_axes['save_id_out'] = {0: 'batch', 1: 'history_len'}
