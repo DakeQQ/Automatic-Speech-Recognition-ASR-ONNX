@@ -376,10 +376,11 @@ with torch.inference_mode():
     if MAX_SEQ_LEN > model.config.max_target_positions:
         MAX_SEQ_LEN = model.config.max_target_positions
         
-    scaling = float(HEAD_DIM_EN ** -0.5)
+    scaling = float(HEAD_DIM_EN ** -0.25)
     for i in model.model.encoder.layers._modules:
         model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data *= scaling
         model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data *= scaling
+        model.model.encoder.layers._modules[i].self_attn.k_proj.bias.data *= scaling
 
         model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.q_proj.weight.data.view(NUM_HEAD_EN, HEAD_DIM_EN, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.encoder.layers._modules[i].self_attn.q_proj.bias.data.view(NUM_HEAD_EN, 1, HEAD_DIM_EN).contiguous()
@@ -389,10 +390,11 @@ with torch.inference_mode():
         model.model.encoder.layers._modules[i].self_attn.out_proj.weight.data = model.model.encoder.layers._modules[i].self_attn.out_proj.weight.data.view(HIDDEN_SIZE, NUM_HEAD_EN, HEAD_DIM_EN).permute(1, 2, 0).contiguous()
         model.model.encoder.layers._modules[i].self_attn.out_proj.bias.data = model.model.encoder.layers._modules[i].self_attn.out_proj.bias.data.view(1, 1, -1).contiguous()
         
-    scaling = float(HEAD_DIM_DE ** -0.5)
+    scaling = float(HEAD_DIM_DE ** -0.25)
     for i in model.model.decoder.layers._modules:
         model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data *= scaling
         model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data *= scaling
+        model.model.decoder.layers._modules[i].self_attn.k_proj.weight.data *= scaling
 
         model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.q_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].self_attn.q_proj.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
@@ -402,10 +404,11 @@ with torch.inference_mode():
         model.model.decoder.layers._modules[i].self_attn.out_proj.weight.data = model.model.decoder.layers._modules[i].self_attn.out_proj.weight.data.view(HIDDEN_SIZE, NUM_HEAD_DE, HEAD_DIM_DE).permute(1, 2, 0).contiguous()
         model.model.decoder.layers._modules[i].self_attn.out_proj.bias.data = model.model.decoder.layers._modules[i].self_attn.out_proj.bias.data.view(1, 1, -1).contiguous()
         
-    scaling = float(model.model.decoder.layers._modules['0'].encoder_attn.head_dim ** -0.5)
+    scaling = float(model.model.decoder.layers._modules['0'].encoder_attn.head_dim ** -0.25)
     for i in model.model.decoder.layers._modules:
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data *= scaling
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data *= scaling
+        model.model.decoder.layers._modules[i].encoder_attn.k_proj.weight.data *= scaling
         
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.weight.data.view(NUM_HEAD_DE, HEAD_DIM_DE, HIDDEN_SIZE).transpose(1, 2).contiguous()
         model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data = model.model.decoder.layers._modules[i].encoder_attn.q_proj.bias.data.view(NUM_HEAD_DE, 1, HEAD_DIM_DE).contiguous()
