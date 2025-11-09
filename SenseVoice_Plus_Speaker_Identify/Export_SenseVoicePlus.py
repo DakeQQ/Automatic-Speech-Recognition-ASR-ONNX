@@ -81,8 +81,8 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders) + list(self.encoder.tp_encoders)
         cif_hidden_size_2 = cif_hidden_size + cif_hidden_size
         for encoder_layer in total_encoders:
-            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size] *= factor
-            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size_2] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size_2] *= factor
             encoder_layer.self_attn.linear_q_w = encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
             encoder_layer.self_attn.linear_q_b = encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size].view(num_head, 1, head_dim).contiguous()
             encoder_layer.self_attn.linear_k_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size:cif_hidden_size_2].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
