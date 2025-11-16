@@ -204,8 +204,8 @@ class PARAFORMER_DECODER(torch.nn.Module):
         for decoder_layer in self.decoder.decoders:
             decoder_layer.src_attn.linear_q.weight.data *= factor
             decoder_layer.src_attn.linear_q.bias.data *= factor
-            decoder_layer.src_attn.linear_k.weight.data *= factor
-            decoder_layer.src_attn.linear_k.bias.data *= factor
+            decoder_layer.src_attn.linear_k_v.weight.data[:cif_hidden_size] *= factor
+            decoder_layer.src_attn.linear_k_v.bias.data[:cif_hidden_size] *= factor
             decoder_layer.src_attn.linear_q_w = decoder_layer.src_attn.linear_q.weight.data.view(num_head, head_dim, -1).transpose(1, 2).contiguous()
             decoder_layer.src_attn.linear_q_b = decoder_layer.src_attn.linear_q.bias.data.view(num_head, 1, head_dim).contiguous()
             decoder_layer.src_attn.linear_k_w = decoder_layer.src_attn.linear_k_v.weight.data[:cif_hidden_size].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
