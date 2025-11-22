@@ -13,6 +13,7 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 model_path = "/home/DakeQQ/Downloads/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"      # The Paraformer-Chinese-Online-Streaming download path.
 onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_ONNX/Paraformer_Streaming_Encoder.onnx"                    # The exported onnx model path.
 onnx_model_B = "/home/DakeQQ/Downloads/Paraformer_ONNX/Paraformer_Streaming_Decoder.onnx"                    # The exported onnx model path.
+vocab_path = "/home/DakeQQ/Downloads/Paraformer_ONNX/Vocab_Paraformer.txt"                                   # The vocab list.
 test_audio = "./zh.wav"                                                                                      # The test audio.
 
 
@@ -259,6 +260,11 @@ with torch.inference_mode():
     CMVN_MEANS = model.kwargs['frontend'].cmvn[0].repeat(1, 1, 1)
     CMVN_VARS = (model.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
     tokenizer = model.kwargs['tokenizer']
+    # Save to text file
+    with open(vocab_path, 'w', encoding='utf-8') as f:
+        for token in tokenizer.token_list:
+            f.write(f'{token}\n')
+          
     model = model.model.eval()
     NUM_LAYER_EN = len(model.encoder.encoders0) + len(model.encoder.encoders)
     NUM_LAYER_DE = len(model.decoder.decoders)
