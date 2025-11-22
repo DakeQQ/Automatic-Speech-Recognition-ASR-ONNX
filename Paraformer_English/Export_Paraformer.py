@@ -15,6 +15,7 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 
 model_path = "/home/DakeQQ/Downloads/speech_paraformer_asr-en-16k-vocab4199-pytorch"        # The Paraformer-English download path.
 onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_ONNX/Paraformer.onnx"                     # The exported onnx model path.
+vocab_path = "/home/DakeQQ/Downloads/Paraformer_ONNX/Vocab_Paraformer.txt"                                  # The vocab list.
 test_audio = "./en.mp3"                                                                     # The test audio list.
 
 
@@ -138,6 +139,11 @@ with torch.inference_mode():
     CMVN_VARS = (model.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
     CIF_HIDDEN_SIZE = model.model.encoder.encoders0._modules["0"].size
     tokenizer = model.kwargs['tokenizer']
+    # Save to text file
+    with open(vocab_path, 'w', encoding='utf-8') as f:
+        for token in tokenizer.token_list:
+            f.write(f'{token}\n')
+          
     paraformer = PARAFORMER(model.model.eval(), custom_stft, NFFT_STFT, STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE)
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=torch.int16)
     torch.onnx.export(
