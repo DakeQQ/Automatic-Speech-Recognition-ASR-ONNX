@@ -15,7 +15,7 @@ from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported i
 
 model_path = "/home/DakeQQ/Downloads/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1"      # The Paraformer-Chinese download path.
 onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_ONNX/Paraformer.onnx"                                     # The exported onnx model path.
-vocab_path = "/home/DakeQQ/Downloads/Paraformer_ONNX/Vocab_Paraformer.txt"                                  # The vocab list.
+vocab_path = "/home/DakeQQ/Downloads/Paraformer_ONNX/Vocab_Paraformer.txt"                                  # Save the vocab list.
 test_audio = "./zh.mp3"                                                                                     # The test audio list.
 
 
