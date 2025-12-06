@@ -333,7 +333,7 @@ num_keys_values2_plus_2 = num_keys_values_plus_2 + num_keys_values
 vocab_size = ort_session_B._outputs_meta[num_keys_values].shape[1]
 topK = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([TOP_K], dtype=np.int64), device_type, DEVICE_ID)
 beam_size = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([BEAM_SIZE], dtype=np.int64), device_type, DEVICE_ID)
-penality_value = onnxruntime.OrtValue.ortvalue_from_numpy(np.array(REPEAT_PENALITY, dtype=model_dtype), device_type, DEVICE_ID)
+penality_value = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([REPEAT_PENALITY], dtype=model_dtype), device_type, DEVICE_ID)
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
 # Pre-process inputs
