@@ -611,7 +611,7 @@ with torch.inference_mode():
     repeat_penality = torch.ones((beam_size, VOCAB_SIZE), dtype=torch.float32)
     penality_reset_count = torch.zeros(beam_size, dtype=torch.int32)
     logits = torch.ones((beam_size, VOCAB_SIZE), dtype=torch.float32)
-    penality_value = torch.tensor(REPEAT_PENALITY, dtype=torch.float32)
+    penality_value = torch.tensor([REPEAT_PENALITY], dtype=torch.float32)
     batch_indices = torch.arange(BEAM_SIZE, dtype=torch.int64)
 
     torch.onnx.export(
@@ -827,7 +827,7 @@ num_keys_values2_plus_2 = num_keys_values_plus_2 + num_keys_values
 vocab_size = ort_session_B._outputs_meta[num_keys_values].shape[-1]
 topK = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([TOP_K], dtype=np.int64), 'cpu', 0)
 beam_size = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([BEAM_SIZE], dtype=np.int64), 'cpu', 0)
-penality_value = onnxruntime.OrtValue.ortvalue_from_numpy(np.array(REPEAT_PENALITY, dtype=np.float32), 'cpu', 0)
+penality_value = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([REPEAT_PENALITY], dtype=np.float32), 'cpu', 0)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 
 # Pre-process inputs
