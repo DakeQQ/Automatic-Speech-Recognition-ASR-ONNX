@@ -51,7 +51,7 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 ---
 
 ## Coming Soon 🚀  
-- None
+- [Fun-ASR-Nano-2512](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512)
 
 
 ---
