@@ -380,13 +380,13 @@ class SenseVoiceEncoderSmall(nn.Module):
         inv_timescales = torch.exp(torch.arange(FEATURE_SIZE / 2, device='cpu').type(torch.float32) * (-log_timescale_increment))
         inv_timescales = torch.reshape(inv_timescales, [1, -1])
         scaled_time = torch.reshape(positions, [1, -1, 1]) * torch.reshape(inv_timescales, [1, 1, -1])
-        self.position_encoding = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=2)
+        self.position_encoding = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=2).half()
 
     def output_size(self) -> int:
         return self._output_size
 
     def forward(self, xs_pad: torch.Tensor):
-        xs_pad += self.position_encoding
+        xs_pad += self.position_encoding[:, :xs_pad.shape[1]].float()
         for encoder_layer in self.encoders0 + self.encoders:
             xs_pad = encoder_layer(xs_pad)
         xs_pad = self.after_norm(xs_pad)
