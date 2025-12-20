@@ -66,7 +66,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         self.cmvn_means = cmvn_means
         self.cmvn_vars = cmvn_vars
         self.T_lfr = lfr_len
-        self.cif_hidden_size = cif_hidden_size
+        self.lfr_n = lfr_n
         self.pre_emphasis = float(pre_emphasis)
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.lfr_m_factor = (lfr_m - 1) // 2
@@ -112,7 +112,8 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         left_padding = mel_features[:, [0], :]
         left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
-        mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
+        _len = padded_inputs.shape[1] // self.lfr_n + 1
+        mel_features = padded_inputs[:, self.indices_mel[:_len]].reshape(1, _len, -1)
         mel_features = (mel_features + self.cmvn_means) * self.cmvn_vars
         end_idx = start_idx + mel_features.shape[1]
         mel_features += self.position_encoding[:, start_idx:end_idx]
