@@ -69,11 +69,12 @@ class PARAFORMER(torch.nn.Module):
         self.cmvn_means = cmvn_means
         self.cmvn_vars = cmvn_vars
         self.T_lfr = lfr_len
+        self.lfr_n = lfr_n
         self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
         self.lfr_m_factor = (lfr_m - 1) // 2
-        indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
+        indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int64).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int64)
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
         num_head = self.encoder.encoders._modules["0"].self_attn.h
         head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
@@ -119,9 +120,10 @@ class PARAFORMER(torch.nn.Module):
         left_padding = mel_features[:, [0], :]
         left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
         padded_inputs = torch.cat((left_padding, mel_features), dim=1)
-        mel_features = padded_inputs[:, self.indices_mel.clamp(max=padded_inputs.shape[1] - 1)].reshape(1, self.T_lfr, -1)
-        encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars, self.T_lfr)
-        pre_acoustic_embeds = self.calc_predictor(encoder_out, self.T_lfr + 1)
+        _len = padded_inputs.shape[1] // self.lfr_n - 1
+        mel_features = padded_inputs[:, self.indices_mel[:_len]].reshape(1, _len, -1)
+        encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars, _len)
+        pre_acoustic_embeds = self.calc_predictor(encoder_out, _len + 1)
         decoder_outs = self.cal_decoder_with_predictor(encoder_out, pre_acoustic_embeds)
         return decoder_outs.argmax(dim=-1).int()
 
