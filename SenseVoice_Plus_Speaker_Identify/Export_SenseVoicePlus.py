@@ -78,7 +78,7 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
         num_head = self.encoder.encoders._modules["0"].self_attn.h
         head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
-        factor = float(head_dim ** (-0.5))
+        factor = float(head_dim ** (-0.25))
         total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders) + list(self.encoder.tp_encoders)
         cif_hidden_size_2 = cif_hidden_size + cif_hidden_size
         for encoder_layer in total_encoders:
