@@ -101,7 +101,7 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[:, :, :1], audio[:, :, 1:] - self.pre_emphasis * audio[:, :, :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).clamp(min=1e-5).log()
+        mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + 1e-7).log()
         speaker_embed = self.eres2netv2.forward(mel_features - mel_features.mean(dim=-1, keepdim=True))
         speaker_embed_T = speaker_embed.transpose(0, 1)
         speaker_embed_dot = torch.matmul(speaker_embed, speaker_embed_T)
