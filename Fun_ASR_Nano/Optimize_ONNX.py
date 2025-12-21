@@ -66,7 +66,7 @@ for model_name in model_names:
         continue
 
     # Start Quantize
-    if quant_int4 and ("Embed" in model_path or "Main" in model_path):
+    if quant_int4 and ("Embed" in model_path or "Main" in model_path or "Encoder" in model_path):
         if "Embed" in model_path:
             op_types = ["Gather"]
             quant_axes = [1]
