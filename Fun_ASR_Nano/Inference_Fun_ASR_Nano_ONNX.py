@@ -291,7 +291,7 @@ for i in task_prompt:
     init_all_outputs_B.append(ort_session_B.run_with_ort_values(out_name_B, input_feed_B)[0])
 
 # Load the input audio
-for prompt_idx, test in enumerate(test_audio):
+for prompt_embed, test in zip(init_all_outputs_B, test_audio):
     print("----------------------------------------------------------------------------------------------------------")
     print(f"\nTest Input Audio: {test}")
     audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
@@ -326,7 +326,7 @@ for prompt_idx, test in enumerate(test_audio):
     rtf_time = time.time()
     while slice_end <= aligned_len:
         input_feed_A[in_name_A[0]] = onnxruntime.OrtValue.ortvalue_from_numpy(audio[..., slice_start: slice_end], device_type, DEVICE_ID)
-        input_feed_A[in_name_A[1]] = init_all_outputs_B[prompt_idx]
+        input_feed_A[in_name_A[1]] = prompt_embed
         all_outputs_A = ort_session_A.run_with_ort_values(out_name_A, input_feed_A)
         input_feed_C[in_name_C[num_keys_values]] = all_outputs_A[0]
         input_feed_C[in_name_C[num_keys_values_plus_1]] = init_history_len
