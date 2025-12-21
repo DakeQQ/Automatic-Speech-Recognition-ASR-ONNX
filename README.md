@@ -6,12 +6,15 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 ### Supported Models  
 1. **Single Model**:  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)
-   - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3) / [Whisper-Large-V3-Turbo](https://huggingface.co/openai/whisper-large-v3-turbo) / [Whisper-V3-Japanese](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0) / [Whisper-V3-Turbo-Japanese](https://huggingface.co/hhim8826/whisper-large-v3-turbo-ja) / [CrisperWhisper](https://github.com/nyrahealth/CrisperWhisper) / [Distil-Whisper-large-v3.5](https://huggingface.co/distil-whisper/distil-large-v3.5) / [anime-whisper](https://huggingface.co/litagin/anime-whisper) / [whisper-ja-anime](https://huggingface.co/efwkjn/whisper-ja-anime-v0.1)...
-   - [Whisper-Large-V2](https://huggingface.co/openai/whisper-large-v2) / [Whisper-V2-Japanese](https://huggingface.co/clu-ling/whisper-large-v2-japanese-5k-steps) ...
-   - [Paraformer-Small-Chinese](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1) / [Paraformer-Large-Chinese](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch) / [Paraformer-Large-English](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch)
+   - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3) / [Custom fine tuned]
+   - [Whisper-Large-V2](https://huggingface.co/openai/whisper-large-v2) / [Custom fine tuned]
+   - [Paraformer-Small-Chinese](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1)
+   - [Paraformer-Large-Chinese](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch)
+   - [Paraformer-Large-English](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch)
    - [Paraformer-Online-Streaming-Chinese](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online)
    - [FireRedASR-AED](https://github.com/FireRedTeam/FireRedASR)
    - [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
+   - [Fun-ASR-Nano-2512](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512)
    
 2. **Combined Models (ASR + Speaker Identify)**:  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
@@ -47,11 +50,11 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 | Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | Paraformer-Large-Streaming-Chinese<br>f32        | 0.06 <br> Chunk Size: 8800                         |
 | Ubuntu 24.04     | Laptop     | CPU<br>i3-12300      | FireRedASR-AED-L-Chinese<br>q8f32                | 0.17                                               |
 | Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Dolphin-Small<br>q8f32                           | 0.14                                               |
+| Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Fun-ASR-Nano<br>q4f32                            | 0.25                                               |
 
 ---
 
 ## Coming Soon 🚀  
-- [Fun-ASR-Nano-2512](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512)
 
 
 ---
@@ -62,12 +65,15 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 ### 支持模型  
 1. **单模型**：  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice)
-   - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3) / [Whisper-Large-V3-Turbo](https://huggingface.co/openai/whisper-large-v3-turbo) / [Whisper-V3-Japanese](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0) / [Whisper-V3-Turbo-Japanese](https://huggingface.co/hhim8826/whisper-large-v3-turbo-ja) / [CrisperWhisper](https://github.com/nyrahealth/CrisperWhisper) / [Distil-Whisper-large-v3.5](https://huggingface.co/distil-whisper/distil-large-v3.5) / [anime-whisper](https://huggingface.co/litagin/anime-whisper) / [whisper-ja-anime](https://huggingface.co/efwkjn/whisper-ja-anime-v0.1)...
-   - [Whisper-Large-V2](https://huggingface.co/openai/whisper-large-v2) / [Whisper-V2-Japanese](https://huggingface.co/clu-ling/whisper-large-v2-japanese-5k-steps) ...
-   - [Paraformer-Small-中文](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1) / [Paraformer-Large-中文](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch) / [Paraformer-Large-英文](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch)
+   - [Whisper-Large-V3](https://huggingface.co/openai/whisper-large-v3) / [Custom fine tuned]
+   - [Whisper-Large-V2](https://huggingface.co/openai/whisper-large-v2) / [Custom fine tuned]
+   - [Paraformer-Small-中文](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1)
+   - [Paraformer-Large-中文](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch)
+   - [Paraformer-Large-英文](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch)
    - [Paraformer-实时-流式-中文](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online)
    - [FireRedASR-AED](https://github.com/FireRedTeam/FireRedASR)
    - [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
+   - [Fun-ASR-Nano-2512](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512)
    
 2. **组合模型 (ASR + 讲话者识别)**：  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
