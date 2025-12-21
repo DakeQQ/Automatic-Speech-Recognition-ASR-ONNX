@@ -147,7 +147,7 @@ for model_name in model_names:
         slim(
             model=quanted_model_path,
             output_model=quanted_model_path,
-            no_shape_infer=True,
+            no_shape_infer=False,
             skip_fusion_patterns=False,
             no_constant_folding=False,
             save_as_external_data=use_low_memory_mode_in_Android,
