@@ -62,7 +62,7 @@ class SENSE_VOICE(torch.nn.Module):
         self.nfft_stft = nfft_stft
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
-        self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
+        self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1).to(torch.int16)
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
         num_head = self.encoder.encoders._modules["0"].self_attn.h
@@ -94,7 +94,7 @@ class SENSE_VOICE(torch.nn.Module):
         left_padding = mel_features[:, [0], :]
         padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
         _len = padded_inputs.shape[1] // self.lfr_n - 1
-        mel_features = padded_inputs[:, self.indices_mel[:_len]].reshape(1, _len, -1)
+        mel_features = padded_inputs[:, self.indices_mel[:_len].int()].reshape(1, _len, -1)
         mel_features = torch.cat([self.language_embed[:, language_idx].float(), self.system_embed, mel_features], dim=1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
         ctc_lo_out = torch.matmul(encoder_out, self.ctc_lo.weight) + self.ctc_lo.bias
