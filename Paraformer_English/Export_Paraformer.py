@@ -74,7 +74,7 @@ class PARAFORMER(torch.nn.Module):
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
         self.lfr_m_factor = (lfr_m - 1) // 2
-        indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int64).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int64)
+        indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
         num_head = self.encoder.encoders._modules["0"].self_attn.h
         head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
