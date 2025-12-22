@@ -75,7 +75,7 @@ class PARAFORMER(torch.nn.Module):
         self.nfft_stft = nfft_stft
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
-        self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
+        self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1).to(torch.int16)
         num_head = self.encoder.encoders._modules["0"].self_attn.h
         head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
         factor = float(head_dim ** (-0.25))
@@ -120,7 +120,7 @@ class PARAFORMER(torch.nn.Module):
         left_padding = mel_features[:, [0], :]
         padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
         _len = padded_inputs.shape[1] // self.lfr_n - 1
-        mel_features = padded_inputs[:, self.indices_mel[:_len]].reshape(1, _len, -1)
+        mel_features = padded_inputs[:, self.indices_mel[:_len].int()].reshape(1, _len, -1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars, _len)
         pre_acoustic_embeds = self.calc_predictor(encoder_out, _len + 1)
         decoder_outs = self.cal_decoder_with_predictor(encoder_out, pre_acoustic_embeds)
