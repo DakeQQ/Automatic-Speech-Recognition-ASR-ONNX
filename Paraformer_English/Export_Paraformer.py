@@ -118,8 +118,7 @@ class PARAFORMER(torch.nn.Module):
         real_part, imag_part = self.stft_model(audio, 'constant')
         mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + 1e-7).log()
         left_padding = mel_features[:, [0], :]
-        left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
-        padded_inputs = torch.cat((left_padding, mel_features), dim=1)
+        padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
         _len = padded_inputs.shape[1] // self.lfr_n - 1
         mel_features = padded_inputs[:, self.indices_mel[:_len]].reshape(1, _len, -1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars, _len)
