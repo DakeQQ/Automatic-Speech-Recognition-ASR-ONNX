@@ -112,8 +112,7 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         speaker_score, target_speaker_id = torch.max(speaker_score, dim=-1)
         mel_features = mel_features.transpose(1, 2)
         left_padding = mel_features[:, [0], :]
-        left_padding = torch.cat([left_padding for _ in range(self.lfr_m_factor)], dim=1)
-        padded_inputs = torch.cat((left_padding, mel_features), dim=1)
+        padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
         _len = padded_inputs.shape[1] // self.lfr_n - 1
         mel_features = padded_inputs[:, self.indices_mel[:_len]].reshape(1, _len, -1)
         mel_features = torch.cat((self.language_embed[:, language_idx].float(), self.system_embed, mel_features), dim=1)
