@@ -72,7 +72,7 @@ class SENSE_VOICE_PLUS(torch.nn.Module):
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
         self.lfr_m_factor = (lfr_m - 1) // 2
-        indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int64).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int64)
+        indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1)
         self.system_embed = self.embed_sys(torch.tensor([1, 2, 14], dtype=torch.int32)).unsqueeze(0) if use_emo else self.embed_sys(torch.tensor([5, 14], dtype=torch.int32)).unsqueeze(0)
         self.language_embed = self.embed_sys(torch.tensor([0, 3, 4, 7, 11, 12, 13], dtype=torch.int32)).unsqueeze(0).half()  # Original dict: {'auto': 0, 'zh': 3, 'en': 4, 'yue': 7, 'ja': 11, 'ko': 12, 'nospeech': 13}
