@@ -7,7 +7,7 @@ import onnxruntime
 from pydub import AudioSegment
 from funasr import AutoModel
 from transformers import AutoTokenizer
-from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported in ONNX format.
+from STFT_Process import STFT_Process                                                                    # The custom STFT/ISTFT can be exported in ONNX format.
 
 model_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512'                                                 # Set the path where the [Fun-ASR-Nano-2512, Fun-ASR-MLT-Nano-2512] downloaded.  URL: https://modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512 / https://modelscope.cn/models/FunAudioLLM/Fun-ASR-MLT-Nano-2512
 tokenizer_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                                  # Set the tokenizer path.
@@ -172,7 +172,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         self.nfft_stft = nfft_stft
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
-        self.indices_mel = indices.clamp(max=max_stft_len + self.lfr_m_factor - 1)
+        self.indices_mel = indices.clamp(max=max_stft_len + self.lfr_m_factor - 1).to(torch.int16)
         self.output_size_factor = self.funasr_nano.audio_encoder.output_size() ** 0.5
         self.position_encoding = self.funasr_nano.audio_encoder.embed(torch.zeros([1, max_stft_len, 560], dtype=torch.float32))
         num_head = self.funasr_nano.audio_encoder.encoders._modules["0"].self_attn.h
@@ -215,7 +215,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         tail_ids = _tokenizer.encode("<|im_end|>\n<|im_start|>assistant\n", return_tensors="pt")
         self.head_embed = self.funasr_nano.llm.model.embed_tokens(head_ids)
         self.tail_embed = self.funasr_nano.llm.model.embed_tokens(tail_ids)
-        self.fake_token = torch.zeros(max_stft_len + 1, dtype=torch.int64)
+        self.fake_token = torch.zeros(max_stft_len + 1, dtype=torch.int16)
         for i in range(self.fake_token.shape[0]):
             self.fake_token[i] = (((i - 1) // 2 + 1 - 1) // 2 + 1 - 1) // 2 + 1
 
@@ -230,7 +230,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         left_padding = mel_features[:, [0], :]
         padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
         _len = features_len // self.lfr_n - 1
-        mel_features = padded_inputs[:, self.indices_mel[:_len]].reshape(1, _len, -1)
+        mel_features = padded_inputs[:, self.indices_mel[:_len].int()].reshape(1, _len, -1)
         x = mel_features * self.output_size_factor + self.position_encoding[:, :_len].float()
         for encoder_layer in self.funasr_nano.audio_encoder.encoders0 + self.funasr_nano.audio_encoder.encoders:
             x1 = encoder_layer.norm1(x)
@@ -271,7 +271,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             attn = torch.matmul(attn, block.self_attn.linear_out.weight.data).sum(dim=0, keepdim=True) + block.self_attn.linear_out.bias.data
             x += attn
             x = x + block.feed_forward(block.norm2(x))
-        x = x[:, :self.fake_token[features_len]]
+        x = x[:, :self.fake_token[features_len].to(torch.int64)]
         concat_embed = torch.cat([self.head_embed, query_embed, x, self.tail_embed], dim=1)
         return concat_embed, concat_embed.shape[1].unsqueeze(0)
 
@@ -415,20 +415,20 @@ with torch.inference_mode():
     kv_seq_len = history_len + ids_len
 
     model_B = FUNASR_NANO_DECODER_EMBED(model.model)
-    torch.onnx.export(
-        model_B,
-        (input_ids,),
-        onnx_model_B,
-        input_names=['input_ids'],
-        output_names=['hidden_states'],
-        dynamic_axes={
-            'input_ids': {0: 'batch', 1: 'ids_len'},
-            'hidden_states': {0: 'batch', 1: 'ids_len'}
-        },
-        do_constant_folding=True,
-        opset_version=OPSET,
-        dynamo=False
-    )
+    # torch.onnx.export(
+    #     model_B,
+    #     (input_ids,),
+    #     onnx_model_B,
+    #     input_names=['input_ids'],
+    #     output_names=['hidden_states'],
+    #     dynamic_axes={
+    #         'input_ids': {0: 'batch', 1: 'ids_len'},
+    #         'hidden_states': {0: 'batch', 1: 'ids_len'}
+    #     },
+    #     do_constant_folding=True,
+    #     opset_version=OPSET,
+    #     dynamo=False
+    # )
     del model_B
     del input_ids
     
@@ -466,17 +466,17 @@ with torch.inference_mode():
     dynamic_axes['logits'] = {0: 'batch'}
 
     model_C = FUNASR_NANO_DECODER_MAIN(model.model, MAX_SEQ_LEN, num_heads, num_key_value_heads, head_dim, num_layers)
-    torch.onnx.export(
-        model_C,
-        tuple(all_inputs),
-        onnx_model_C,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
-        do_constant_folding=True,
-        opset_version=OPSET,
-        dynamo=False
-    )
+    # torch.onnx.export(
+    #     model_C,
+    #     tuple(all_inputs),
+    #     onnx_model_C,
+    #     input_names=input_names,
+    #     output_names=output_names,
+    #     dynamic_axes=dynamic_axes,
+    #     do_constant_folding=True,
+    #     opset_version=OPSET,
+    #     dynamo=False
+    # )
     del model
     del model_C
     del input_names
