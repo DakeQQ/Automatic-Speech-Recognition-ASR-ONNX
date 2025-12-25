@@ -45,7 +45,7 @@ USE_BEAM_SEARCH = False              # It recommended to use greedy search for F
 TOP_K = 3                            # The top k candidate in decoding.
 BEAM_SIZE = 3                        # Number of beams in searching.
 MAX_BEAM_SIZE = 10                   # Max beams for exported model.
-REPEAT_PENALITY = 0.8                # Range from 0.0 to 1.0; "1.0" means no penality.
+REPEAT_PENALITY = 0.9                # Range from 0.0 to 1.0; "1.0" means no penality.
 PENALITY_RANGE = 10                  # Penalizes the most recent output. "10" means the last 10 tokens.
 
 # Runtime & Export Settings
