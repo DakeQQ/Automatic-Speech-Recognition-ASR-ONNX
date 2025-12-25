@@ -415,20 +415,20 @@ with torch.inference_mode():
     kv_seq_len = history_len + ids_len
 
     model_B = FUNASR_NANO_DECODER_EMBED(model.model)
-    # torch.onnx.export(
-    #     model_B,
-    #     (input_ids,),
-    #     onnx_model_B,
-    #     input_names=['input_ids'],
-    #     output_names=['hidden_states'],
-    #     dynamic_axes={
-    #         'input_ids': {0: 'batch', 1: 'ids_len'},
-    #         'hidden_states': {0: 'batch', 1: 'ids_len'}
-    #     },
-    #     do_constant_folding=True,
-    #     opset_version=OPSET,
-    #     dynamo=False
-    # )
+    torch.onnx.export(
+        model_B,
+        (input_ids,),
+        onnx_model_B,
+        input_names=['input_ids'],
+        output_names=['hidden_states'],
+        dynamic_axes={
+            'input_ids': {0: 'batch', 1: 'ids_len'},
+            'hidden_states': {0: 'batch', 1: 'ids_len'}
+        },
+        do_constant_folding=True,
+        opset_version=OPSET,
+        dynamo=False
+    )
     del model_B
     del input_ids
     
@@ -466,17 +466,17 @@ with torch.inference_mode():
     dynamic_axes['logits'] = {0: 'batch'}
 
     model_C = FUNASR_NANO_DECODER_MAIN(model.model, MAX_SEQ_LEN, num_heads, num_key_value_heads, head_dim, num_layers)
-    # torch.onnx.export(
-    #     model_C,
-    #     tuple(all_inputs),
-    #     onnx_model_C,
-    #     input_names=input_names,
-    #     output_names=output_names,
-    #     dynamic_axes=dynamic_axes,
-    #     do_constant_folding=True,
-    #     opset_version=OPSET,
-    #     dynamo=False
-    # )
+    torch.onnx.export(
+        model_C,
+        tuple(all_inputs),
+        onnx_model_C,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
+        do_constant_folding=True,
+        opset_version=OPSET,
+        dynamo=False
+    )
     del model
     del model_C
     del input_names
