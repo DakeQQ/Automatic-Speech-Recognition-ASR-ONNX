@@ -167,7 +167,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         self.stft_model = stft_model
         self.T_lfr = lfr_len
         self.lfr_n = lfr_n
-        self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32)
+        self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32).view(1, 1, -1)
         self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
         self.lfr_m_factor = (lfr_m - 1) // 2
