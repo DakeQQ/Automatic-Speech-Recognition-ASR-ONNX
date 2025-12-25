@@ -159,7 +159,7 @@ for model_name in model_names:
         if "Reset_Penality" in model_path:
             model = optimize_model(model_path,
                                        use_gpu=False,
-                                       opt_level=1 if use_openvino else 2,
+                                       opt_level=2,
                                        num_heads=0,
                                        hidden_size=0,
                                        verbose=False,
@@ -197,7 +197,7 @@ for model_name in model_names:
                                hidden_size=1024,
                                verbose=False,
                                model_type='bert',
-                               only_onnxruntime=False)
+                               only_onnxruntime=use_openvino)
         if quant_float16:
             print("Converting model to Float16...")
             model.convert_float_to_float16(
