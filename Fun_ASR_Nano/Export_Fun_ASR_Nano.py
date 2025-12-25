@@ -898,7 +898,8 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
         if USE_BEAM_SEARCH:
             input_feed_E[in_name_E[num_keys_values_plus_1]] = init_save_id_beam
             input_feed_E[in_name_E[num_keys_values_plus_2]] = init_repeat_penality
-            input_feed_G[in_name_G[2]] = penality_reset_count_beam_init
+            if do_repeat_penality:
+                input_feed_G[in_name_G[2]] = penality_reset_count_beam_init
         else:
             input_feed_D[in_name_D[1]] = init_repeat_penality
             penality_reset_count_greedy = 0
