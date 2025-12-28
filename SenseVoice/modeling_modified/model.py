@@ -127,8 +127,16 @@ class MultiHeadedAttentionSANM(nn.Module):
         return attn
 
     def forward(self, x, mask=None, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
-        q_h, k_h, v_h, v = self.forward_qkv(x)
-        return self.forward_attention(v_h, torch.matmul(q_h, k_h)) + self.forward_fsmn(v)
+        # q_h, k_h, v_h, v = self.forward_qkv(x)
+        # return self.forward_attention(v_h, torch.matmul(q_h, k_h)) + self.forward_fsmn(v)
+        qkv = self.linear_q_k_v(x)
+        q_h, k_h, v = torch.chunk(qkv, 3, dim=-1)
+        q_h = q_h.view(-1, self.h, self.d_k).transpose(0, 1)
+        k_h = k_h.view(-1, self.h, self.d_k).permute(1, 2, 0)
+        v_h = v.view(-1, self.h, self.d_k).transpose(0, 1)
+        attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, self.linear_out.in_features)
+        attn = self.linear_out(attn) + self.forward_fsmn(v)
+        return attn
 
     def forward_chunk(self, x, cache=None, chunk_size=None, look_back=0):
         """Compute scaled dot product attention.
