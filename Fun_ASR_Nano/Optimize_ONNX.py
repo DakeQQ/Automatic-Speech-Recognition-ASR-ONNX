@@ -24,7 +24,7 @@ os.makedirs(quanted_folder_path, exist_ok=True)
 
 # List of models to process
 model_names = [
-    "FunASR_Nano_Encoder",              # The float32 format is faster than Q4 or Q8 due to fewer computations.
+    "FunASR_Nano_Encoder",              
     "FunASR_Nano_Decoder_Embed",
     "FunASR_Nano_Decoder_Main",
     "FunASR_Nano_Decoder_Greedy_Search",
