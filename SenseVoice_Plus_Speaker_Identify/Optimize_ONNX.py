@@ -15,27 +15,14 @@ optimized_model_path = os.path.join(optimized_folder_path, "SenseVoiceSmallPlus.
 do_quantize = False                                                                       # Use dynamic quant the model to int8 format.
 use_gpu_fp16 = False                                                                      # If true, the transformers.optimizer will remain the FP16 processes.
 provider = 'CPUExecutionProvider'                                                         # ['CPUExecutionProvider', 'CUDAExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider']
-target_platform = "amd64"                                                                 # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
 
 
 # ONNX Model Optimizer
-slim(
-    model=model_path,
-    output_model=optimized_model_path,
-    no_shape_infer=True,                                    # False for more optimize but may get errors.
-    skip_fusion_patterns=False,
-    no_constant_folding=False,
-    save_as_external_data=False,
-    verbose=False
-
-)
-
-
 if do_quantize:
     quantize_dynamic(
-        model_input=optimized_model_path,
+        model_input=model_path,
         model_output=optimized_model_path,
-        per_channel=False,                                  # True for model accuracy but cost a lot of time during quanting process.
+        per_channel=True,                                  # True for model accuracy but cost a lot of time during quanting process.
         reduce_range=False,                                 # True for some x86_64 platform.
         weight_type=QuantType.QUInt8,                       # It is recommended using uint8 + Symmetric False
         extra_options={'ActivationSymmetric': False,        # True for inference speed. False may keep more accuracy.
@@ -52,7 +39,7 @@ if do_quantize:
 # transformers.optimizer
 # Use this function for float16 quantization will get errors.
 model = optimize_model(optimized_model_path,
-                       use_gpu=True,        # Set to True because the model uses float16.
+                       use_gpu=False,        # Set to True because the model uses float16.
                        opt_level=2,
                        num_heads=4,         # The SenseVoiceSmall model parameter.
                        hidden_size=512,     # The SenseVoiceSmall model parameter.
@@ -81,21 +68,3 @@ slim(
     save_as_external_data=False,
     verbose=False
 )
-
-
-# Upgrade the Opset version. (optional process)
-model = onnx.load(optimized_model_path)
-model = onnx.version_converter.convert_version(model, 18)
-onnx.save(model, optimized_model_path, save_as_external_data=False)
-del model
-gc.collect()
-
-
-if not use_gpu_fp16:
-    # Convert the simplified model to ORT format.
-    if provider == 'CPUExecutionProvider':
-        optimization_style = "Fixed"
-    else:
-        optimization_style = "Runtime"  # ['Runtime', 'Fixed']; Runtime for XNNPACK/NNAPI/QNN/CoreML..., Fixed for CPU provider
-    # Call subprocess may get permission failed on Windows system.
-    subprocess.run([f'python -m onnxruntime.tools.convert_onnx_models_to_ort --output_dir {optimized_folder_path} --optimization_style {optimization_style} --target_platform {target_platform} --enable_type_reduction {optimized_folder_path}'], shell=True)
