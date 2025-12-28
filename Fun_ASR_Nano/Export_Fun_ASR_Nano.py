@@ -20,7 +20,7 @@ onnx_model_F = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Se
 onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Reset_Penality.onnx'
 
 # The exported onnx model path.
-test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/yue.mp3", "./example/ja.mp3"]           # The test audio list.
+test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/yue.mp3", "./example/ja.mp3"]          # The test audio list.
 task_prompt = ["将语音转写成中文：", "将语音转写成英文：", "将语音转写成粤语：", "将语音转写成日文："]               # The prompt of transcription task.
 
 
@@ -185,15 +185,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         for encoder_layer in self.total_encoders:
             encoder_layer.self_attn.linear_q_k_v.weight.data[:in_size_2] *= factor
             encoder_layer.self_attn.linear_q_k_v.bias.data[:in_size_2] *= factor
-            encoder_layer.self_attn.linear_q_w = encoder_layer.self_attn.linear_q_k_v.weight.data[:in_siz].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            encoder_layer.self_attn.linear_q_b = encoder_layer.self_attn.linear_q_k_v.bias.data[:in_siz].view(num_head, 1, head_dim).contiguous()
-            encoder_layer.self_attn.linear_k_w = encoder_layer.self_attn.linear_q_k_v.weight.data[in_siz:in_size_2].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            encoder_layer.self_attn.linear_k_b = encoder_layer.self_attn.linear_q_k_v.bias.data[in_siz:in_size_2].view(num_head, 1, head_dim).contiguous()
-            encoder_layer.self_attn.linear_v_w = encoder_layer.self_attn.linear_q_k_v.weight.data[in_size_2:].transpose(0, 1).unsqueeze(0).contiguous()
-            encoder_layer.self_attn.linear_v_b = encoder_layer.self_attn.linear_q_k_v.bias.data[in_size_2:].view(1, 1, -1).contiguous()
-            encoder_layer.self_attn.linear_out_w = encoder_layer.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
-            encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
-        
+
         num_head = self.funasr_nano.audio_adaptor.blocks._modules["0"].self_attn.h
         head_dim = self.funasr_nano.audio_adaptor.blocks._modules["0"].self_attn.d_k
         factor = float(head_dim ** (-0.25))
@@ -202,14 +194,6 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             block.self_attn.linear_q.bias.data *= factor
             block.self_attn.linear_k.weight.data *= factor
             block.self_attn.linear_k.bias.data *= factor
-            block.self_attn.linear_q.weight.data = block.self_attn.linear_q.weight.data.view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            block.self_attn.linear_q.bias.data = block.self_attn.linear_q.bias.data.view(num_head, head_dim, -1).view(num_head, 1, head_dim).contiguous()
-            block.self_attn.linear_k.weight.data = block.self_attn.linear_k.weight.data.view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            block.self_attn.linear_k.bias.data = block.self_attn.linear_k.bias.data.view(num_head, 1, head_dim).contiguous()
-            block.self_attn.linear_v.weight.data = block.self_attn.linear_v.weight.data.view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            block.self_attn.linear_v.bias.data = block.self_attn.linear_v.bias.data.view(num_head, 1, head_dim).contiguous()
-            block.self_attn.linear_out.weight.data = block.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
-            block.self_attn.linear_out.bias.data = block.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
 
         head_ids = _tokenizer.encode("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n", return_tensors="pt")
         tail_ids = _tokenizer.encode("<|im_end|>\n<|im_start|>assistant\n", return_tensors="pt")
@@ -234,13 +218,14 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         x = mel_features * self.output_size_factor + self.position_encoding[:, :_len].float()
         for encoder_layer in self.funasr_nano.audio_encoder.encoders0 + self.funasr_nano.audio_encoder.encoders:
             x1 = encoder_layer.norm1(x)
-            q_h = torch.matmul(x1, encoder_layer.self_attn.linear_q_w) + encoder_layer.self_attn.linear_q_b
-            k_h = (torch.matmul(x1, encoder_layer.self_attn.linear_k_w) + encoder_layer.self_attn.linear_k_b).transpose(1, 2)
-            v = torch.matmul(x1, encoder_layer.self_attn.linear_v_w) + encoder_layer.self_attn.linear_v_b
-            v_h = torch.reshape(v, (-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k)).transpose(0, 1)
+            qkv = encoder_layer.self_attn.linear_q_k_v(x1)
+            q_h, k_h, v = torch.chunk(qkv, 3, dim=-1)
+            q_h = q_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
+            k_h = k_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
+            v_h = v.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
-            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h)
-            attn = torch.matmul(attn, encoder_layer.self_attn.linear_out_w).sum(dim=0, keepdim=True) + encoder_layer.self_attn.linear_out_b + fsmn_memory
+            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, encoder_layer.self_attn.linear_out.in_features)
+            attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             if encoder_layer.in_size == encoder_layer.size:
                 x += attn
             else:
@@ -249,13 +234,14 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         x = self.funasr_nano.audio_encoder.after_norm(x)
         for encoder_layer in self.funasr_nano.audio_encoder.tp_encoders:
             x1 = encoder_layer.norm1(x)
-            q_h = torch.matmul(x1, encoder_layer.self_attn.linear_q_w) + encoder_layer.self_attn.linear_q_b
-            k_h = (torch.matmul(x1, encoder_layer.self_attn.linear_k_w) + encoder_layer.self_attn.linear_k_b).transpose(1, 2)
-            v = torch.matmul(x1, encoder_layer.self_attn.linear_v_w) + encoder_layer.self_attn.linear_v_b
-            v_h = torch.reshape(v, (-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k)).transpose(0, 1)
+            qkv = encoder_layer.self_attn.linear_q_k_v(x1)
+            q_h, k_h, v = torch.chunk(qkv, 3, dim=-1)
+            q_h = q_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
+            k_h = k_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
+            v_h = v.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
-            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h)
-            attn = torch.matmul(attn, encoder_layer.self_attn.linear_out_w).sum(dim=0, keepdim=True) + encoder_layer.self_attn.linear_out_b + fsmn_memory
+            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, encoder_layer.self_attn.linear_out.in_features)
+            attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             x += attn
             x = x + encoder_layer.feed_forward(encoder_layer.norm2(x))
         x = self.funasr_nano.audio_encoder.tp_norm(x)
@@ -264,11 +250,11 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         x = self.funasr_nano.audio_adaptor.linear2(x)
         for block in self.funasr_nano.audio_adaptor.blocks:
             x1 = block.norm1(x)
-            q = torch.matmul(x1, block.self_attn.linear_q.weight) + block.self_attn.linear_q.bias
-            k = (torch.matmul(x1, block.self_attn.linear_k.weight) + block.self_attn.linear_k.bias).transpose(1, 2)
-            v = torch.matmul(x1, block.self_attn.linear_v.weight) + block.self_attn.linear_v.bias
-            attn = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v)
-            attn = torch.matmul(attn, block.self_attn.linear_out.weight.data).sum(dim=0, keepdim=True) + block.self_attn.linear_out.bias.data
+            q = block.self_attn.linear_q(x1).view(-1, block.self_attn.h, block.self_attn.d_k).transpose(0, 1)
+            k = block.self_attn.linear_k(x1).view(-1, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0)
+            v = block.self_attn.linear_v(x1).view(-1, block.self_attn.h, block.self_attn.d_k).transpose(0, 1)
+            attn = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v).transpose(0, 1).contiguous().view(1, -1, block.self_attn.linear_out.in_features)
+            attn = block.self_attn.linear_out(attn)
             x += attn
             x = x + block.feed_forward(block.norm2(x))
         x = x[:, :self.fake_token[features_len].to(torch.int64)]
