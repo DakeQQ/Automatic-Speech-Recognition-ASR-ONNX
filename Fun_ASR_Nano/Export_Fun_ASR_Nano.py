@@ -211,7 +211,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         real_part, imag_part = self.stft_model(audio, 'constant')
         mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + 1e-7).log()
         features_len = mel_features.shape[1].unsqueeze(0)
-        left_padding = mel_features[:, [0], :]
+        left_padding = mel_features[:, [0]]
         padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
         _len = features_len // self.lfr_n - 1
         mel_features = padded_inputs[:, self.indices_mel[:_len].int()].reshape(1, _len, -1)
