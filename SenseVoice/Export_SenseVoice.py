@@ -73,16 +73,6 @@ class SENSE_VOICE(torch.nn.Module):
         for encoder_layer in total_encoders:
             encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size_2] *= factor
             encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size_2] *= factor
-            encoder_layer.self_attn.linear_q_w = encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            encoder_layer.self_attn.linear_q_b = encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size].view(num_head, 1, head_dim).contiguous()
-            encoder_layer.self_attn.linear_k_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size:cif_hidden_size_2].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            encoder_layer.self_attn.linear_k_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size:cif_hidden_size_2].view(num_head, 1, head_dim).contiguous()
-            encoder_layer.self_attn.linear_v_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size_2:].transpose(0, 1).unsqueeze(0).contiguous()
-            encoder_layer.self_attn.linear_v_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size_2:].view(1, 1, -1).contiguous()
-            encoder_layer.self_attn.linear_out_w = encoder_layer.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
-            encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
-        self.ctc_lo.weight.data = self.ctc_lo.weight.data.transpose(0, 1).unsqueeze(0).contiguous()
-        self.ctc_lo.bias.data = self.ctc_lo.bias.data.view(1, 1, -1)
   
     def forward(self, audio, language_idx):
         audio = audio.float()
@@ -97,7 +87,7 @@ class SENSE_VOICE(torch.nn.Module):
         mel_features = padded_inputs[:, self.indices_mel[:_len].int()].reshape(1, _len, -1)
         mel_features = torch.cat([self.language_embed[:, language_idx].float(), self.system_embed, mel_features], dim=1)
         encoder_out = self.encoder((mel_features + self.cmvn_means) * self.cmvn_vars)
-        ctc_lo_out = torch.matmul(encoder_out, self.ctc_lo.weight) + self.ctc_lo.bias
+        ctc_lo_out = self.ctc_lo(encoder_out)
         token_ids = ctc_lo_out.argmax(dim=-1)
         not_blank = token_ids != self.blank_id
         token_ids = token_ids.int()
