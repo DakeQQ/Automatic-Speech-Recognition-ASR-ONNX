@@ -180,11 +180,10 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         self.pad_zeros = torch.zeros((1, num_head * head_dim, 5), dtype=torch.float32)
         factor = float(head_dim ** (-0.25))
         self.total_encoders = list(self.funasr_nano.audio_encoder.encoders0) + list(self.funasr_nano.audio_encoder.encoders) + list(self.funasr_nano.audio_encoder.tp_encoders)
-        in_siz = self.funasr_nano.audio_encoder.encoders._modules["0"].in_size
-        in_size_2 = in_siz + in_siz
+        in_size = self.funasr_nano.audio_encoder.encoders._modules["0"].in_size
         for encoder_layer in self.total_encoders:
-            encoder_layer.self_attn.linear_q_k_v.weight.data[:in_size_2] *= factor
-            encoder_layer.self_attn.linear_q_k_v.bias.data[:in_size_2] *= factor
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:-in_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:-in_size] *= factor
 
         num_head = self.funasr_nano.audio_adaptor.blocks._modules["0"].self_attn.h
         head_dim = self.funasr_nano.audio_adaptor.blocks._modules["0"].self_attn.d_k
