@@ -235,8 +235,16 @@ class MultiHeadedAttentionSANM(nn.Module):
             torch.Tensor: Output tensor (#batch, time1, d_model).
 
         """
-        q_h, k_h, v_h, v = self.forward_qkv(x)
-        return self.forward_attention(v_h, torch.matmul(q_h, k_h)) + self.forward_fsmn(v)
+        # q_h, k_h, v_h, v = self.forward_qkv(x)
+        # return self.forward_attention(v_h, torch.matmul(q_h, k_h)) + self.forward_fsmn(v)
+        qkv = self.linear_q_k_v(x)
+        q_h, k_h, v = torch.split(qkv, self.split_factor, dim=-1)
+        q_h = q_h.view(-1, self.h, self.d_k).transpose(0, 1)
+        k_h = k_h.view(-1, self.h, self.d_k).permute(1, 2, 0)
+        v_h = v.view(-1, self.h, self.d_k).transpose(0, 1)
+        attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, self.linear_out.in_features)
+        attn = self.linear_out(attn) + self.forward_fsmn(v)
+        return attn
 
     def forward_chunk(self, x, cache=None, chunk_size=None, look_back=0):
         """Compute scaled dot product attention.
@@ -524,15 +532,14 @@ class MultiHeadedAttentionCrossAtt(nn.Module):
         self.d_k_factor = 1.0 / math.sqrt(self.d_k)
 
     def forward_qkv(self, x, memory):
-        q = torch.matmul(x, self.linear_q_w) + self.linear_q_b
-        k = (torch.matmul(memory, self.linear_k_w) + self.linear_k_b).transpose(1, 2)
-        v = torch.matmul(memory, self.linear_v_w) + self.linear_v_b
-        return q, k, v
+        q = self.linear_q(x).view(-1, self.h, self.d_k).transpose(0, 1)
+        k_v = self.linear_k_v(memory)
+        k, v = torch.split(k_v, int(self.h * self.d_k), dim=-1)
+        return q, k.view(-1, self.h, self.d_k).permute(1, 2, 0), v.view(-1, self.h, self.d_k).transpose(0, 1)
 
     def forward_attention(self, value, scores, mask=None, ret_attn=False):
-        attn = torch.matmul(torch.softmax(scores, dim=-1), value)
-        attn = torch.matmul(attn, self.linear_out_w).sum(dim=0, keepdim=True) + self.linear_out_b
-        return attn
+        attn = torch.matmul(torch.softmax(scores, dim=-1), value).transpose(0, 1).contiguous().view(1, -1, self.linear_out.in_features)
+        return self.linear_out(attn)
 
     def forward(self, x, memory, memory_mask=None, ret_attn=False):
         q_h, k_h, v_h = self.forward_qkv(x, memory)
