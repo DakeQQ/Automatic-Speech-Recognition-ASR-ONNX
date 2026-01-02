@@ -130,7 +130,7 @@ class MultiHeadedAttentionSANM(nn.Module):
         # q_h, k_h, v_h, v = self.forward_qkv(x)
         # return self.forward_attention(v_h, torch.matmul(q_h, k_h)) + self.forward_fsmn(v)
         qkv = self.linear_q_k_v(x)
-        q_h, k_h, v = torch.chunk(qkv, 3, dim=-1)
+        q_h, k_h, v = torch.split(qkv, self.split_factor, dim=-1)
         q_h = q_h.view(-1, self.h, self.d_k).transpose(0, 1)
         k_h = k_h.view(-1, self.h, self.d_k).permute(1, 2, 0)
         v_h = v.view(-1, self.h, self.d_k).transpose(0, 1)
