@@ -70,6 +70,8 @@ class EncoderLayerSANM(nn.Module):
         self.dropout_rate = dropout_rate
 
     def forward(self, x, mask=None, cache=None, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
         if self.in_size == self.size:
             x = x + self.self_attn(
                     self.norm1(x),
@@ -84,7 +86,8 @@ class EncoderLayerSANM(nn.Module):
                     mask_shfit_chunk=mask_shfit_chunk,
                     mask_att_chunk_encoder=mask_att_chunk_encoder,
                 )
-        return x + self.feed_forward(self.norm2(x))
+        x = x + self.feed_forward(self.norm2(x))
+        return x
 
     def forward_chunk(self, x, cache=None, chunk_size=None, look_back=0):
         """Compute encoded features.
