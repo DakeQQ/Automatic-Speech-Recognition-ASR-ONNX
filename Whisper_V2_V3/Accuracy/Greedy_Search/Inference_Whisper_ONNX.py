@@ -85,10 +85,12 @@ else:
     custom_vocab = False
 
 
-def normalize_to_int16(audio):
-    max_val = np.max(np.abs(audio))
-    scaling_factor = 32767.0 / max_val if max_val > 0 else 1.0
-    return (audio * scaling_factor).astype(np.int16)
+def normalizer(_audio, target_value=8192.0):
+    _audio = _audio.astype(np.float32)
+    rms = np.sqrt(np.mean((_audio * _audio), dtype=np.float32), dtype=np.float32)
+    _audio *= (target_value / (rms + 1e-7))
+    np.clip(_audio, -32768.0, 32767.0, out=_audio)
+    return _audio.astype(np.int16)
   
 
 _LANGUAGE_DATA = {
@@ -331,7 +333,7 @@ for language_idx, test in enumerate(test_audio):
     else:
         language = TARGET_LANGUAGE
     audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.float32)
-    audio = normalize_to_int16(audio)
+    audio = normalizer(audio)
     audio_len = len(audio)
     audio = audio.reshape(1, 1, -1)
     if isinstance(shape_value_in, str):
