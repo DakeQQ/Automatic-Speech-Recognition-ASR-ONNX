@@ -69,10 +69,9 @@ class SENSE_VOICE(torch.nn.Module):
         head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
         factor = float(head_dim ** (-0.25))
         total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders) + list(self.encoder.tp_encoders)
-        cif_hidden_size_2 = cif_hidden_size + cif_hidden_size
         for encoder_layer in total_encoders:
-            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size_2] *= factor
-            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size_2] *= factor
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:-cif_hidden_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:-cif_hidden_size] *= factor
   
     def forward(self, audio, language_idx):
         audio = audio.float()
