@@ -21,7 +21,7 @@ onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Re
 
 # The exported onnx model path.
 test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/yue.mp3", "./example/ja.mp3"]          # The test audio list.
-task_prompt = ["将语音转写成中文：", "将语音转写成英文：", "将语音转写成粤语：", "将语音转写成日文："]               # The prompt of transcription task.
+task_prompt = ["将语音转写成中文：", "将语音转写成英文：", "将语音转写成粤语：", "将语音转写成日文："]              # The prompt of transcription task.
 
 
 if "MLT" in model_path:
@@ -218,7 +218,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         for encoder_layer in self.funasr_nano.audio_encoder.encoders0 + self.funasr_nano.audio_encoder.encoders:
             x1 = encoder_layer.norm1(x)
             qkv = encoder_layer.self_attn.linear_q_k_v(x1)
-            q_h, k_h, v = torch.chunk(qkv, 3, dim=-1)
+            q_h, k_h, v = torch.split(qkv, encoder_layer.size, dim=-1)
             q_h = q_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             k_h = k_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
             v_h = v.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
@@ -234,7 +234,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         for encoder_layer in self.funasr_nano.audio_encoder.tp_encoders:
             x1 = encoder_layer.norm1(x)
             qkv = encoder_layer.self_attn.linear_q_k_v(x1)
-            q_h, k_h, v = torch.chunk(qkv, 3, dim=-1)
+            q_h, k_h, v = torch.split(qkv, encoder_layer.size, dim=-1)
             q_h = q_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             k_h = k_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
             v_h = v.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
@@ -281,16 +281,12 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         self.head_dim_half = head_dim // 2
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.variance_epsilon = float(1e-6)
-        
-        scale_factor = float(head_dim ** -0.25)
-        for i in range(num_layers):
-            self.funasr_nano_decoder_main.model.layers._modules[f'{i}'].self_attn.q_norm.weight.data *= scale_factor
-            self.funasr_nano_decoder_main.model.layers._modules[f'{i}'].self_attn.k_norm.weight.data *= scale_factor
+        self.scale_factor = float(head_dim ** -0.25)
 
         position_ids = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(-1)
         idx_theta = (position_ids * self.funasr_nano_decoder_main.model.rotary_emb.inv_freq).unsqueeze(0).unsqueeze(0)
-        cos_rotary_pos_emb = torch.cos(idx_theta)
-        sin_rotary_pos_emb = torch.sin(idx_theta)
+        cos_rotary_pos_emb = torch.cos(idx_theta) * self.scale_factor
+        sin_rotary_pos_emb = torch.sin(idx_theta) * self.scale_factor
         self.cos_rotary_pos_emb = torch.cat((cos_rotary_pos_emb, cos_rotary_pos_emb), dim=-1).half()
         self.sin_rotary_pos_emb = torch.cat((sin_rotary_pos_emb, sin_rotary_pos_emb), dim=-1).half()
 
