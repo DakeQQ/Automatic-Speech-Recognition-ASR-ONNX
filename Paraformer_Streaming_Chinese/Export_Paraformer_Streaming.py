@@ -46,10 +46,12 @@ LOOK_BACK_C = LOOK_BACK_B // 2                              # The model paramete
 LOOK_BACK_A = 0                                             # The model parameter, edit it carefully. 5 for 8800 input audio length. 10 for 8800*2 ...
 
 
-def normalize_to_int16(audio):
-    max_val = np.max(np.abs(audio))
-    scaling_factor = 32767.0 / max_val if max_val > 0 else 1.0
-    return (audio * float(scaling_factor)).astype(np.int16)
+def normalizer(_audio, target_value=8192.0):
+    _audio = _audio.astype(np.float32)
+    rms = np.sqrt(np.mean((_audio * _audio), dtype=np.float32), dtype=np.float32)
+    _audio *= (target_value / (rms + 1e-7))
+    np.clip(_audio, -32768.0, 32767.0, out=_audio)
+    return _audio.astype(np.int16)
 
 
 class PARAFORMER_ENCODER(torch.nn.Module):
@@ -80,22 +82,12 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         self.pad_zeros_fsmn = torch.zeros((1, fsmn_hidden_size, self.encoder.encoders0._modules["0"].self_attn.pad_fn.padding[0]), dtype=torch.float32)
         positions = torch.arange(1, max_continue_streaming, dtype=torch.int32).unsqueeze(0)
         self.position_encoding = self.encoder.embed.encode(positions, feature_size).half()
-        num_head = self.encoder.encoders._modules["0"].self_attn.h
-        head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
-        factor = float(head_dim ** (-0.25))
+        factor = float(self.encoder.encoders._modules["0"].self_attn.d_k ** -0.25)
         total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders)
-        cif_hidden_size_2 = cif_hidden_size + cif_hidden_size
+        self.cif_hidden_size = cif_hidden_size
         for encoder_layer in total_encoders:
-            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size_2] *= factor
-            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size_2] *= factor
-            encoder_layer.self_attn.linear_q_w = encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            encoder_layer.self_attn.linear_q_b = encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size].view(num_head, 1, head_dim).contiguous()
-            encoder_layer.self_attn.linear_k_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size:cif_hidden_size_2].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            encoder_layer.self_attn.linear_k_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size:cif_hidden_size_2].view(num_head, 1, head_dim).contiguous()
-            encoder_layer.self_attn.linear_v_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size_2:].transpose(0, 1).unsqueeze(0).contiguous()
-            encoder_layer.self_attn.linear_v_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size_2:].view(1, 1, -1).contiguous()
-            encoder_layer.self_attn.linear_out_w = encoder_layer.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
-            encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:-self.cif_hidden_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:-self.cif_hidden_size] *= factor
 
     def forward(self, *all_inputs):
         previous_mel_features = all_inputs[-5]
@@ -122,10 +114,11 @@ class PARAFORMER_ENCODER(torch.nn.Module):
             if layer_idx > 0:
                 residual = x
             x_norm = encoder_layer.norm1(x)
-            q = torch.matmul(x_norm, encoder_layer.self_attn.linear_q_w) + encoder_layer.self_attn.linear_q_b
-            k = (torch.matmul(x_norm, encoder_layer.self_attn.linear_k_w) + encoder_layer.self_attn.linear_k_b).transpose(1, 2)
-            v = torch.matmul(x_norm, encoder_layer.self_attn.linear_v_w) + encoder_layer.self_attn.linear_v_b
-            v_h = torch.reshape(v, (-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k)).transpose(0, 1)
+            qkv = encoder_layer.self_attn.linear_q_k_v(x_norm)
+            q, k, v = torch.split(qkv, self.cif_hidden_size, dim=-1)
+            q = q.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
+            k = k.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
+            v_h = v.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             k = torch.cat([all_inputs[layer_idx], k], dim=2)
             v_h = torch.cat([all_inputs[layer_idx + self.cache_layer_num_en], v_h], dim=1)
             self.save_keys_en[layer_idx] = k[:, :, self.look_back_en:-self.look_back_C]
@@ -133,8 +126,8 @@ class PARAFORMER_ENCODER(torch.nn.Module):
             v_fsmn = torch.cat([self.pad_zeros_fsmn, v.transpose(1, 2), self.pad_zeros_fsmn], dim=-1)
             v_fsmn = encoder_layer.self_attn.fsmn_block(v_fsmn).transpose(1, 2)
             v_fsmn += v
-            x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v_h)
-            x = torch.matmul(x, encoder_layer.self_attn.linear_out_w).sum(dim=0, keepdim=True) + encoder_layer.self_attn.linear_out_b
+            x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, encoder_layer.self_attn.linear_out.in_features)
+            x = encoder_layer.self_attn.linear_out(x)
             x += v_fsmn
             if layer_idx > 0:
                 x += residual
@@ -199,22 +192,12 @@ class PARAFORMER_DECODER(torch.nn.Module):
         self.save_fsmn_de = [None] * cache_layer_num_de
         self.save_keys_de = [None] * cache_layer_num_de
         self.save_values_de = [None] * cache_layer_num_de
-        num_head = self.decoder.decoders._modules["0"].src_attn.h
-        head_dim = self.decoder.decoders._modules["0"].src_attn.d_k
-        factor = float(head_dim ** (-0.25))
+        factor = float(self.decoder.decoders._modules["0"].src_attn.d_k ** -0.25)
         for decoder_layer in self.decoder.decoders:
             decoder_layer.src_attn.linear_q.weight.data *= factor
             decoder_layer.src_attn.linear_q.bias.data *= factor
             decoder_layer.src_attn.linear_k_v.weight.data[:cif_hidden_size] *= factor
             decoder_layer.src_attn.linear_k_v.bias.data[:cif_hidden_size] *= factor
-            decoder_layer.src_attn.linear_q_w = decoder_layer.src_attn.linear_q.weight.data.view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            decoder_layer.src_attn.linear_q_b = decoder_layer.src_attn.linear_q.bias.data.view(num_head, 1, head_dim).contiguous()
-            decoder_layer.src_attn.linear_k_w = decoder_layer.src_attn.linear_k_v.weight.data[:cif_hidden_size].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            decoder_layer.src_attn.linear_k_b = decoder_layer.src_attn.linear_k_v.bias.data[:cif_hidden_size].view(num_head, 1, head_dim).contiguous()
-            decoder_layer.src_attn.linear_v_w = decoder_layer.src_attn.linear_k_v.weight.data[cif_hidden_size:].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            decoder_layer.src_attn.linear_v_b = decoder_layer.src_attn.linear_k_v.bias.data[cif_hidden_size:].view(num_head, 1, head_dim).contiguous()
-            decoder_layer.src_attn.linear_out_w = decoder_layer.src_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
-            decoder_layer.src_attn.linear_out_b = decoder_layer.src_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
 
     def forward(self, *all_inputs):
         encoder_out = all_inputs[-3]
@@ -231,15 +214,18 @@ class PARAFORMER_DECODER(torch.nn.Module):
             x = decoder_layer.self_attn.fsmn_block(x).transpose(1, 2)
             x += list_frame + residual
             residual = x
-            q = torch.matmul(decoder_layer.norm3(x), decoder_layer.src_attn.linear_q_w) + decoder_layer.src_attn.linear_q_b
-            k = (torch.matmul(encoder_out, decoder_layer.src_attn.linear_k_w) + decoder_layer.src_attn.linear_k_b).transpose(1, 2)
-            v = torch.matmul(encoder_out, decoder_layer.src_attn.linear_v_w) + decoder_layer.src_attn.linear_v_b
+            q = decoder_layer.src_attn.linear_q(decoder_layer.norm3(x))
+            k_v = decoder_layer.src_attn.linear_k_v(encoder_out)
+            k, v = torch.split(k_v, self.cif_hidden_size, dim=-1)
+            q = q.view(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).transpose(0, 1)
+            k = k.view(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).permute(1, 2, 0)
+            v = v.view(-1, decoder_layer.src_attn.h, decoder_layer.src_attn.d_k).transpose(0, 1)
             k = torch.cat([all_inputs[layer_idx + self.cache_layer_num_de], k], dim=2)
             v = torch.cat([all_inputs[layer_idx + self.cache_layer_num_de_2], v], dim=1)
             self.save_keys_de[layer_idx] = k[:, :, -self.look_back_de:]
             self.save_values_de[layer_idx] = v[:, -self.look_back_de:]
-            x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v)
-            x = torch.matmul(x, decoder_layer.src_attn.linear_out_w).sum(dim=0, keepdim=True) + decoder_layer.src_attn.linear_out_b
+            x = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v).transpose(0, 1).contiguous().view(1, -1, decoder_layer.src_attn.linear_out.in_features)
+            x = decoder_layer.src_attn.linear_out(x)
             list_frame = residual + x
         x = self.decoder.decoders3[0].norm1(list_frame)
         x = self.decoder.decoders3[0].feed_forward.w_2(self.decoder.decoders3[0].feed_forward.norm(self.decoder.decoders3[0].feed_forward.activation(self.decoder.decoders3[0].feed_forward.w_1(x))))
@@ -461,7 +447,7 @@ for i in range(amount_of_outputs_B):
 
 # Load the input audio
 audio = np.array(AudioSegment.from_file(test_audio).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.float32)
-audio = normalize_to_int16(audio)
+audio = normalizer(audio)
 audio_len = len(audio)
 audio = audio.reshape(1, 1, -1)
 if isinstance(shape_value_in, str):
@@ -559,4 +545,4 @@ while True:
     elif slice_end > aligned_len:
         input_feed_A, input_feed_B, slice_start, slice_end = Initialize()      # Ready for next input audio.
         break
-      
+    
