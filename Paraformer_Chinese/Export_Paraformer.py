@@ -13,7 +13,7 @@ from pydub import AudioSegment
 from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported in ONNX format.
 
 
-model_path = "/home/DakeQQ/Downloads/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1"      # The Paraformer-Chinese download path.
+model_path = "/home/iamj/Downloads/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1"        # The Paraformer-Chinese download path. Large Verion: [speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch] / Small Verion: [speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1]
 onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_ONNX/Paraformer.onnx"                                     # The exported onnx model path.
 vocab_path = "/home/DakeQQ/Downloads/Paraformer_ONNX/Vocab_Paraformer.txt"                                  # Save the vocab list.
 test_audio = "./zh.mp3"                                                                                     # The test audio list.
@@ -80,18 +80,9 @@ class PARAFORMER(torch.nn.Module):
         head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
         factor = float(head_dim ** (-0.25))
         total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders)
-        cif_hidden_size_2 = cif_hidden_size + cif_hidden_size
         for encoder_layer in total_encoders:
-            encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size_2] *= factor
-            encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size_2] *= factor
-            encoder_layer.self_attn.linear_q_w = encoder_layer.self_attn.linear_q_k_v.weight.data[:cif_hidden_size].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            encoder_layer.self_attn.linear_q_b = encoder_layer.self_attn.linear_q_k_v.bias.data[:cif_hidden_size].view(num_head, 1, head_dim).contiguous()
-            encoder_layer.self_attn.linear_k_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size:cif_hidden_size_2].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            encoder_layer.self_attn.linear_k_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size:cif_hidden_size_2].view(num_head, 1, head_dim).contiguous()
-            encoder_layer.self_attn.linear_v_w = encoder_layer.self_attn.linear_q_k_v.weight.data[cif_hidden_size_2:].transpose(0, 1).unsqueeze(0).contiguous()
-            encoder_layer.self_attn.linear_v_b = encoder_layer.self_attn.linear_q_k_v.bias.data[cif_hidden_size_2:].view(1, 1, -1).contiguous()
-            encoder_layer.self_attn.linear_out_w = encoder_layer.self_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
-            encoder_layer.self_attn.linear_out_b = encoder_layer.self_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:-cif_hidden_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:-cif_hidden_size] *= factor
 
         num_head = self.decoder.decoders._modules["0"].src_attn.h
         head_dim = self.decoder.decoders._modules["0"].src_attn.d_k
@@ -101,14 +92,6 @@ class PARAFORMER(torch.nn.Module):
             decoder_layer.src_attn.linear_q.bias.data *= factor
             decoder_layer.src_attn.linear_k_v.weight.data[:cif_hidden_size] *= factor
             decoder_layer.src_attn.linear_k_v.bias.data[:cif_hidden_size] *= factor
-            decoder_layer.src_attn.linear_q_w = decoder_layer.src_attn.linear_q.weight.data.view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            decoder_layer.src_attn.linear_q_b = decoder_layer.src_attn.linear_q.bias.data.view(num_head, 1, head_dim).contiguous()
-            decoder_layer.src_attn.linear_k_w = decoder_layer.src_attn.linear_k_v.weight.data[:cif_hidden_size].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            decoder_layer.src_attn.linear_k_b = decoder_layer.src_attn.linear_k_v.bias.data[:cif_hidden_size].view(num_head, 1, head_dim).contiguous()
-            decoder_layer.src_attn.linear_v_w = decoder_layer.src_attn.linear_k_v.weight.data[cif_hidden_size:].view(num_head, head_dim, -1).transpose(1, 2).contiguous()
-            decoder_layer.src_attn.linear_v_b = decoder_layer.src_attn.linear_k_v.bias.data[cif_hidden_size:].view(num_head, 1, head_dim).contiguous()
-            decoder_layer.src_attn.linear_out_w = decoder_layer.src_attn.linear_out.weight.data.view(-1, num_head, head_dim).permute(1, 2, 0).contiguous()
-            decoder_layer.src_attn.linear_out_b = decoder_layer.src_attn.linear_out.bias.data.view(1, 1, -1).contiguous()
 
     def forward(self, audio):
         audio = audio.float()
