@@ -6,7 +6,7 @@ from pydub import AudioSegment
 
 
 tokens_path = "/home/DakeQQ/Downloads/speech_paraformer_asr-en-16k-vocab4199-pytorch/tokens.json"   # The Paraformer download path.
-onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_Optimized/Paraformer.ort"                         # The exported onnx model path.
+onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_Optimized/Paraformer.onnx"                        # The exported onnx model path.
 test_audio = "./en.mp3"                                                                             # The test audio path.
 
 
