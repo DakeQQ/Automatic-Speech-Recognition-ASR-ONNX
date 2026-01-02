@@ -5,8 +5,8 @@ import onnxruntime
 from pydub import AudioSegment
 
 
-tokens_path = "/home/DakeQQ/Downloads/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1/tokens.json"   # The Paraformer download path.
-onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_Optimized/Paraformer.ort"                                           # The exported onnx model path.
+tokens_path = "/home/DakeQQ/Downloads/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1/tokens.json"   # The Paraformer download path. Large Verion: [speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/tokens.json] / Small Verion: [speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1/tokens.json]
+onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_Optimized/Paraformer.onnx"                                           # The exported onnx model path.
 test_audio = "./zh.mp3"                                                                                               # The test audio path.
 
 
