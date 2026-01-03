@@ -130,7 +130,7 @@ for model_name in model_names:
         quantize_dynamic(
             model_input=quant_utils.load_model_with_shape_infer(Path(model_path)),
             model_output=quanted_model_path,
-            per_channel=False,
+            per_channel=True,
             reduce_range=False,
             weight_type=QuantType.QUInt8,
             extra_options={'ActivationSymmetric': False,
