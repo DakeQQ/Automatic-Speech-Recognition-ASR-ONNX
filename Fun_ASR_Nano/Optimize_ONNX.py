@@ -27,10 +27,10 @@ model_names = [
     "FunASR_Nano_Encoder",              
     "FunASR_Nano_Decoder_Embed",
     "FunASR_Nano_Decoder_Main",
-    "FunASR_Nano_Decoder_Greedy_Search",
-    "FunASR_Nano_Decoder_First_Beam_Search",
-    "FunASR_Nano_Decoder_Second_Beam_Search",
-    "FunASR_Nano_Decoder_Reset_Penality"
+    "FunASR_Nano_Greedy_Search",
+    "FunASR_Nano_First_Beam_Search",
+    "FunASR_Nano_Second_Beam_Search",
+    "FunASR_Nano_Reset_Penality"
 ]
 
 # Settings
