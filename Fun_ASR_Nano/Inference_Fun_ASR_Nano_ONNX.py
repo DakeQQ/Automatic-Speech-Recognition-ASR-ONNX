@@ -402,7 +402,6 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
                     penality_reset_count_greedy += 1
                 else:
                     input_feed_D[in_name_D[1]] = all_outputs_D[1]
-                input_feed_D[in_name_D[0]] = all_outputs_D[0]
                 input_feed_C.update(zip(in_name_C[:num_keys_values], all_outputs_C))
                 input_feed_B[in_name_B] = all_outputs_D[0]
                 save_id_greedy[num_decode] = max_logits_idx
