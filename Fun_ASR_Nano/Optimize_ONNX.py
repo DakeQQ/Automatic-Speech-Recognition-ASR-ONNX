@@ -192,7 +192,7 @@ for model_name in model_names:
         print("Applying transformers.optimizer...")
         model = optimize_model(quanted_model_path,
                                use_gpu=False,
-                               opt_level=1,
+                               opt_level=1 if use_openvino or ("Encoder" in model_path) else 2,
                                num_heads=8,
                                hidden_size=1024,
                                verbose=False,
