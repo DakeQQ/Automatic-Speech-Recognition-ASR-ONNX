@@ -925,7 +925,6 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
                     input_feed_F[in_name_F[num_keys_values_plus_1]] = all_outputs_F[num_keys_values_plus_1]
                     input_feed_F[in_name_F[num_keys_values_plus_2]] = all_outputs_F[num_keys_values_plus_2]
                     input_feed_F[in_name_F[num_keys_values_plus_3]] = all_outputs_F[num_keys_values_plus_3]
-                input_feed_C[in_name_C[num_keys_values]] = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)[0]
             else:
                 input_feed_D[in_name_D[0]] = all_outputs_C[num_keys_values]
                 all_outputs_D = ort_session_D.run_with_ort_values(out_name_D, input_feed_D)
@@ -945,8 +944,8 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
                 input_feed_D[in_name_D[0]] = all_outputs_D[0]
                 input_feed_C.update(zip(in_name_C[:num_keys_values], all_outputs_C))
                 input_feed_B[in_name_B] = all_outputs_D[0]
-                input_feed_C[in_name_C[num_keys_values]] = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)[0]
                 save_id_greedy[num_decode] = max_logits_idx
+            input_feed_C[in_name_C[num_keys_values]] = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)[0]
             input_feed_C[in_name_C[num_keys_values_plus_1]] = all_outputs_C[num_keys_values_plus_1]
             if num_decode < 1:
                 input_feed_C[in_name_C[num_keys_values_plus_2]] = init_ids_len_1
