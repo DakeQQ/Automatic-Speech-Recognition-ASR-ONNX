@@ -13,7 +13,7 @@ from pydub import AudioSegment
 from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported in ONNX format.
 
 
-model_path = "/home/iamj/Downloads/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1"        # The Paraformer-Chinese download path. Large Verion: [speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch] / Small Verion: [speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1]
+model_path = "/home/DakeQQ/Downloads/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1"      # The Paraformer-Chinese download path. Large Verion: [speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch] / Small Verion: [speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1]
 onnx_model_A = "/home/DakeQQ/Downloads/Paraformer_ONNX/Paraformer.onnx"                                     # The exported onnx model path.
 vocab_path = "/home/DakeQQ/Downloads/Paraformer_ONNX/Vocab_Paraformer.txt"                                  # Save the vocab list.
 test_audio = "./zh.mp3"                                                                                     # The test audio list.
