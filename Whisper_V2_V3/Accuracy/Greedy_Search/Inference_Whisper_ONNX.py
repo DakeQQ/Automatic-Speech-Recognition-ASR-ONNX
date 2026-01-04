@@ -63,7 +63,7 @@ elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
         {
             'device_id': DEVICE_ID,
             'performance_preference': 'high_performance',  # [high_performance, default, minimum_power]
-            'device_filter': 'npu'                         # [any, npu, gpu]
+            'device_filter': 'any'                         # [any, npu, gpu]
         }
     ]
     device_type = 'dml'
@@ -320,7 +320,6 @@ num_layers = (amount_of_outputs_B - 2) // 2
 num_keys_values = num_layers + num_layers
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
-num_keys_values_plus_3 = num_keys_values + 3
 num_keys_values2_plus_2 = num_keys_values_plus_2 + num_keys_values
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
@@ -368,8 +367,8 @@ for language_idx, test in enumerate(test_audio):
     history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), device_type, DEVICE_ID)
     attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
     attention_mask_0 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
-    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_B._inputs_meta[0].shape[1], 0), dtype=model_dtype), device_type, DEVICE_ID)
-    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=model_dtype), device_type, DEVICE_ID)
+    past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[0].shape[0], ort_session_B._inputs_meta[0].shape[1], 0), dtype=model_dtype), device_type, DEVICE_ID)
+    past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((ort_session_B._inputs_meta[num_layers].shape[0], 0, ort_session_B._inputs_meta[num_layers].shape[2]), dtype=model_dtype), device_type, DEVICE_ID)
 
     input_feed_B = {
         in_name_B[num_keys_values]: input_ids,
