@@ -7,22 +7,23 @@ from onnxruntime.transformers.optimizer import optimize_model
 from onnxruntime.quantization import QuantType, quantize_dynamic
 from onnxslim import slim
 
+
 # Path Setting
 original_folder_path = "/home/DakeQQ/Downloads/SenseVoice_ONNX"                           # The fp32 saved folder.
 optimized_folder_path = "/home/DakeQQ/Downloads/SenseVoice_Optimized"                     # The optimized folder.
-model_path = os.path.join(original_folder_path, "SenseVoiceSmallPlus.onnx")               # The original fp32 model name.
-optimized_model_path = os.path.join(optimized_folder_path, "SenseVoiceSmallPlus.onnx")    # The optimized model name.
-do_quantize = False                                                                       # Use dynamic quant the model to int8 format.
-use_gpu_fp16 = False                                                                      # If true, the transformers.optimizer will remain the FP16 processes.
+model_path = os.path.join(original_folder_path, "SenseVoiceSmall.onnx")                   # The original fp32 model name.
+optimized_model_path = os.path.join(optimized_folder_path, "SenseVoiceSmall.onnx")        # The optimized model name.
+use_int8 = True                                                                           # Use dynamic quant the model to int8 format.
+use_fp16 = False                                                                          
+use_gpu = False
 provider = 'CPUExecutionProvider'                                                         # ['CPUExecutionProvider', 'CUDAExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider']
 
-
 # ONNX Model Optimizer
-if do_quantize:
+if use_int8:
     quantize_dynamic(
         model_input=model_path,
         model_output=optimized_model_path,
-        per_channel=True,                                  # True for model accuracy but cost a lot of time during quanting process.
+        per_channel=True,                                   # True for model accuracy but cost a lot of time during quanting process.
         reduce_range=False,                                 # True for some x86_64 platform.
         weight_type=QuantType.QUInt8,                       # It is recommended using uint8 + Symmetric False
         extra_options={'ActivationSymmetric': False,        # True for inference speed. False may keep more accuracy.
@@ -38,15 +39,15 @@ if do_quantize:
 
 # transformers.optimizer
 # Use this function for float16 quantization will get errors.
-model = optimize_model(optimized_model_path,
+model = optimize_model(optimized_model_path if do_quantize else model_path,
                        use_gpu=False,        # Set to True because the model uses float16.
-                       opt_level=2,
-                       num_heads=4,         # The SenseVoiceSmall model parameter.
-                       hidden_size=512,     # The SenseVoiceSmall model parameter.
+                       opt_level=1 if use_gpu else 2,
+                       num_heads=4,          # The SenseVoiceSmall model parameter.
+                       hidden_size=512,      # The SenseVoiceSmall model parameter.
                        provider=provider,
                        verbose=False,
                        model_type='bert')
-if use_gpu_fp16:
+if use_fp16:
     model.convert_float_to_float16(
         keep_io_types=False,
         force_fp16_initializers=True,
@@ -62,7 +63,7 @@ gc.collect()
 slim(
     model=optimized_model_path,
     output_model=optimized_model_path,
-    no_shape_infer=False,                         # False for more optimize but may get errors.
+    no_shape_infer=False,                        # False for more optimize but may get errors.
     skip_fusion_patterns=False,
     no_constant_folding=False,
     save_as_external_data=False,
