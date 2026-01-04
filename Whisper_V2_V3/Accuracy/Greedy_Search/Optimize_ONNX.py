@@ -30,8 +30,8 @@ quant_int8 = True                        # Quant the model to int8 format.
 quant_float16 = False                    # Quant the model to float16 format.
 use_openvino = False                     # Set true for OpenVINO optimization.
 use_low_memory_mode_in_Android = False   # If True, save the model into 2 parts.
-upgrade_opset = 17                       # Optional process. Set 0 for close.
-target_platform = "arm"                  # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
+upgrade_opset = 0                        # Optional process. Set 0 for close.
+target_platform = "amd64"                # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
 
 
 # --- Main Processing Loop ---
@@ -208,3 +208,4 @@ for file_path in files_to_delete:
         print(f"Error deleting {file_path}: {e}")
 
 print("--- All models processed successfully! ---")
+
