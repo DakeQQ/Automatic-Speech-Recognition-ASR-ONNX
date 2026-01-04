@@ -14,8 +14,9 @@ original_folder_path = "/home/DakeQQ/Downloads/Paraformer_ONNX"                 
 optimized_folder_path = "/home/DakeQQ/Downloads/Paraformer_Optimized"                   # The optimized folder.
 model_path = os.path.join(original_folder_path, "Paraformer.onnx")                      # The original fp32 model name.
 optimized_model_path = os.path.join(optimized_folder_path, "Paraformer.onnx")           # The optimized model name.
-do_quantize = True                                                                      # Use dynamic quant the model to int8 format.
-use_gpu_fp16 = False                                                                    # If true, the transformers.optimizer will remain the FP16 processes.
+use_int8 = True                                                                         # Use dynamic quant the model to int8 format.
+use_gpu = False                                                                         
+use_fp16 = False
 provider = 'CPUExecutionProvider'                                                       # ['CPUExecutionProvider', 'CUDAExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider']
 target_platform = "amd64"                                                               # ['arm', 'amd64']; The 'amd64' means x86_64 desktop, not means the AMD chip.
 
@@ -32,7 +33,7 @@ slim(
 )
 
 
-if do_quantize:
+if use_int8:
     quantize_dynamic(
         model_input=optimized_model_path,
         model_output=optimized_model_path,
@@ -61,13 +62,13 @@ else:
 # transformers.optimizer
 model = optimize_model(optimized_model_path,
                        use_gpu=False,                                
-                       opt_level=2,
+                       opt_level=1 if use_gpu else 2,
                        num_heads=4,                                   # The Paraformer model parameter.
                        hidden_size=512 if is_large_model else 320,    # The Paraformer model parameter.
                        provider=provider,
                        verbose=False,
                        model_type='bert')
-if use_gpu_fp16:
+if use_fp16:
     model.convert_float_to_float16(
         keep_io_types=False,
         force_fp16_initializers=True,
