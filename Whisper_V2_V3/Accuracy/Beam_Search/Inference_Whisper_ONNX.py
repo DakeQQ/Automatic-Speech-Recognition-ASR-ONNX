@@ -74,7 +74,7 @@ elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
         {
             'device_id': DEVICE_ID,
             'performance_preference': 'high_performance',  # [high_performance, default, minimum_power]
-            'device_filter': 'npu'                         # [any, npu, gpu]
+            'device_filter': 'any'                         # [any, npu, gpu]
         }
     ]
     device_type = 'dml'
@@ -331,7 +331,6 @@ num_keys_values = num_layers + num_layers
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
 num_keys_values_plus_3 = num_keys_values + 3
-num_keys_values2_plus_2 = num_keys_values_plus_2 + num_keys_values
 vocab_size = ort_session_B._outputs_meta[num_keys_values].shape[1]
 topK = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([TOP_K], dtype=np.int64), device_type, DEVICE_ID)
 beam_size = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([BEAM_SIZE], dtype=np.int64), device_type, DEVICE_ID)
@@ -386,7 +385,7 @@ else:
     input_feed_C = {in_name_C[2]: penality_value}
 
 if USE_BEAM_SEARCH:
-    penality_reset_count_beam_init = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32), device_type, DEVICE_ID)
+    penality_reset_count_beam_init = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32),  device_type, DEVICE_ID)
 else:
     save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
 
@@ -441,13 +440,13 @@ for language_idx, test in enumerate(test_audio):
     history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), device_type, DEVICE_ID)
     attention_mask_0 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
     attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
-
-  if device_type != 'dml':
-        past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1],  0), dtype=model_dtype), device_type, DEVICE_ID)
-        past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, 0, ort_session_B._outputs_meta[num_layers].shape[2]), dtype=model_dtype), device_type, DEVICE_ID)
+    layer_indices = np.arange(num_keys_values_plus_2, num_keys_values_plus_2 + num_keys_values, dtype=np.int32)
+    if device_type != 'dml':
+        past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1], ort_session_B._outputs_meta[0].shape[2],  0), dtype=model_dtype), device_type, DEVICE_ID)
+        past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1], 0, ort_session_B._outputs_meta[num_layers].shape[3]), dtype=model_dtype), device_type, DEVICE_ID)
     else:
-        past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1], 0), dtype=model_dtype), 'cpu', DEVICE_ID)
-        past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, 0, ort_session_B._outputs_meta[num_layers].shape[2]), dtype=model_dtype), 'cpu', DEVICE_ID)
+        past_keys_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1], ort_session_B._outputs_meta[0].shape[2], 0), dtype=model_dtype), 'cpu', DEVICE_ID)
+        past_values_B = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((batch_size, ort_session_B._outputs_meta[0].shape[1], 0, ort_session_B._outputs_meta[num_layers].shape[3]), dtype=model_dtype), 'cpu', DEVICE_ID)
 
     input_feed_B = {
         in_name_B[num_keys_values]: input_ids,
@@ -479,7 +478,8 @@ for language_idx, test in enumerate(test_audio):
     start_time = time.time()
     while slice_end <= aligned_len:
         all_outputs_A = ort_session_A.run_with_ort_values(out_name_A, {in_name_A0: onnxruntime.OrtValue.ortvalue_from_numpy(audio[:, :, slice_start: slice_end], device_type, DEVICE_ID)})
-        input_feed_B.update(zip(in_name_B[num_keys_values_plus_2: num_keys_values2_plus_2], all_outputs_A))
+        for i in range(num_keys_values):
+            input_feed_B[in_name_B[layer_indices[i]]] = all_outputs_A[i]
         while num_decode < generate_limit:
             all_outputs_B = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)
             if USE_BEAM_SEARCH:
