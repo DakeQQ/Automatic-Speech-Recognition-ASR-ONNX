@@ -4,8 +4,8 @@ import onnxruntime
 from pydub import AudioSegment
 from transformers import AutoTokenizer
 
-tokenizer_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                                       # Set the tokenizer path.
-onnx_model_A = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Encoder.onnx'                      # The exported onnx model path.
+tokenizer_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                                  # Set the tokenizer path.
+onnx_model_A = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Encoder.onnx'                 # The exported onnx model path.
 onnx_model_B = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Embed.onnx'
 onnx_model_C = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Main.onnx'
 onnx_model_D = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Greedy_Search.onnx'
@@ -405,8 +405,8 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
                 input_feed_C.update(zip(in_name_C[:num_keys_values], all_outputs_C))
                 input_feed_B[in_name_B] = all_outputs_D[0]
                 save_id_greedy[num_decode] = max_logits_idx
-          input_feed_C[in_name_C[num_keys_values]] = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)[0]  
-          input_feed_C[in_name_C[num_keys_values_plus_1]] = all_outputs_C[num_keys_values_plus_1]
+            input_feed_C[in_name_C[num_keys_values]] = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)[0]
+            input_feed_C[in_name_C[num_keys_values_plus_1]] = all_outputs_C[num_keys_values_plus_1]
             if num_decode < 1:
                 input_feed_C[in_name_C[num_keys_values_plus_2]] = init_ids_len_1
                 input_feed_C[in_name_C[num_keys_values_plus_3]] = init_attention_mask_0
@@ -417,3 +417,4 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
     print(asr_result, end="", flush=True)
     print(f"\n\nRTF: {((time.time() - rtf_time) / (audio_len / SAMPLE_RATE)):.3f}")
     print("----------------------------------------------------------------------------------------------------------")
+  
