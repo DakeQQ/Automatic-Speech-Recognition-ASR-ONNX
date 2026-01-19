@@ -156,7 +156,7 @@ out_name_B = [out_name_B[0].name]
 
 ort_session_C = onnxruntime.InferenceSession(onnx_model_C, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
 print(f"\nUsable Providers: {ort_session_C.get_providers()}")
-model_dtype = ort_session_C._inputs_meta[0].type
+model_dtype = ort_session_C._inputs_meta[-2].type
 if 'float16' in model_dtype:
     model_dtype = np.float16
 else:
@@ -254,11 +254,11 @@ init_history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=
 init_attention_mask_0 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
 init_attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
 if device_type != 'dml':
-    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=model_dtype), device_type, DEVICE_ID)
-    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=model_dtype), device_type, DEVICE_ID)
+    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=np.float16), device_type, DEVICE_ID)
+    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=np.float16), device_type, DEVICE_ID)
 else:
-    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=model_dtype), 'cpu', 0)
-    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=model_dtype), 'cpu', 0)
+    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=np.float16), 'cpu', 0)
+    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=np.float16), 'cpu', 0)
 init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, vocab_size), dtype=model_dtype), device_type, DEVICE_ID)
 init_batch_size_greedy = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), device_type, DEVICE_ID)
 init_save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 0), dtype=np.int32), device_type, DEVICE_ID)
@@ -389,7 +389,7 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
             else:
                 input_feed_D[in_name_D[0]] = all_outputs_C[num_keys_values]
                 all_outputs_D = ort_session_D.run_with_ort_values(out_name_D, input_feed_D)
-                max_logits_idx = all_outputs_D[0].numpy()[0, 0]
+                max_logits_idx = all_outputs_D[0].numpy().reshape(-1)[0]
                 if max_logits_idx in STOP_TOKEN:
                     asr_result += tokenizer.decode(save_id_greedy[:num_decode], skip_special_tokens=True)
                     break

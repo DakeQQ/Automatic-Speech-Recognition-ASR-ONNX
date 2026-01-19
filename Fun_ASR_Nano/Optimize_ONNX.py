@@ -24,7 +24,7 @@ os.makedirs(quanted_folder_path, exist_ok=True)
 
 # List of models to process
 model_names = [
-    "FunASR_Nano_Encoder",              
+    "FunASR_Nano_Encoder",
     "FunASR_Nano_Decoder_Embed",
     "FunASR_Nano_Decoder_Main",
     "FunASR_Nano_Greedy_Search",
@@ -184,7 +184,7 @@ for model_name in model_names:
                 no_constant_folding=False,
                 save_as_external_data=use_low_memory_mode_in_Android,
                 verbose=False,
-                dtype='fp16' if quant_float16 and "First_Beam_Search" in model_path else 'fp32'
+                dtype='fp16' if quant_float16 and "First_Beam_Search" in model_path else None
             )
 
     # transformers.optimizer

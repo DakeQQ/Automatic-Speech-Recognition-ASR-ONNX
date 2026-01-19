@@ -78,6 +78,16 @@ def normalizer(_audio, target_value=8192.0):
     return _audio.astype(np.int16)
 
 
+class ARGMAX(torch.nn.Module):
+    def __init__(self):
+        super(ARGMAX, self).__init__()
+        pass
+
+    def forward(self, logits):
+        max_logits_idx = torch.argmax(logits, dim=-1, keepdim=True)
+        return max_logits_idx.int()
+
+
 class GREEDY_SEARCH(torch.nn.Module):
     def __init__(self):
         super(GREEDY_SEARCH, self).__init__()
@@ -185,7 +195,6 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             encoder_layer.self_attn.linear_q_k_v.weight.data[:-in_size] *= factor
             encoder_layer.self_attn.linear_q_k_v.bias.data[:-in_size] *= factor
 
-        num_head = self.funasr_nano.audio_adaptor.blocks._modules["0"].self_attn.h
         head_dim = self.funasr_nano.audio_adaptor.blocks._modules["0"].self_attn.d_k
         factor = float(head_dim ** (-0.25))
         for block in self.funasr_nano.audio_adaptor.blocks:
@@ -193,6 +202,17 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             block.self_attn.linear_q.bias.data *= factor
             block.self_attn.linear_k.weight.data *= factor
             block.self_attn.linear_k.bias.data *= factor
+            
+            # Fusing q, k, v
+            in_features = block.self_attn.linear_q.in_features
+            out_features = block.self_attn.linear_q.out_features + block.self_attn.linear_k.out_features + block.self_attn.linear_v.out_features
+            block.self_attn.linear_q_k_v = torch.nn.Linear(in_features, out_features, bias=True)
+            block.self_attn.linear_q_k_v.weight.data = torch.cat([block.self_attn.linear_q.weight.data, block.self_attn.linear_k.weight.data, block.self_attn.linear_v.weight.data], dim=0)
+            block.self_attn.linear_q_k_v.bias.data = torch.cat([block.self_attn.linear_q.bias.data, block.self_attn.linear_k.bias.data, block.self_attn.linear_v.bias.data], dim=0)
+            block.self_attn.size = out_features // 3
+            del block.self_attn.linear_q
+            del block.self_attn.linear_k
+            del block.self_attn.linear_v
 
         head_ids = _tokenizer.encode("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n", return_tensors="pt")
         tail_ids = _tokenizer.encode("<|im_end|>\n<|im_start|>assistant\n", return_tensors="pt")
@@ -223,7 +243,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             k_h = k_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
             v_h = v.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
-            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, encoder_layer.self_attn.linear_out.in_features)
+            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
             attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             if encoder_layer.in_size == encoder_layer.size:
                 x += attn
@@ -239,7 +259,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             k_h = k_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
             v_h = v.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
-            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).contiguous().view(1, -1, encoder_layer.self_attn.linear_out.in_features)
+            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
             attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             x += attn
             x = x + encoder_layer.feed_forward(encoder_layer.norm2(x))
@@ -249,10 +269,12 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         x = self.funasr_nano.audio_adaptor.linear2(x)
         for block in self.funasr_nano.audio_adaptor.blocks:
             x1 = block.norm1(x)
-            q = block.self_attn.linear_q(x1).view(-1, block.self_attn.h, block.self_attn.d_k).transpose(0, 1)
-            k = block.self_attn.linear_k(x1).view(-1, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0)
-            v = block.self_attn.linear_v(x1).view(-1, block.self_attn.h, block.self_attn.d_k).transpose(0, 1)
-            attn = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v).transpose(0, 1).contiguous().view(1, -1, block.self_attn.linear_out.in_features)
+            qkv = block.self_attn.linear_q_k_v(x1)
+            q, k, v = torch.split(qkv, block.self_attn.size, dim=-1)
+            q = q.view(-1, block.self_attn.h, block.self_attn.d_k).transpose(0, 1)
+            k = k.view(-1, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0)
+            v = v.view(-1, block.self_attn.h, block.self_attn.d_k).transpose(0, 1)
+            attn = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v).transpose(0, 1).reshape(1, -1, block.self_attn.linear_out.in_features)
             attn = block.self_attn.linear_out(attn)
             x += attn
             x = x + block.feed_forward(block.norm2(x))
@@ -280,7 +302,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         self.num_key_value_heads = num_key_value_heads
         self.head_dim_half = head_dim // 2
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.variance_epsilon = float(1e-6)
+        self.variance_epsilon = torch.tensor([1e-6], dtype=torch.float32)
         self.scale_factor = float(head_dim ** -0.25)
 
         position_ids = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(-1)
@@ -293,6 +315,53 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         self.save_key = [None] * num_layers
         self.save_value = [None] * num_layers
         self.attention_mask = (1 - torch.tril(torch.ones([1, 1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
+
+        # --- Fuse / Rearrange weights ---
+        with torch.no_grad():
+            # 1) Fuse q/k/v into qkv & Fuse input rms norm
+            for layer in self.funasr_nano_decoder_main.model.layers:
+                q_proj = layer.self_attn.q_proj
+                k_proj = layer.self_attn.k_proj
+                v_proj = layer.self_attn.v_proj
+                
+                layer.self_attn.q_out_features = int(q_proj.out_features)
+                layer.self_attn.k_out_features = int(k_proj.out_features)
+                layer.self_attn.v_out_features = int(v_proj.out_features)
+
+                in_features = int(q_proj.in_features)
+                out_features = int(q_proj.out_features + k_proj.out_features + v_proj.out_features)
+                has_bias = (q_proj.bias is not None) or (k_proj.bias is not None) or (v_proj.bias is not None)
+                
+                qkv = torch.nn.Linear(in_features, out_features, bias=has_bias)
+                qkv.weight.copy_(torch.cat([q_proj.weight, k_proj.weight, v_proj.weight], dim=0))
+                
+                if has_bias:
+                    dtype = qkv.weight.dtype
+                    qb = q_proj.bias if q_proj.bias is not None else torch.zeros(q_proj.out_features, dtype=dtype)
+                    kb = k_proj.bias if k_proj.bias is not None else torch.zeros(k_proj.out_features, dtype=dtype)
+                    vb = v_proj.bias if v_proj.bias is not None else torch.zeros(v_proj.out_features, dtype=dtype)
+                    qkv.bias.copy_(torch.cat([qb, kb, vb], dim=0))
+
+                # Fuse input rms norm weight into qkv input columns
+                w = layer.input_layernorm.weight.unsqueeze(0)
+                qkv.weight.mul_(w)
+                layer.self_attn.qkv = qkv
+                
+                del layer.self_attn.q_proj
+                del layer.self_attn.k_proj
+                del layer.self_attn.v_proj
+                del layer.input_layernorm
+
+                # 2) Fuse post-attention rms norm weight into MLP gate/up input columns
+                w = layer.post_attention_layernorm.weight.unsqueeze(0)
+                layer.mlp.gate_proj.weight.mul_(w)
+                layer.mlp.up_proj.weight.mul_(w)
+                del layer.post_attention_layernorm
+
+            # 3) Fuse final norm weight into lm_head
+            w = self.funasr_nano_decoder_main.model.norm.weight.unsqueeze(0)
+            self.funasr_nano_decoder_main.lm_head.weight.mul_(w)
+            del self.funasr_nano_decoder_main.model.norm
 
     def rotate_half(self, x, head_dim_half, dim):
         x1, x2 = torch.split(x, [head_dim_half, head_dim_half], dim=dim)
@@ -316,29 +385,31 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         attention_mask = (self.attention_mask[..., :ids_len, :kv_seq_len] * all_inputs[-1]).float()
         batch_size = hidden_states.shape[0].unsqueeze(0)
         for i, layer in enumerate(self.funasr_nano_decoder_main.model.layers):
-            hidden_states_norm = layer.input_layernorm.weight * (hidden_states / torch.sqrt(hidden_states.pow(2).mean(-1, keepdim=True) + self.variance_epsilon))
-            q = layer.self_attn.q_proj(hidden_states_norm).view(batch_size, -1, self.num_heads, self.head_dim)
-            k = layer.self_attn.k_proj(hidden_states_norm).view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim)
-            v = layer.self_attn.v_proj(hidden_states_norm).view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).transpose(1, 3)
-            q = (layer.self_attn.q_norm.weight * (q / torch.sqrt(q.pow(2).mean(-1, keepdim=True) + self.variance_epsilon))).transpose(1, 2)
-            k = (layer.self_attn.k_norm.weight * (k / torch.sqrt(k.pow(2).mean(-1, keepdim=True) + self.variance_epsilon))).permute(0, 3, 2, 4, 1)
+            hidden_states_norm = hidden_states * torch.rsqrt(hidden_states.square().mean(-1, keepdim=True) + self.variance_epsilon)
+            qkv = layer.self_attn.qkv(hidden_states_norm)
+            q, k, v = torch.split(qkv, [layer.self_attn.q_out_features, layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
+            q = q.view(batch_size, -1, self.num_heads, self.head_dim)
+            k = k.view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim)
+            v = v.half().view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).transpose(1, 3)
+            q = layer.self_attn.q_norm(q).transpose(1, 2)
+            k = layer.self_attn.k_norm(k).permute(0, 3, 2, 4, 1)
             q = q * rotary_pos_emb_cos_q + self.rotate_half(q, self.head_dim_half, -1) * rotary_pos_emb_sin_q
             k = k * rotary_pos_emb_cos_k + self.rotate_half(k, self.head_dim_half, -2) * rotary_pos_emb_sin_k
-            k = torch.cat((all_inputs[i], k), dim=-1)
+            k = torch.cat((all_inputs[i], k.half()), dim=-1)
             v = torch.cat((all_inputs[i + self.num_layers], v), dim=-2)
             self.save_key[i] = k
             self.save_value[i] = v
-            k = self.repeat_k(k, self.num_key_value_groups, self.head_dim, self.num_heads, batch_size)
-            v = self.repeat_v(v, self.num_key_value_groups, self.head_dim, self.num_heads, batch_size)
+            k = self.repeat_k(k.float(), self.num_key_value_groups, self.head_dim, self.num_heads, batch_size)
+            v = self.repeat_v(v.float(), self.num_key_value_groups, self.head_dim, self.num_heads, batch_size)
             attn = torch.nn.functional.softmax(torch.matmul(q, k) + attention_mask, dim=-1, dtype=torch.float32)
-            attn_out = layer.self_attn.o_proj(torch.matmul(attn, v).transpose(1, 2).contiguous().view(batch_size, -1, layer.self_attn.o_proj.in_features))
+            attn_out = layer.self_attn.o_proj(torch.matmul(attn, v).transpose(1, 2).reshape(batch_size, -1, layer.self_attn.o_proj.in_features))
             hidden_states += attn_out
             residual = hidden_states
-            hidden_states = layer.post_attention_layernorm.weight * (hidden_states / torch.sqrt(hidden_states.pow(2).mean(-1, keepdim=True) + self.variance_epsilon))
-            hidden_states = layer.mlp.down_proj(layer.mlp.act_fn(layer.mlp.gate_proj(hidden_states)) * layer.mlp.up_proj(hidden_states))
+            hidden_states = hidden_states * torch.rsqrt(hidden_states.square().mean(-1, keepdim=True) + self.variance_epsilon)
+            hidden_states = layer.mlp(hidden_states)
             hidden_states += residual
         hidden_states = hidden_states[:, -1]
-        hidden_states = self.funasr_nano_decoder_main.model.norm.weight * (hidden_states / torch.sqrt(hidden_states.pow(2).mean(-1, keepdim=True) + self.variance_epsilon))
+        hidden_states = hidden_states * torch.rsqrt(hidden_states.square().mean(-1, keepdim=True) + self.variance_epsilon)
         logits = self.funasr_nano_decoder_main.lm_head(hidden_states)
         return *self.save_key, *self.save_value, logits, kv_seq_len
 
@@ -361,7 +432,7 @@ with torch.inference_mode():
     vocab_size = model.model.llm.model.vocab_size
     hidden_size = model.model.llm.model.embed_tokens.embedding_dim
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    
+
     funasr_nano_encoder = FUNASR_NANO_ENCODER(model.model, custom_stft, NFFT_STFT, MAX_STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, tokenizer)
     audio = torch.ones((1, 1, MAX_INPUT_AUDIO_LENGTH), dtype=torch.int16)
     query_embed = torch.ones((1, 10, hidden_size), dtype=torch.float32)  # "10" is just a dummy value.
@@ -386,13 +457,13 @@ with torch.inference_mode():
     gc.collect()
 
     batch_size = 3
-    ids_len = torch.tensor([10], dtype=torch.long)      
+    ids_len = torch.tensor([10], dtype=torch.long)
     history_len = torch.tensor([0], dtype=torch.long)
     input_ids = torch.ones((1, ids_len), dtype=torch.int32)
     hidden_states = torch.ones((batch_size, ids_len, hidden_size), dtype=torch.float32)
     attention_mask = torch.tensor([1], dtype=torch.int8)
-    past_keys = torch.zeros((batch_size, num_key_value_heads, 1, head_dim, 0), dtype=torch.float32)
-    past_values = torch.zeros((batch_size, num_key_value_heads, 1, 0, head_dim), dtype=torch.float32)
+    past_keys = torch.zeros((batch_size, num_key_value_heads, 1, head_dim, 0), dtype=torch.float16)
+    past_values = torch.zeros((batch_size, num_key_value_heads, 1, 0, head_dim), dtype=torch.float16)
     kv_seq_len = history_len + ids_len
 
     model_B = FUNASR_NANO_DECODER_EMBED(model.model)
@@ -412,7 +483,7 @@ with torch.inference_mode():
     )
     del model_B
     del input_ids
-    
+
     # Prepare input and output names
     all_inputs = []
     input_names = []
@@ -475,7 +546,7 @@ with torch.inference_mode():
     del attention_mask
     del kv_seq_len
     gc.collect()
-    
+
     greedy = GREEDY_SEARCH()
     beam_size = torch.tensor([BEAM_SIZE], dtype=torch.int64)
     repeat_penality = torch.ones((beam_size, vocab_size), dtype=torch.float32)
@@ -695,7 +766,7 @@ out_name_B = [out_name_B[0].name]
 
 ort_session_C = onnxruntime.InferenceSession(onnx_model_C, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
 print(f"\nUsable Providers: {ort_session_C.get_providers()}")
-model_dtype = ort_session_C._inputs_meta[0].type
+model_dtype = ort_session_C._inputs_meta[-2].type
 if 'float16' in model_dtype:
     model_dtype = np.float16
 else:
@@ -748,7 +819,7 @@ if USE_BEAM_SEARCH:
     amount_of_outputs_F = len(out_name_F)
     in_name_F = [in_name_F[i].name for i in range(len(in_name_F))]
     out_name_F = [out_name_F[i].name for i in range(amount_of_outputs_F)]
-    
+
     ort_session_G = onnxruntime.InferenceSession(onnx_model_G, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
     in_name_G = ort_session_G.get_inputs()
     out_name_G = ort_session_G.get_outputs()
@@ -793,11 +864,11 @@ init_history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=
 init_attention_mask_0 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
 init_attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
 if device_type != 'dml':
-    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=model_dtype), device_type, DEVICE_ID)
-    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=model_dtype), device_type, DEVICE_ID)
+    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=np.float16), device_type, DEVICE_ID)
+    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=np.float16), device_type, DEVICE_ID)
 else:
-    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=model_dtype), 'cpu', 0)
-    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=model_dtype), 'cpu', 0)
+    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=np.float16), 'cpu', 0)
+    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=np.float16), 'cpu', 0)
 init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, vocab_size), dtype=model_dtype), device_type, DEVICE_ID)
 init_batch_size_greedy = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), device_type, DEVICE_ID)
 init_save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 0), dtype=np.int32), device_type, DEVICE_ID)
