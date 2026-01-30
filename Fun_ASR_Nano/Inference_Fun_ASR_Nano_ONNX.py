@@ -4,15 +4,15 @@ import onnxruntime
 from pydub import AudioSegment
 from transformers import AutoTokenizer
 
-tokenizer_path = r'/home/DakeQQ/Fun-ASR-Nano-2512/Qwen3-0.6B'                                  # Set the tokenizer path.
-onnx_model_A = r'/home/DakeQQ/Fun_ASR_Nano_Optimized/FunASR_Nano_Encoder.onnx'                 # The exported onnx model path.
-onnx_model_B = r'/home/DakeQQ/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Embed.onnx'
-onnx_model_C = r'/home/DakeQQ/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Main.onnx'
-onnx_model_D = r'/home/DakeQQ/Fun_ASR_Nano_Optimized/Greedy_Search.onnx'
-onnx_model_E = r'/home/DakeQQ/Fun_ASR_Nano_Optimized/First_Beam_Search.onnx'
-onnx_model_F = r'/home/DakeQQ/Fun_ASR_Nano_Optimized/Second_Beam_Search.onnx'
-onnx_model_G = r'/home/DakeQQ/Fun_ASR_Nano_Optimized/Reset_Penality.onnx'
-onnx_model_H = r'/home/DakeQQ/Fun_ASR_Nano_Optimized/Argmax.onnx'
+tokenizer_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                                  # Set the tokenizer path.
+onnx_model_A = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Encoder.onnx'                 # The exported onnx model path.
+onnx_model_B = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Embed.onnx'
+onnx_model_C = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Main.onnx'
+onnx_model_D = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Greedy_Search.onnx'
+onnx_model_E = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/First_Beam_Search.onnx'
+onnx_model_F = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Second_Beam_Search.onnx'
+onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Reset_Penality.onnx'
+onnx_model_H = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Argmax.onnx'
 
 
 # The exported onnx model path.
