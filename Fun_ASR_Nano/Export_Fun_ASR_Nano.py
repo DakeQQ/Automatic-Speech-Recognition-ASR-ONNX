@@ -14,10 +14,11 @@ tokenizer_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'         
 onnx_model_A = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Encoder.onnx'                      # The exported onnx model path.
 onnx_model_B = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Embed.onnx'
 onnx_model_C = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Main.onnx'
-onnx_model_D = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Greedy_Search.onnx'
-onnx_model_E = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_First_Beam_Search.onnx'
-onnx_model_F = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Second_Beam_Search.onnx'
-onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Reset_Penality.onnx'
+onnx_model_D = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Greedy_Search.onnx'
+onnx_model_E = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/First_Beam_Search.onnx'
+onnx_model_F = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Second_Beam_Search.onnx'
+onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Reset_Penality.onnx'
+onnx_model_H = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Argmax.onnx'
 
 # The exported onnx model path.
 test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/yue.mp3", "./example/ja.mp3"]          # The test audio list.
@@ -55,10 +56,11 @@ USE_BEAM_SEARCH = False                                     # Use beam search or
 TOP_K = 3                                                   # The top k candidate in decoding.
 BEAM_SIZE = 3                                               # Number of beams in searching.
 MAX_BEAM_SIZE = 10                                          # Max beams for exported model.
-REPEAT_PENALITY = 0.9                                       # Range from 0.0 to 1.0; "1.0" means no penality.
+REPEAT_PENALITY = 1.0                                       # Range from 0.0 to 1.0; "1.0" means no penality.
 PENALITY_RANGE = 10                                         # Penalizes the most recent output. "10" means the last 10 tokens.
 
 # Runtime & Export Settings
+PREVENT_F16_OVERFLOW = False                                # Prevent float16 overflow. Set True for Q4F16 or Q8F16 or F16 quantization.
 MAX_THREADS = 0                                             # Parllel CPU threads. Set 0 for auto.
 DEVICE_ID = 0                                               # Default to zero.
 OPSET = 17                                                  # ONNX Runtime opset version.
@@ -68,14 +70,6 @@ MAX_STFT_SIGNAL_LENGTH = MAX_INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length
 LFR_LENGTH = (MAX_STFT_SIGNAL_LENGTH + LFR_N - 1) // LFR_N
 if HOP_LENGTH > MAX_INPUT_AUDIO_LENGTH:
     HOP_LENGTH = MAX_INPUT_AUDIO_LENGTH
-
-
-def normalizer(_audio, target_value=8192.0):
-    _audio = _audio.astype(np.float32)
-    rms = np.sqrt(np.mean((_audio * _audio), dtype=np.float32), dtype=np.float32)
-    _audio *= (target_value / (rms + 1e-7))
-    np.clip(_audio, -32768.0, 32767.0, out=_audio)
-    return _audio.astype(np.int16)
 
 
 class ARGMAX(torch.nn.Module):
@@ -184,6 +178,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=max_stft_len + self.lfr_m_factor - 1).to(torch.int16)
         self.output_size_factor = self.funasr_nano.audio_encoder.output_size() ** 0.5
+        self.variance_epsilon = torch.tensor([1e-7], dtype=torch.float32)
         self.position_encoding = self.funasr_nano.audio_encoder.embed(torch.zeros([1, max_stft_len, 560], dtype=torch.float32))
         num_head = self.funasr_nano.audio_encoder.encoders._modules["0"].self_attn.h
         head_dim = self.funasr_nano.audio_encoder.encoders._modules["0"].self_attn.d_k
@@ -195,6 +190,36 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             encoder_layer.self_attn.linear_q_k_v.weight.data[:-in_size] *= factor
             encoder_layer.self_attn.linear_q_k_v.bias.data[:-in_size] *= factor
 
+            # Fuse encoder_layer.norm1 into encoder_layer.self_attn.linear_q_k_v
+            norm = encoder_layer.norm1
+            linear = encoder_layer.self_attn.linear_q_k_v
+
+            # 1. Update Bias: b_new = b_lin + W_lin @ b_norm
+            linear.bias.data.add_(torch.matmul(linear.weight.data, norm.bias.data))
+
+            # 2. Update Weight: W_new = W_lin * w_norm (broadcasting w_norm over rows of W_lin)
+            linear.weight.data.mul_(norm.weight.data.unsqueeze(0))
+
+            # 3. Disable affine parameters in LayerNorm so it only performs (x - mu) / sigma
+            norm.elementwise_affine = False
+            norm.weight = None
+            norm.bias = None
+
+            # Fuse encoder_layer.norm2 into encoder_layer.feed_forward.w_1
+            norm = encoder_layer.norm2
+            linear = encoder_layer.feed_forward.w_1
+
+            # 1. Update Bias: b_new = b_lin + W_lin @ b_norm
+            linear.bias.data.add_(torch.matmul(linear.weight.data, norm.bias.data))
+
+            # 2. Update Weight: W_new = W_lin * w_norm (broadcasting w_norm over rows of W_lin)
+            linear.weight.data.mul_(norm.weight.data.unsqueeze(0))
+
+            # 3. Disable affine parameters in LayerNorm
+            norm.elementwise_affine = False
+            norm.weight = None
+            norm.bias = None
+
         head_dim = self.funasr_nano.audio_adaptor.blocks._modules["0"].self_attn.d_k
         factor = float(head_dim ** (-0.25))
         for block in self.funasr_nano.audio_adaptor.blocks:
@@ -202,7 +227,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             block.self_attn.linear_q.bias.data *= factor
             block.self_attn.linear_k.weight.data *= factor
             block.self_attn.linear_k.bias.data *= factor
-            
+
             # Fusing q, k, v
             in_features = block.self_attn.linear_q.in_features
             out_features = block.self_attn.linear_q.out_features + block.self_attn.linear_k.out_features + block.self_attn.linear_v.out_features
@@ -214,7 +239,52 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             del block.self_attn.linear_k
             del block.self_attn.linear_v
 
-        head_ids = _tokenizer.encode("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n", return_tensors="pt")
+            # Fuse block.norm1 into block.self_attn.linear_q_k_v
+            norm = block.norm1
+            linear = block.self_attn.linear_q_k_v
+
+            # 1. Update Bias: b_new = b_lin + W_lin @ b_norm
+            linear.bias.data.add_(torch.matmul(linear.weight.data, norm.bias.data))
+
+            # 2. Update Weight: W_new = W_lin * w_norm (broadcasting w_norm over rows of W_lin)
+            linear.weight.data.mul_(norm.weight.data.unsqueeze(0))
+
+            # 3. Disable affine parameters in LayerNorm so it only performs (x - mu) / sigma
+            norm.elementwise_affine = False
+            norm.weight = None
+            norm.bias = None
+
+            # Fuse block.norm2 into block.feed_forward.w_1
+            norm = block.norm2
+            linear = block.feed_forward.w_1
+
+            # 1. Update Bias
+            linear.bias.data.add_(torch.matmul(linear.weight.data, norm.bias.data))
+
+            # 2. Update Weight
+            linear.weight.data.mul_(norm.weight.data.unsqueeze(0))
+
+            # 3. Disable affine parameters
+            norm.elementwise_affine = False
+            norm.weight = None
+            norm.bias = None
+
+        # Fuse audio_encoder.tp_norm into audio_adaptor.linear1
+        norm = self.funasr_nano.audio_encoder.tp_norm
+        linear = self.funasr_nano.audio_adaptor.linear1
+
+        # 1. Update Bias: b_new = b_lin + W_lin @ b_norm
+        linear.bias.data.add_(torch.matmul(linear.weight.data, norm.bias.data))
+
+        # 2. Update Weight: W_new = W_lin * w_norm (broadcasting w_norm over rows of W_lin)
+        linear.weight.data.mul_(norm.weight.data.unsqueeze(0))
+
+        # 3. Disable affine parameters in LayerNorm so it only performs (x - mu) / sigma
+        norm.elementwise_affine = False
+        norm.weight = None
+        norm.bias = None
+
+        head_ids = _tokenizer.encode("<|im_start|>user\n", return_tensors="pt")
         tail_ids = _tokenizer.encode("<|im_end|>\n<|im_start|>assistant\n", return_tensors="pt")
         self.head_embed = self.funasr_nano.llm.model.embed_tokens(head_ids)
         self.tail_embed = self.funasr_nano.llm.model.embed_tokens(tail_ids)
@@ -228,7 +298,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[..., :1], audio[..., 1:] - self.pre_emphasis * audio[..., :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + 1e-7).log()
+        mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + self.variance_epsilon).log()
         features_len = mel_features.shape[1].unsqueeze(0)
         left_padding = mel_features[:, [0]]
         padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
@@ -243,13 +313,15 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             k_h = k_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
             v_h = v.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
-            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
+            attn = torch.softmax(torch.matmul(q_h, k_h), dim=-1)
+            attn = torch.matmul(attn, v_h).transpose(0, 1).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
             attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             if encoder_layer.in_size == encoder_layer.size:
                 x += attn
             else:
                 x = attn
-            x = x + encoder_layer.feed_forward(encoder_layer.norm2(x))
+            x2 = encoder_layer.norm2(x)
+            x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(x2)))
         x = self.funasr_nano.audio_encoder.after_norm(x)
         for encoder_layer in self.funasr_nano.audio_encoder.tp_encoders:
             x1 = encoder_layer.norm1(x)
@@ -259,10 +331,12 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             k_h = k_h.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0)
             v_h = v.view(-1, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).transpose(0, 1)
             fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
-            attn = torch.matmul(torch.softmax(torch.matmul(q_h, k_h), dim=-1), v_h).transpose(0, 1).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
+            attn = torch.softmax(torch.matmul(q_h, k_h), dim=-1)
+            attn = torch.matmul(attn, v_h).transpose(0, 1).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
             attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             x += attn
-            x = x + encoder_layer.feed_forward(encoder_layer.norm2(x))
+            x2 = encoder_layer.norm2(x)
+            x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(x2)))
         x = self.funasr_nano.audio_encoder.tp_norm(x)
         x = self.funasr_nano.audio_adaptor.linear1(x)
         x = self.funasr_nano.audio_adaptor.relu(x)
@@ -274,10 +348,12 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             q = q.view(-1, block.self_attn.h, block.self_attn.d_k).transpose(0, 1)
             k = k.view(-1, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0)
             v = v.view(-1, block.self_attn.h, block.self_attn.d_k).transpose(0, 1)
-            attn = torch.matmul(torch.softmax(torch.matmul(q, k), dim=-1), v).transpose(0, 1).reshape(1, -1, block.self_attn.linear_out.in_features)
+            attn = torch.softmax(torch.matmul(q, k), dim=-1)
+            attn = torch.matmul(attn, v).transpose(0, 1).reshape(1, -1, block.self_attn.linear_out.in_features)
             attn = block.self_attn.linear_out(attn)
             x += attn
-            x = x + block.feed_forward(block.norm2(x))
+            x2 = block.norm2(x)
+            x = x + block.feed_forward.w_2(block.feed_forward.activation(block.feed_forward.w_1(x2)))
         x = x[:, :self.fake_token[features_len].to(torch.int64)]
         concat_embed = torch.cat([self.head_embed, query_embed, x, self.tail_embed], dim=1)
         return concat_embed, concat_embed.shape[1].unsqueeze(0)
@@ -293,7 +369,7 @@ class FUNASR_NANO_DECODER_EMBED(torch.nn.Module):
 
 
 class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
-    def __init__(self, funasr_nano, max_seq_len, num_heads, num_key_value_heads, head_dim, num_layers):
+    def __init__(self, funasr_nano, max_seq_len, num_heads, num_key_value_heads, head_dim, num_layers, hidden_size):
         super(FUNASR_NANO_DECODER_MAIN, self).__init__()
         self.funasr_nano_decoder_main = funasr_nano.llm.float()
         self.head_dim = head_dim
@@ -304,6 +380,8 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.variance_epsilon = torch.tensor([1e-6], dtype=torch.float32)
         self.scale_factor = float(head_dim ** -0.25)
+        self.norm_factor = float(hidden_size ** 0.5)
+        self.overflow_scale = torch.tensor([0.01], dtype=torch.float32)
 
         position_ids = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(-1)
         idx_theta = (position_ids * self.funasr_nano_decoder_main.model.rotary_emb.inv_freq).unsqueeze(0).unsqueeze(0)
@@ -341,25 +419,35 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                     kb = k_proj.bias if k_proj.bias is not None else torch.zeros(k_proj.out_features, dtype=dtype)
                     vb = v_proj.bias if v_proj.bias is not None else torch.zeros(v_proj.out_features, dtype=dtype)
                     qkv.bias.copy_(torch.cat([qb, kb, vb], dim=0))
-
-                # Fuse input rms norm weight into qkv input columns
-                w = layer.input_layernorm.weight.unsqueeze(0)
-                qkv.weight.mul_(w)
-                layer.self_attn.qkv = qkv
-                
                 del layer.self_attn.q_proj
                 del layer.self_attn.k_proj
                 del layer.self_attn.v_proj
+
+                # Fuse input rms norm weight into qkv input columns
+                w = layer.input_layernorm.weight.unsqueeze(0) * self.norm_factor
+                qkv.weight.mul_(w)
+                layer.self_attn.qkv = qkv
                 del layer.input_layernorm
 
-                # 2) Fuse post-attention rms norm weight into MLP gate/up input columns
-                w = layer.post_attention_layernorm.weight.unsqueeze(0)
-                layer.mlp.gate_proj.weight.mul_(w)
-                layer.mlp.up_proj.weight.mul_(w)
+                w = layer.post_attention_layernorm.weight.unsqueeze(0) * self.norm_factor
+                gate = layer.mlp.gate_proj
+                up = layer.mlp.up_proj
+
+                in_feat = gate.in_features
+                out_feat = gate.out_features + up.out_features
+                gate_up = torch.nn.Linear(in_feat, out_feat, bias=False)
+
+                gate_weight = gate.weight * w
+                up_weight = up.weight * w
+                gate_up.weight.copy_(torch.cat([gate_weight, up_weight], dim=0))
+
+                layer.mlp.gate_up_proj = gate_up
+                del layer.mlp.gate_proj
+                del layer.mlp.up_proj
                 del layer.post_attention_layernorm
 
             # 3) Fuse final norm weight into lm_head
-            w = self.funasr_nano_decoder_main.model.norm.weight.unsqueeze(0)
+            w = self.funasr_nano_decoder_main.model.norm.weight.unsqueeze(0) * self.norm_factor
             self.funasr_nano_decoder_main.lm_head.weight.mul_(w)
             del self.funasr_nano_decoder_main.model.norm
 
@@ -377,15 +465,19 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         hidden_states = all_inputs[-4]
         history_len = all_inputs[-3]
         ids_len = all_inputs[-2]
+        mask = all_inputs[-1]
         kv_seq_len = history_len + ids_len
         rotary_pos_emb_cos_q = self.cos_rotary_pos_emb[..., history_len:kv_seq_len, :].float()
         rotary_pos_emb_sin_q = self.sin_rotary_pos_emb[..., history_len:kv_seq_len, :].float()
         rotary_pos_emb_cos_k = rotary_pos_emb_cos_q.transpose(-1, -2).unsqueeze(0)
         rotary_pos_emb_sin_k = rotary_pos_emb_sin_q.transpose(-1, -2).unsqueeze(0)
-        attention_mask = (self.attention_mask[..., :ids_len, :kv_seq_len] * all_inputs[-1]).float()
+        attention_mask = (self.attention_mask[..., :ids_len, :kv_seq_len] * mask).float()
         batch_size = hidden_states.shape[0].unsqueeze(0)
         for i, layer in enumerate(self.funasr_nano_decoder_main.model.layers):
-            hidden_states_norm = hidden_states * torch.rsqrt(hidden_states.square().mean(-1, keepdim=True) + self.variance_epsilon)
+            residual = hidden_states
+            if PREVENT_F16_OVERFLOW:
+                hidden_states = hidden_states * self.overflow_scale
+            hidden_states_norm = hidden_states * torch.rsqrt(hidden_states.pow(2).sum(-1, keepdim=True) + self.variance_epsilon)
             qkv = layer.self_attn.qkv(hidden_states_norm)
             q, k, v = torch.split(qkv, [layer.self_attn.q_out_features, layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
             q = q.view(batch_size, -1, self.num_heads, self.head_dim)
@@ -403,13 +495,19 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             v = self.repeat_v(v.float(), self.num_key_value_groups, self.head_dim, self.num_heads, batch_size)
             attn = torch.nn.functional.softmax(torch.matmul(q, k) + attention_mask, dim=-1, dtype=torch.float32)
             attn_out = layer.self_attn.o_proj(torch.matmul(attn, v).transpose(1, 2).reshape(batch_size, -1, layer.self_attn.o_proj.in_features))
-            hidden_states += attn_out
+            hidden_states = residual + attn_out
             residual = hidden_states
-            hidden_states = hidden_states * torch.rsqrt(hidden_states.square().mean(-1, keepdim=True) + self.variance_epsilon)
-            hidden_states = layer.mlp(hidden_states)
+            if PREVENT_F16_OVERFLOW:
+                hidden_states = hidden_states * self.overflow_scale
+            hidden_states = hidden_states * torch.rsqrt(hidden_states.pow(2).sum(-1, keepdim=True) + self.variance_epsilon)
+            gate_up = layer.mlp.gate_up_proj(hidden_states)
+            gate, up = torch.split(gate_up, [layer.mlp.down_proj.in_features, layer.mlp.down_proj.in_features], dim=-1)
+            hidden_states = layer.mlp.down_proj(layer.mlp.act_fn(gate) * up)
             hidden_states += residual
         hidden_states = hidden_states[:, -1]
-        hidden_states = hidden_states * torch.rsqrt(hidden_states.square().mean(-1, keepdim=True) + self.variance_epsilon)
+        if PREVENT_F16_OVERFLOW:
+            hidden_states = hidden_states * self.overflow_scale
+        hidden_states = hidden_states * torch.rsqrt(hidden_states.pow(2).sum(-1, keepdim=True) + self.variance_epsilon)
         logits = self.funasr_nano_decoder_main.lm_head(hidden_states)
         return *self.save_key, *self.save_value, logits, kv_seq_len
 
@@ -442,7 +540,6 @@ with torch.inference_mode():
         onnx_model_A,
         input_names=['audio', 'query_embed'],
         output_names=['concat_embed', 'ids_len'],
-        do_constant_folding=True,
         dynamic_axes={
             'audio': {2: 'audio_len'},
             'query_embed': {1: 'num_token'},
@@ -477,7 +574,6 @@ with torch.inference_mode():
             'input_ids': {0: 'batch', 1: 'ids_len'},
             'hidden_states': {0: 'batch', 1: 'ids_len'}
         },
-        do_constant_folding=True,
         opset_version=OPSET,
         dynamo=False
     )
@@ -517,7 +613,7 @@ with torch.inference_mode():
     output_names.append('kv_seq_len')
     dynamic_axes['logits'] = {0: 'batch'}
 
-    model_C = FUNASR_NANO_DECODER_MAIN(model.model, MAX_SEQ_LEN, num_heads, num_key_value_heads, head_dim, num_layers)
+    model_C = FUNASR_NANO_DECODER_MAIN(model.model, MAX_SEQ_LEN, num_heads, num_key_value_heads, head_dim, num_layers, hidden_size)
     torch.onnx.export(
         model_C,
         tuple(all_inputs),
@@ -525,7 +621,6 @@ with torch.inference_mode():
         input_names=input_names,
         output_names=output_names,
         dynamic_axes=dynamic_axes,
-        do_constant_folding=True,
         opset_version=OPSET,
         dynamo=False
     )
@@ -547,7 +642,6 @@ with torch.inference_mode():
     del kv_seq_len
     gc.collect()
 
-    greedy = GREEDY_SEARCH()
     beam_size = torch.tensor([BEAM_SIZE], dtype=torch.int64)
     repeat_penality = torch.ones((beam_size, vocab_size), dtype=torch.float32)
     penality_reset_count = torch.zeros(beam_size, dtype=torch.int32)
@@ -556,7 +650,7 @@ with torch.inference_mode():
     batch_indices = torch.arange(BEAM_SIZE, dtype=torch.int64)
 
     torch.onnx.export(
-        greedy,
+        GREEDY_SEARCH(),
         (logits, repeat_penality, penality_value, beam_size),
         # Reuse the beam_size tensor as batch_size during export process.
         onnx_model_D,
@@ -568,13 +662,10 @@ with torch.inference_mode():
             'repeat_penality_out': {0: 'batch'},
             'max_logits_idx': {0: 'batch'}
         },
-        do_constant_folding=True,
         opset_version=OPSET,
         dynamo=False
     )
-    del greedy
 
-    first_beam_search = FIRST_BEAM_SEARCH(num_layers)
     topK = torch.tensor([TOP_K], dtype=torch.int64)
     save_id = torch.zeros((beam_size, 10), dtype=torch.int32)
     previous_prob = torch.zeros((beam_size, 1), dtype=torch.float32)
@@ -628,17 +719,15 @@ with torch.inference_mode():
     dynamic_axes['batch_indices'] = {0: 'batch'}
 
     torch.onnx.export(
-        first_beam_search,
+        FIRST_BEAM_SEARCH(num_layers),
         tuple(all_inputs),
         onnx_model_E,
         input_names=input_names,
         output_names=output_names,
         dynamic_axes=dynamic_axes,
-        do_constant_folding=True,
         opset_version=OPSET,
         dynamo=False
     )
-    del first_beam_search
 
     all_inputs = []
     input_names = []
@@ -669,19 +758,16 @@ with torch.inference_mode():
     dynamic_axes['previous_prob'] = {0: 'batch'}
     output_names.remove("batch_indices")
 
-    second_beam_search = SECOND_BEAM_SEARCH(num_layers)
     torch.onnx.export(
-        second_beam_search,
+        SECOND_BEAM_SEARCH(num_layers),
         tuple(all_inputs),
         onnx_model_F,
         input_names=input_names,
         output_names=output_names,
         dynamic_axes=dynamic_axes,
-        do_constant_folding=True,
         opset_version=OPSET,
         dynamo=False
     )
-    del second_beam_search
     del num_layers
     del past_keys
     del past_values
@@ -689,13 +775,11 @@ with torch.inference_mode():
     del output_names
     del dynamic_axes
     del all_inputs
-    del logits
     del beam_size
     del penality_value
 
-    reset_penality = RESET_PENALITY()
     torch.onnx.export(
-        reset_penality,
+        RESET_PENALITY(),
         (save_id, repeat_penality, penality_reset_count, batch_indices),
         onnx_model_G,
         input_names=['save_id_in', 'repeat_penality_in', 'penality_reset_count_in', 'batch_indices'],
@@ -709,18 +793,31 @@ with torch.inference_mode():
             'penality_reset_count_out': {0: 'batch'},
             'batch_indices': {0: 'batch'}
         },
-        do_constant_folding=True,
         opset_version=OPSET,
         dynamo=False
     )
-    del reset_penality
     del save_id
     del repeat_penality
     del penality_reset_count
     del batch_indices
 
+    torch.onnx.export(
+        ARGMAX(),
+        (logits,),
+        onnx_model_H,
+        input_names=['logits'], output_names=['max_logits_idx'],
+        dynamic_axes={
+            'logits': {0: 'batch'},
+            'max_logits_idx': {0: 'batch'}
+        },
+        opset_version=OPSET,
+        dynamo=False
+    )
+    del logits
 print('\nExport done!\n\nStart to run FunASR-Nano by ONNX Runtime.\n\nNow, loading the model...')
 
+
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
 # ONNX Runtime settings
 session_opts = onnxruntime.SessionOptions()
@@ -744,286 +841,274 @@ session_opts.add_session_config_entry('optimization.minimal_build_optimizations'
 session_opts.add_session_config_entry('session.use_device_allocator_for_initializers', '1')
 session_opts.add_session_config_entry('optimization.enable_cast_chain_elimination', '1')
 session_opts.add_session_config_entry('session.graph_optimizations_loop_level', '2')
-run_options.add_run_config_entry('disable_synchronize_execution_providers', '1')
+run_options.add_run_config_entry('disable_synchronize_execution_providers', '0')
 
 ORT_Accelerate_Providers = ['CPUExecutionProvider']
 provider_options = None
 device_type = 'cpu'
-DEVICE_ID = 0
 
-ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
+
+def normalizer(_audio, target_value=8192.0):
+    _audio = _audio.astype(np.float32)
+    rms = np.sqrt(np.mean((_audio * _audio), dtype=np.float32), dtype=np.float32)
+    _audio *= (target_value / (rms + 1e-7))
+    np.clip(_audio, -32768.0, 32767.0, out=_audio)
+    return _audio.astype(np.int16)
+
+
+def get_sess_info(model_path, opts, providers, p_opts, r_opts):
+    sess = onnxruntime.InferenceSession(model_path, sess_options=opts, providers=providers, provider_options=p_opts, run_options=r_opts)
+    inputs = [x.name for x in sess.get_inputs()]
+    outputs = [x.name for x in sess.get_outputs()]
+    return sess, inputs, outputs
+
+
+def run_greedy_decoding(encoded_audio, current_embed, limit):
+    input_feed_C = {
+        in_name_C[num_keys_values]: encoded_audio,
+        in_name_C[num_keys_values_plus_1]: init_history_len,
+        in_name_C[num_keys_values_plus_2]: current_embed,
+        in_name_C[num_keys_values_plus_3]: init_att_mask_1
+    }
+    for i in range(num_layers): input_feed_C[in_name_C[i]] = init_past_keys
+    for i in range(num_layers, num_keys_values): input_feed_C[in_name_C[i]] = init_past_vals
+    
+    decoded_ids = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
+    local_result = ""
+    num_decode = 0
+    input_feed_B = {} 
+    input_feed_D = {}
+    input_feed_H = {}
+    
+    if do_repeat_penalty:
+        input_feed_D = {in_name_D[1]: init_rp, in_name_D[2]: penality_val_ort, in_name_D[3]: init_batch_greedy}
+        penalty_reset_count = 0 
+    
+    start_time = time.time()
+    while num_decode < limit:
+        outputs_C = ort_session_C.run_with_ort_values(out_name_C, input_feed_C, run_options=run_options)
+        logits_ort = outputs_C[num_keys_values]
+        if do_repeat_penalty:
+            input_feed_D[in_name_D[0]] = logits_ort
+            outputs_D = ort_session_D.run_with_ort_values(out_name_D, input_feed_D, run_options=run_options)
+            max_logits_idx = outputs_D[0].numpy().flat[0]
+            input_feed_B[in_name_B] = outputs_D[0]
+            if num_decode >= PENALITY_RANGE:
+                reset_id = decoded_ids[penalty_reset_count]
+                if reset_id != max_logits_idx:
+                    rp_arr = outputs_D[1].numpy()
+                    rp_arr[:, reset_id] = 1.0
+                    input_feed_D[in_name_D[1]].update_inplace(rp_arr)
+                penalty_reset_count += 1
+            else:
+                input_feed_D[in_name_D[1]] = outputs_D[1]
+        else:
+            input_feed_H[in_name_H] = logits_ort
+            outputs_H = ort_session_H.run_with_ort_values(out_name_H, input_feed_H, run_options=run_options)[0]
+            max_logits_idx = outputs_H.numpy().flat[0]
+            input_feed_B[in_name_B] = outputs_H
+        if max_logits_idx in STOP_TOKEN:
+            local_result += tokenizer.decode(decoded_ids[:num_decode], skip_special_tokens=True)
+            break
+        decoded_ids[num_decode] = max_logits_idx
+        input_feed_C.update(zip(in_name_C[:num_keys_values], outputs_C))
+        next_embed = ort_session_B.run_with_ort_values(out_name_B, input_feed_B, run_options=run_options)[0]
+        a = next_embed.numpy()
+        input_feed_C[in_name_C[num_keys_values]] = next_embed
+        input_feed_C[in_name_C[num_keys_values_plus_1]] = outputs_C[num_keys_values_plus_1]
+        if num_decode < 1:
+            input_feed_C[in_name_C[num_keys_values_plus_2]] = init_ids_len_1
+            input_feed_C[in_name_C[num_keys_values_plus_3]] = init_att_mask_0
+        num_decode += 1
+        
+    print(f"\nDecode (Greedy): {((num_decode + 1) / (time.time() - start_time)):.3f} token/s\n")
+    return local_result
+
+
+def run_beam_decoding(encoded_audio, current_embed, limit):
+    input_feed_C = {
+        in_name_C[num_keys_values]: encoded_audio,
+        in_name_C[num_keys_values_plus_1]: init_history_len,
+        in_name_C[num_keys_values_plus_2]: current_embed,
+        in_name_C[num_keys_values_plus_3]: init_att_mask_1
+    }
+    for i in range(num_layers): input_feed_C[in_name_C[i]] = init_past_keys
+    for i in range(num_layers, num_keys_values): input_feed_C[in_name_C[i]] = init_past_vals
+
+    local_result = ""
+    num_decode = 0
+    input_feed_E = {in_name_E[-2]: penality_val_ort, in_name_E[-1]: beam_size_ort}
+    input_feed_F = {in_name_F[-3]: penality_val_ort, in_name_F[-2]: beam_size_ort, in_name_F[-1]: topK_ort}
+    input_feed_G = {}
+    input_feed_B = {}
+    
+    input_feed_E[in_name_E[num_keys_values_plus_1]] = init_save_id
+    input_feed_E[in_name_E[num_keys_values_plus_2]] = init_rp
+    
+    if do_repeat_penalty:
+        input_feed_G[in_name_G[2]] = init_reset_cnt
+
+    start_time = time.time()
+    while num_decode < limit:
+        outputs_C = ort_session_C.run_with_ort_values(out_name_C, input_feed_C, run_options=run_options)
+        if num_decode < 1:
+            input_feed_E.update(zip(in_name_E[:num_keys_values_plus_1], outputs_C))
+            outputs_E = ort_session_E.run_with_ort_values(out_name_E, input_feed_E, run_options=run_options)
+            input_feed_F[in_name_F[-4]] = outputs_E[-2]
+            if do_repeat_penalty:
+                input_feed_G[in_name_G[3]] = outputs_E[-2]
+            input_feed_C.update(zip(in_name_C[:num_keys_values], outputs_E))
+            input_feed_B[in_name_B] = outputs_E[num_keys_values]
+            input_feed_F[in_name_F[num_keys_values_plus_1]] = outputs_E[num_keys_values_plus_1]
+            input_feed_F[in_name_F[num_keys_values_plus_2]] = outputs_E[num_keys_values_plus_2] 
+            input_feed_F[in_name_F[num_keys_values_plus_3]] = outputs_E[num_keys_values_plus_3]
+        else:
+            input_feed_F.update(zip(in_name_F[:num_keys_values_plus_1], outputs_C))
+            outputs_F = ort_session_F.run_with_ort_values(out_name_F, input_feed_F, run_options=run_options)
+            max_logits_idx = outputs_F[-1].numpy()
+            if max_logits_idx in STOP_TOKEN:
+                save_id = outputs_F[num_keys_values_plus_1].numpy()[0, :num_decode]
+                local_result += tokenizer.decode(save_id, skip_special_tokens=True)
+                break
+            if do_repeat_penalty and (num_decode >= PENALITY_RANGE):
+                input_feed_G[in_name_G[0]] = outputs_F[num_keys_values_plus_1]
+                input_feed_G[in_name_G[1]] = outputs_F[num_keys_values_plus_2]
+                outputs_G = ort_session_G.run_with_ort_values(out_name_G, input_feed_G, run_options=run_options)
+                input_feed_G[in_name_G[2]] = outputs_G[2]
+                input_feed_F[in_name_F[num_keys_values_plus_1]] = outputs_G[0]
+                input_feed_F[in_name_F[num_keys_values_plus_2]] = outputs_G[1]
+            else:
+                input_feed_F[in_name_F[num_keys_values_plus_1]] = outputs_F[num_keys_values_plus_1]
+                input_feed_F[in_name_F[num_keys_values_plus_2]] = outputs_F[num_keys_values_plus_2]
+            input_feed_F[in_name_F[num_keys_values_plus_3]] = outputs_F[num_keys_values_plus_3]
+            input_feed_C.update(zip(in_name_C[:num_keys_values], outputs_F))
+            input_feed_B[in_name_B] = outputs_F[num_keys_values]
+        next_embed = ort_session_B.run_with_ort_values(out_name_B, input_feed_B, run_options=run_options)[0]
+        input_feed_C[in_name_C[num_keys_values]] = next_embed
+        input_feed_C[in_name_C[num_keys_values_plus_1]] = outputs_C[num_keys_values_plus_1]
+        
+        if num_decode == 0:
+            input_feed_C[in_name_C[num_keys_values_plus_2]] = init_ids_len_1
+            input_feed_C[in_name_C[num_keys_values_plus_3]] = init_att_mask_0
+        num_decode += 1
+    print(f"\nDecode (Beam): {((num_decode + 1) / (time.time() - start_time)):.3f} token/s\n")
+    return local_result
+
+
+ort_session_A, in_name_A, out_name_A = get_sess_info(onnx_model_A, session_opts, ORT_Accelerate_Providers, provider_options, run_options)
 shape_value_in_A = ort_session_A._inputs_meta[0].shape[-1]
-in_name_A = ort_session_A.get_inputs()
-out_name_A = ort_session_A.get_outputs()
-in_name_A = [in_name_A[i].name for i in range(len(in_name_A))]
-out_name_A = [out_name_A[i].name for i in range(len(out_name_A))]
 
-ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-in_name_B = ort_session_B.get_inputs()
-out_name_B = ort_session_B.get_outputs()
-in_name_B = in_name_B[0].name
-out_name_B = [out_name_B[0].name]
+ort_session_B, in_name_B, out_name_B = get_sess_info(onnx_model_B, session_opts, ORT_Accelerate_Providers, provider_options, run_options)
+in_name_B, out_name_B = in_name_B[0], [out_name_B[0]]
 
-ort_session_C = onnxruntime.InferenceSession(onnx_model_C, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
+ort_session_C, in_name_C, out_name_C = get_sess_info(onnx_model_C, session_opts, ORT_Accelerate_Providers, provider_options, run_options)
 print(f"\nUsable Providers: {ort_session_C.get_providers()}")
-model_dtype = ort_session_C._inputs_meta[-2].type
-if 'float16' in model_dtype:
-    model_dtype = np.float16
-else:
-    model_dtype = np.float32
-in_name_C = ort_session_C.get_inputs()
-out_name_C = ort_session_C.get_outputs()
+
+model_dtype_str = ort_session_C._inputs_meta[-2].type
+model_dtype = np.float16 if 'float16' in model_dtype_str else np.float32
 amount_of_outputs_C = len(out_name_C)
-in_name_C = [in_name_C[i].name for i in range(len(in_name_C))]
-out_name_C = [out_name_C[i].name for i in range(amount_of_outputs_C)]
-
-
-generate_limit = MAX_SEQ_LEN - 20                   # 20 = length of basic ids
 num_layers = (amount_of_outputs_C - 2) // 2
-num_keys_values = num_layers + num_layers
+num_keys_values = num_layers * 2
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
 num_keys_values_plus_3 = num_keys_values + 3
-num_keys_values_plus_4 = num_keys_values + 4
-num_keys_values_plus_5 = num_keys_values + 5
-num_keys_values_plus_6 = num_keys_values + 6
-num_keys_values_plus_7 = num_keys_values + 7
 vocab_size = ort_session_C._outputs_meta[num_keys_values].shape[1]
-topK = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([TOP_K], dtype=np.int64), device_type, DEVICE_ID)
-beam_size = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([BEAM_SIZE], dtype=np.int64), device_type, DEVICE_ID)
-penality_value = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([REPEAT_PENALITY], dtype=model_dtype), device_type, DEVICE_ID)
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+do_repeat_penalty = (REPEAT_PENALITY != 1.0)
 
-
-# Pre-process inputs
 if USE_BEAM_SEARCH and (TOP_K < BEAM_SIZE):
-    print("\nBeam Search does not display the immediate decoding results; the best result is shown only after the entire decoding process is complete.\n")
+    print("\nBeam Search: TOP_K adjusted to match BEAM_SIZE.")
     TOP_K = BEAM_SIZE
-
-
 if (TOP_K < 2) or (BEAM_SIZE < 2):
+    if USE_BEAM_SEARCH:
+        print("\nBeam Search settings too low. Falling back to Greedy Search.")
     USE_BEAM_SEARCH = False
-    print("\nInappropriate Beam Search setting detected. Falling back to Greedy Search.")
 
+
+ort_session_D, ort_session_E, ort_session_F, ort_session_G, ort_session_H = None, None, None, None, None
+in_name_D, out_name_D = [], []
+in_name_E, out_name_E = [], []
+in_name_F, out_name_F = [], []
+in_name_G, out_name_G = [], []
+in_name_H, out_name_H = "", []
 
 if USE_BEAM_SEARCH:
-    ort_session_E = onnxruntime.InferenceSession(onnx_model_E, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-    in_name_E = ort_session_E.get_inputs()
-    out_name_E = ort_session_E.get_outputs()
-    in_name_E = [in_name_E[i].name for i in range(len(in_name_E))]
-    out_name_E = [out_name_E[i].name for i in range(len(out_name_E))]
-
-    ort_session_F = onnxruntime.InferenceSession(onnx_model_F, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-    in_name_F = ort_session_F.get_inputs()
-    out_name_F = ort_session_F.get_outputs()
-    amount_of_outputs_F = len(out_name_F)
-    in_name_F = [in_name_F[i].name for i in range(len(in_name_F))]
-    out_name_F = [out_name_F[i].name for i in range(amount_of_outputs_F)]
-
-    ort_session_G = onnxruntime.InferenceSession(onnx_model_G, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-    in_name_G = ort_session_G.get_inputs()
-    out_name_G = ort_session_G.get_outputs()
-    in_name_G = [in_name_G[i].name for i in range(len(in_name_G))]
-    out_name_G = [out_name_G[i].name for i in range(len(out_name_G))]
-
-    input_feed_E = {
-        in_name_E[num_keys_values_plus_3]: penality_value,
-        in_name_E[num_keys_values_plus_4]: beam_size
-    }
-
-    input_feed_F = {
-        in_name_F[num_keys_values_plus_5]: penality_value,
-        in_name_F[num_keys_values_plus_6]: beam_size,
-        in_name_F[num_keys_values_plus_7]: topK
-    }
-
+    ort_session_E, in_name_E, out_name_E = get_sess_info(onnx_model_E, session_opts, ORT_Accelerate_Providers, provider_options, run_options)
+    ort_session_F, in_name_F, out_name_F = get_sess_info(onnx_model_F, session_opts, ORT_Accelerate_Providers, provider_options, run_options)
+    ort_session_G, in_name_G, out_name_G = get_sess_info(onnx_model_G, session_opts, ORT_Accelerate_Providers, provider_options, run_options)
 else:
     BEAM_SIZE = 1
-    ort_session_D = onnxruntime.InferenceSession(onnx_model_D, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-    in_name_D = ort_session_D.get_inputs()
-    out_name_D = ort_session_D.get_outputs()
-    in_name_D = [in_name_D[i].name for i in range(len(in_name_D))]
-    out_name_D = [out_name_D[i].name for i in range(len(out_name_D))]
-    input_feed_D = {in_name_D[2]: penality_value}
+    if do_repeat_penalty:
+        ort_session_D, in_name_D, out_name_D = get_sess_info(onnx_model_D, session_opts, ORT_Accelerate_Providers, provider_options, run_options)
+    else:
+        ort_session_H, in_name_H_list, out_name_H = get_sess_info(onnx_model_H, session_opts, ORT_Accelerate_Providers, provider_options, run_options)
+        in_name_H = in_name_H_list[0]
 
-
-if USE_BEAM_SEARCH:
-    penality_reset_count_beam_init = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32), device_type, DEVICE_ID)
-else:
-    save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
-
-
-if REPEAT_PENALITY != 1.0:
-    do_repeat_penality = True
-else:
-    do_repeat_penality = False
-
+generate_limit = MAX_SEQ_LEN - 20
+topK_ort = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([TOP_K], dtype=np.int64), device_type, DEVICE_ID)
+beam_size_ort = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([BEAM_SIZE], dtype=np.int64), device_type, DEVICE_ID)
+penality_val_ort = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([REPEAT_PENALITY], dtype=model_dtype), device_type, DEVICE_ID)
 
 init_ids_len_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), device_type, DEVICE_ID)
 init_history_len = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int64), device_type, DEVICE_ID)
-init_attention_mask_0 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
-init_attention_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
-if device_type != 'dml':
-    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=np.float16), device_type, DEVICE_ID)
-    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=np.float16), device_type, DEVICE_ID)
-else:
-    init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=np.float16), 'cpu', 0)
-    init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=np.float16), 'cpu', 0)
-init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, vocab_size), dtype=model_dtype), device_type, DEVICE_ID)
-init_batch_size_greedy = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), device_type, DEVICE_ID)
-init_save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 0), dtype=np.int32), device_type, DEVICE_ID)
+init_batch_greedy = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int64), device_type, DEVICE_ID)
+init_att_mask_0 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([0], dtype=np.int8), device_type, DEVICE_ID)
+init_att_mask_1 = onnxruntime.OrtValue.ortvalue_from_numpy(np.array([1], dtype=np.int8), device_type, DEVICE_ID)
+init_rp = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, vocab_size), dtype=model_dtype), device_type, DEVICE_ID)
+init_save_id = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 0), dtype=np.int32), device_type, DEVICE_ID)
+init_reset_cnt = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(BEAM_SIZE, dtype=np.int32), device_type, DEVICE_ID)
 
-
-if USE_BEAM_SEARCH:
-    input_feed_E[in_name_E[num_keys_values_plus_1]] = init_save_id_beam
-    input_feed_E[in_name_E[num_keys_values_plus_2]] = init_repeat_penality
-else:
-    input_feed_D[in_name_D[1]] = init_repeat_penality
-    input_feed_D[in_name_D[3]] = init_batch_size_greedy
-
-
-if do_repeat_penality:
-    if USE_BEAM_SEARCH:
-        input_feed_G = {in_name_G[2]: penality_reset_count_beam_init}
-    else:
-        penality_reset_count_greedy = 0
-
-
-# Start to run FunASR-Nano
+dim_k = ort_session_C._inputs_meta[0].shape[3]
+dim_v = ort_session_C._inputs_meta[num_layers].shape[4]
+dim_k1 = ort_session_C._inputs_meta[0].shape[1]
+dim_v1 = ort_session_C._inputs_meta[num_layers].shape[1]
+kv_device = 'cpu' if device_type == 'dml' else device_type
+init_past_keys = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, dim_k1, 1, dim_k, 0), dtype=np.float16), kv_device, 0 if kv_device == 'cpu' else DEVICE_ID)
+init_past_vals = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, dim_v1, 1, 0, dim_v), dtype=np.float16), kv_device, 0 if kv_device == 'cpu' else DEVICE_ID)
 input_feed_A = {}
-input_feed_C = {}
 
 init_all_outputs_B = []
 for i in task_prompt:
     tokens = tokenizer(i, return_tensors='np')['input_ids'].astype(np.int32)
-    input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(tokens, device_type, DEVICE_ID)
-    input_feed_B = {in_name_B: input_ids}
-    init_all_outputs_B.append(ort_session_B.run_with_ort_values(out_name_B, input_feed_B)[0])
+    input_ids_ort = onnxruntime.OrtValue.ortvalue_from_numpy(tokens, device_type, DEVICE_ID)
+    init_all_outputs_B.append(ort_session_B.run_with_ort_values(out_name_B, {in_name_B: input_ids_ort}, run_options=run_options)[0])
 
-# Load the input audio
-for prompt_embed, test in zip(init_all_outputs_B, test_audio):
-    print("----------------------------------------------------------------------------------------------------------")
-    print(f"\nTest Input Audio: {test}")
-    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
-    if USE_NORMALIZER:
-        audio = normalizer(audio, 8192.0)
-    audio_len = len(audio)
+for prompt_embed, test_file in zip(init_all_outputs_B, test_audio):
+    print("-" * 105)
+    print(f"\nTest Input Audio: {test_file}")
+    audio = np.array(AudioSegment.from_file(test_file).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
+    if USE_NORMALIZER: audio = normalizer(audio, 8192.0)
+    audio_full_len = len(audio)
+    INPUT_AUDIO_LENGTH = min(MAX_INPUT_AUDIO_LENGTH, audio_full_len) if isinstance(shape_value_in_A, str) else shape_value_in_A
+    stride_step = INPUT_AUDIO_LENGTH if SLIDING_WINDOW <= 0 else SLIDING_WINDOW
     audio = audio.reshape(1, 1, -1)
-    if isinstance(shape_value_in_A, str):
-        INPUT_AUDIO_LENGTH = min(MAX_INPUT_AUDIO_LENGTH, audio_len)  # You can adjust it.
-    else:
-        INPUT_AUDIO_LENGTH = shape_value_in_A
-    if SLIDING_WINDOW <= 0:
-        stride_step = INPUT_AUDIO_LENGTH
-    else:
-        stride_step = SLIDING_WINDOW
-    if audio_len > INPUT_AUDIO_LENGTH:
-        num_windows = int(np.ceil((audio_len - INPUT_AUDIO_LENGTH) / stride_step)) + 1
-        total_length_needed = (num_windows - 1) * stride_step + INPUT_AUDIO_LENGTH
-        pad_amount = total_length_needed - audio_len
-        final_slice = audio[:, :, -pad_amount:].astype(np.float32)
-        white_noise = (np.sqrt(np.mean(final_slice * final_slice)) * np.random.normal(loc=0.0, scale=1.0, size=(1, 1, pad_amount))).astype(audio.dtype)
-        audio = np.concatenate((audio, white_noise), axis=-1)
-    elif audio_len < INPUT_AUDIO_LENGTH:
-        audio_float = audio.astype(np.float32)
-        white_noise = (np.sqrt(np.mean(audio_float * audio_float)) * np.random.normal(loc=0.0, scale=1.0, size=(1, 1, INPUT_AUDIO_LENGTH - audio_len))).astype(audio.dtype)
-        audio = np.concatenate((audio, white_noise), axis=-1)
+    if audio_full_len > INPUT_AUDIO_LENGTH:
+        num_windows = int(np.ceil((audio_full_len - INPUT_AUDIO_LENGTH) / stride_step)) + 1
+        pad_amount = ((num_windows - 1) * stride_step + INPUT_AUDIO_LENGTH) - audio_full_len
+        zeros = np.zeros([1, 1, pad_amount], dtype=audio.dtype)
+        audio = np.concatenate((audio, zeros), axis=-1)
+    elif audio_full_len < INPUT_AUDIO_LENGTH:
+        zeros = np.zeros([1, 1, INPUT_AUDIO_LENGTH - audio_full_len], dtype=audio.dtype)
+        audio = np.concatenate((audio, zeros), axis=-1)
+        
     aligned_len = audio.shape[-1]
-
-    asr_result = ""
+    final_asr_result = ""
     slice_start = 0
-    slice_end = INPUT_AUDIO_LENGTH
     rtf_time = time.time()
-    while slice_end <= aligned_len:
+    while slice_start + INPUT_AUDIO_LENGTH <= aligned_len:
+        slice_end = slice_start + INPUT_AUDIO_LENGTH
         input_feed_A[in_name_A[0]] = onnxruntime.OrtValue.ortvalue_from_numpy(audio[..., slice_start: slice_end], device_type, DEVICE_ID)
         input_feed_A[in_name_A[1]] = prompt_embed
-        all_outputs_A = ort_session_A.run_with_ort_values(out_name_A, input_feed_A)
-        input_feed_C[in_name_C[num_keys_values]] = all_outputs_A[0]
-        input_feed_C[in_name_C[num_keys_values_plus_1]] = init_history_len
-        input_feed_C[in_name_C[num_keys_values_plus_2]] = all_outputs_A[1]
-        input_feed_C[in_name_C[num_keys_values_plus_3]] = init_attention_mask_1
-        for i in range(num_layers):
-            input_feed_C[in_name_C[i]] = init_past_keys_C
-        for i in range(num_layers, num_keys_values):
-            input_feed_C[in_name_C[i]] = init_past_values_C
-
+        outputs_A = ort_session_A.run_with_ort_values(out_name_A, input_feed_A, run_options=run_options)
+        encoded_audio_ort = outputs_A[0]
+        encoded_len_val = outputs_A[1].numpy()
+        current_limit = generate_limit - encoded_len_val
         if USE_BEAM_SEARCH:
-            input_feed_E[in_name_E[num_keys_values_plus_1]] = init_save_id_beam
-            input_feed_E[in_name_E[num_keys_values_plus_2]] = init_repeat_penality
-            if do_repeat_penality:
-                input_feed_G[in_name_G[2]] = penality_reset_count_beam_init
+            res = run_beam_decoding(encoded_audio_ort, outputs_A[1], current_limit)
         else:
-            input_feed_D[in_name_D[1]] = init_repeat_penality
-            penality_reset_count_greedy = 0
-
-        num_decode = 0
-        limit = generate_limit - all_outputs_A[1].numpy()
-        start_time = time.time()
-        while num_decode < limit:
-            all_outputs_C = ort_session_C.run_with_ort_values(out_name_C, input_feed_C)
-            if USE_BEAM_SEARCH:
-                if num_decode < 1:
-                    input_feed_E.update(zip(in_name_E[:num_keys_values_plus_1], all_outputs_C))
-                    all_outputs_E = ort_session_E.run_with_ort_values(out_name_E, input_feed_E)
-                    max_logits_idx = all_outputs_E[num_keys_values_plus_5].numpy()
-                    input_feed_F[in_name_F[num_keys_values_plus_4]] = all_outputs_E[num_keys_values_plus_4]
-                    if do_repeat_penality:
-                        input_feed_G[in_name_G[3]] = all_outputs_E[num_keys_values_plus_4]
-                else:
-                    input_feed_F.update(zip(in_name_F[:num_keys_values_plus_1], all_outputs_C))
-                    all_outputs_F = ort_session_F.run_with_ort_values(out_name_F, input_feed_F)
-                    max_logits_idx = all_outputs_F[num_keys_values_plus_4].numpy()
-                if max_logits_idx in STOP_TOKEN:
-                    save_id = all_outputs_F[num_keys_values_plus_1].numpy()[0, :num_decode]  # 0 is the Top_1
-                    asr_result += tokenizer.decode(save_id, skip_special_tokens=True)
-                    break
-                if do_repeat_penality and (num_decode >= PENALITY_RANGE):
-                    input_feed_G[in_name_G[0]] = all_outputs_F[num_keys_values_plus_1]
-                    input_feed_G[in_name_G[1]] = all_outputs_F[num_keys_values_plus_2]
-                    all_outputs_G = ort_session_G.run_with_ort_values(out_name_G, input_feed_G)
-                    input_feed_G[in_name_G[2]] = all_outputs_G[2]
-                    input_feed_F[in_name_F[num_keys_values_plus_1]] = all_outputs_G[0]
-                    input_feed_F[in_name_F[num_keys_values_plus_2]] = all_outputs_G[1]
-                if num_decode < 1:
-                    input_feed_C.update(zip(in_name_C[:num_keys_values], all_outputs_E))
-                    input_feed_B[in_name_B] = all_outputs_E[num_keys_values]
-                    input_feed_F[in_name_F[num_keys_values_plus_1]] = all_outputs_E[num_keys_values_plus_1]
-                    input_feed_F[in_name_F[num_keys_values_plus_2]] = all_outputs_E[num_keys_values_plus_2]
-                    input_feed_F[in_name_F[num_keys_values_plus_3]] = all_outputs_E[num_keys_values_plus_3]
-                else:
-                    input_feed_C.update(zip(in_name_C[:num_keys_values], all_outputs_F))
-                    input_feed_B[in_name_B] = all_outputs_F[num_keys_values]
-                    input_feed_F[in_name_F[num_keys_values_plus_1]] = all_outputs_F[num_keys_values_plus_1]
-                    input_feed_F[in_name_F[num_keys_values_plus_2]] = all_outputs_F[num_keys_values_plus_2]
-                    input_feed_F[in_name_F[num_keys_values_plus_3]] = all_outputs_F[num_keys_values_plus_3]
-            else:
-                input_feed_D[in_name_D[0]] = all_outputs_C[num_keys_values]
-                all_outputs_D = ort_session_D.run_with_ort_values(out_name_D, input_feed_D)
-                max_logits_idx = all_outputs_D[0].numpy()[0, 0]
-                if max_logits_idx in STOP_TOKEN:
-                    asr_result += tokenizer.decode(save_id_greedy[:num_decode], skip_special_tokens=True)
-                    break
-                if do_repeat_penality and (num_decode >= PENALITY_RANGE):
-                    reset_ids = save_id_greedy[penality_reset_count_greedy]
-                    if reset_ids != max_logits_idx:
-                        repeat_penality = all_outputs_D[1].numpy()
-                        repeat_penality[:, reset_ids] = 1.0
-                        input_feed_D[in_name_D[1]].update_inplace(repeat_penality)
-                    penality_reset_count_greedy += 1
-                else:
-                    input_feed_D[in_name_D[1]] = all_outputs_D[1]
-                input_feed_C.update(zip(in_name_C[:num_keys_values], all_outputs_C))
-                input_feed_B[in_name_B] = all_outputs_D[0]
-                save_id_greedy[num_decode] = max_logits_idx
-            input_feed_C[in_name_C[num_keys_values]] = ort_session_B.run_with_ort_values(out_name_B, input_feed_B)[0]
-            input_feed_C[in_name_C[num_keys_values_plus_1]] = all_outputs_C[num_keys_values_plus_1]
-            if num_decode < 1:
-                input_feed_C[in_name_C[num_keys_values_plus_2]] = init_ids_len_1
-                input_feed_C[in_name_C[num_keys_values_plus_3]] = init_attention_mask_0
-            num_decode += 1
+            res = run_greedy_decoding(encoded_audio_ort, outputs_A[1], current_limit)
+        final_asr_result += res
         slice_start += stride_step
-        slice_end = slice_start + INPUT_AUDIO_LENGTH
-        print(f"\nDecode: {((num_decode + 1) / (time.time() - start_time)):.3f} token/s\n")
-    print(asr_result, end="", flush=True)
-    print(f"\n\nRTF: {((time.time() - rtf_time) / (audio_len / SAMPLE_RATE)):.3f}")
-    print("----------------------------------------------------------------------------------------------------------")
+        
+    print(final_asr_result, end="", flush=True)
+    print(f"\n\nRTF: {((time.time() - rtf_time) / (audio_full_len / SAMPLE_RATE)):.3f}")
+    print("-" * 105)
