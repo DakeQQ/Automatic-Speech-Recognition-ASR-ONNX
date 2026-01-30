@@ -863,11 +863,11 @@ def get_sess_info(model_path, opts, providers, p_opts, r_opts):
     return sess, inputs, outputs
 
 
-def run_greedy_decoding(encoded_audio, current_embed, limit):
+def run_greedy_decoding(encoded_audio, encoded_len, limit):
     input_feed_C = {
         in_name_C[num_keys_values]: encoded_audio,
         in_name_C[num_keys_values_plus_1]: init_history_len,
-        in_name_C[num_keys_values_plus_2]: current_embed,
+        in_name_C[num_keys_values_plus_2]: encoded_len,
         in_name_C[num_keys_values_plus_3]: init_att_mask_1
     }
     for i in range(num_layers): input_feed_C[in_name_C[i]] = init_past_keys
@@ -925,11 +925,11 @@ def run_greedy_decoding(encoded_audio, current_embed, limit):
     return local_result
 
 
-def run_beam_decoding(encoded_audio, current_embed, limit):
+def run_beam_decoding(encoded_audio, encoded_len, limit):
     input_feed_C = {
         in_name_C[num_keys_values]: encoded_audio,
         in_name_C[num_keys_values_plus_1]: init_history_len,
-        in_name_C[num_keys_values_plus_2]: current_embed,
+        in_name_C[num_keys_values_plus_2]: encoded_len,
         in_name_C[num_keys_values_plus_3]: init_att_mask_1
     }
     for i in range(num_layers): input_feed_C[in_name_C[i]] = init_past_keys
@@ -1100,8 +1100,8 @@ for prompt_embed, test_file in zip(init_all_outputs_B, test_audio):
         input_feed_A[in_name_A[1]] = prompt_embed
         outputs_A = ort_session_A.run_with_ort_values(out_name_A, input_feed_A, run_options=run_options)
         encoded_audio_ort = outputs_A[0]
-        encoded_len_val = outputs_A[1].numpy()
-        current_limit = generate_limit - encoded_len_val
+        encoded_len = outputs_A[1].numpy()
+        current_limit = generate_limit - encoded_len
         if USE_BEAM_SEARCH:
             res = run_beam_decoding(encoded_audio_ort, outputs_A[1], current_limit)
         else:
