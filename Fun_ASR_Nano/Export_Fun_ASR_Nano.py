@@ -168,6 +168,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
     def __init__(self, funasr_nano, stft_model, nfft_stft, max_stft_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, _tokenizer):
         super(FUNASR_NANO_ENCODER, self).__init__()
         self.funasr_nano = funasr_nano.float()
+        self._replace_gelu_with_tanh_approximation(self.funasr_nano)
         self.stft_model = stft_model
         self.T_lfr = lfr_len
         self.lfr_n = lfr_n
@@ -183,12 +184,12 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         num_head = self.funasr_nano.audio_encoder.encoders._modules["0"].self_attn.h
         head_dim = self.funasr_nano.audio_encoder.encoders._modules["0"].self_attn.d_k
         self.pad_zeros = torch.zeros((1, num_head * head_dim, 5), dtype=torch.float32)
-        factor = float(head_dim ** (-0.25))
+        scale_factor = head_dim ** (-0.25)
         self.total_encoders = list(self.funasr_nano.audio_encoder.encoders0) + list(self.funasr_nano.audio_encoder.encoders) + list(self.funasr_nano.audio_encoder.tp_encoders)
         in_size = self.funasr_nano.audio_encoder.encoders._modules["0"].in_size
         for encoder_layer in self.total_encoders:
-            encoder_layer.self_attn.linear_q_k_v.weight.data[:-in_size] *= factor
-            encoder_layer.self_attn.linear_q_k_v.bias.data[:-in_size] *= factor
+            encoder_layer.self_attn.linear_q_k_v.weight.data[:-in_size] *= scale_factor
+            encoder_layer.self_attn.linear_q_k_v.bias.data[:-in_size] *= scale_factor
 
             # Fuse encoder_layer.norm1 into encoder_layer.self_attn.linear_q_k_v
             norm = encoder_layer.norm1
@@ -292,6 +293,14 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         for i in range(self.fake_token.shape[0]):
             self.fake_token[i] = (((i - 1) // 2 + 1 - 1) // 2 + 1 - 1) // 2 + 1
 
+    def _replace_gelu_with_tanh_approximation(self, module):
+        for name, child in module.named_children():
+            if isinstance(child, torch.nn.GELU):
+                setattr(module, name, torch.nn.GELU(approximate='tanh'))
+                print(f"Replaced GELU at: {name}")
+            else:
+                self._replace_gelu_with_tanh_approximation(child)
+    
     def forward(self, audio, query_embed):
         audio = audio.float()
         audio = audio - torch.mean(audio)  # Remove DC Offset
@@ -322,8 +331,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
                 x += attn
             else:
                 x = attn
-            x2 = encoder_layer.norm2(x)
-            x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(x2)))
+            x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(encoder_layer.norm2(x))))
         x = self.funasr_nano.audio_encoder.after_norm(x)
         for encoder_layer in self.funasr_nano.audio_encoder.tp_encoders:
             x1 = encoder_layer.norm1(x)
@@ -339,8 +347,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             attn = torch.matmul(attn, v_h).transpose(0, 1).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
             attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             x += attn
-            x2 = encoder_layer.norm2(x)
-            x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(x2)))
+            x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(encoder_layer.norm2(x))))
         x = self.funasr_nano.audio_encoder.tp_norm(x)
         x = self.funasr_nano.audio_adaptor.linear1(x)
         x = self.funasr_nano.audio_adaptor.relu(x)
@@ -357,8 +364,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             attn = torch.matmul(attn, v).transpose(0, 1).reshape(1, -1, block.self_attn.linear_out.in_features)
             attn = block.self_attn.linear_out(attn)
             x += attn
-            x2 = block.norm2(x)
-            x = x + block.feed_forward.w_2(block.feed_forward.activation(block.feed_forward.w_1(x2)))
+            x = x + block.feed_forward.w_2(block.feed_forward.activation(block.feed_forward.w_1(block.norm2(x))))
         x = x[:, :self.fake_token[features_len].to(torch.int64)]
         concat_embed = torch.cat([self.head_embed, query_embed, x, self.tail_embed], dim=1)
         return concat_embed, concat_embed.shape[1].unsqueeze(0)
@@ -376,25 +382,23 @@ class FUNASR_NANO_DECODER_EMBED(torch.nn.Module):
 class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
     def __init__(self, funasr_nano, max_seq_len, num_heads, num_key_value_heads, head_dim, num_layers, hidden_size):
         super(FUNASR_NANO_DECODER_MAIN, self).__init__()
-        self.funasr_nano_decoder_main = funasr_nano.llm.float()
+        self.funasr_nano = funasr_nano.llm.float()
+        self._replace_gelu_with_tanh_approximation(self.funasr_nano)
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.num_key_value_heads = num_key_value_heads
-        self.head_dim_half = head_dim // 2
+        self.head_dim_half = [head_dim // 2, head_dim // 2]
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.variance_epsilon = torch.tensor([1e-6], dtype=torch.float32)
-        self.scale_factor = float(head_dim ** -0.25)
-        self.norm_factor = float(hidden_size ** 0.5)
         self.overflow_scale = torch.tensor([0.01], dtype=torch.float32)
-
+        scale_factor = head_dim ** -0.25
+        norm_factor = hidden_size ** 0.5
         position_ids = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(-1)
-        idx_theta = (position_ids * self.funasr_nano_decoder_main.model.rotary_emb.inv_freq).unsqueeze(0).unsqueeze(0)
-        cos_rotary_pos_emb = torch.cos(idx_theta) * self.scale_factor
-        sin_rotary_pos_emb = torch.sin(idx_theta) * self.scale_factor
+        idx_theta = (position_ids * self.funasr_nano.model.rotary_emb.inv_freq).unsqueeze(0).unsqueeze(0)
+        cos_rotary_pos_emb = torch.cos(idx_theta)
+        sin_rotary_pos_emb = torch.sin(idx_theta)
         self.cos_rotary_pos_emb = torch.cat((cos_rotary_pos_emb, cos_rotary_pos_emb), dim=-1).half()
         self.sin_rotary_pos_emb = torch.cat((sin_rotary_pos_emb, sin_rotary_pos_emb), dim=-1).half()
-
         self.save_key = [None] * num_layers
         self.save_value = [None] * num_layers
         self.attention_mask = (1 - torch.tril(torch.ones([1, 1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
@@ -402,7 +406,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         # --- Fuse / Rearrange weights ---
         with torch.no_grad():
             # 1) Fuse q/k/v into qkv & Fuse input rms norm
-            for layer in self.funasr_nano_decoder_main.model.layers:
+            for layer in self.funasr_nano.model.layers:
                 q_proj = layer.self_attn.q_proj
                 k_proj = layer.self_attn.k_proj
                 v_proj = layer.self_attn.v_proj
@@ -428,13 +432,16 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 del layer.self_attn.k_proj
                 del layer.self_attn.v_proj
 
+                layer.self_attn.q_norm.weight.mul_(scale_factor)
+                layer.self_attn.k_norm.weight.mul_(scale_factor)
+
                 # Fuse input rms norm weight into qkv input columns
-                w = layer.input_layernorm.weight.unsqueeze(0) * self.norm_factor
+                w = layer.input_layernorm.weight.unsqueeze(0) * norm_factor
                 qkv.weight.mul_(w)
                 layer.self_attn.qkv = qkv
                 del layer.input_layernorm
 
-                w = layer.post_attention_layernorm.weight.unsqueeze(0) * self.norm_factor
+                w = layer.post_attention_layernorm.weight.unsqueeze(0) * norm_factor
                 gate = layer.mlp.gate_proj
                 up = layer.mlp.up_proj
 
@@ -452,12 +459,20 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 del layer.post_attention_layernorm
 
             # 3) Fuse final norm weight into lm_head
-            w = self.funasr_nano_decoder_main.model.norm.weight.unsqueeze(0) * self.norm_factor
-            self.funasr_nano_decoder_main.lm_head.weight.mul_(w)
-            del self.funasr_nano_decoder_main.model.norm
+            w = self.funasr_nano.model.norm.weight.unsqueeze(0) * norm_factor
+            self.funasr_nano.lm_head.weight.mul_(w)
+            del self.funasr_nano.model.norm
 
-    def rotate_half(self, x, head_dim_half, dim):
-        x1, x2 = torch.split(x, [head_dim_half, head_dim_half], dim=dim)
+    def _replace_gelu_with_tanh_approximation(self, module):
+        for name, child in module.named_children():
+            if isinstance(child, torch.nn.GELU):
+                setattr(module, name, torch.nn.GELU(approximate='tanh'))
+                print(f"Replaced GELU at: {name}")
+            else:
+                self._replace_gelu_with_tanh_approximation(child)
+    
+    def rotate_half(self, x, dim):
+        x1, x2 = torch.split(x, self.head_dim_half, dim=dim)
         return torch.cat((-x2, x1), dim=dim)
 
     def repeat_k(self, kv_states, num_key_value_groups, head_dim, num_heads, batch_size):
@@ -478,11 +493,11 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         rotary_pos_emb_sin_k = rotary_pos_emb_sin_q.transpose(-1, -2).unsqueeze(0)
         attention_mask = (self.attention_mask[..., :ids_len, :kv_seq_len] * mask).float()
         batch_size = hidden_states.shape[0].unsqueeze(0)
-        for i, layer in enumerate(self.funasr_nano_decoder_main.model.layers):
+        for i, layer in enumerate(self.funasr_nano.model.layers):
             residual = hidden_states
             if PREVENT_F16_OVERFLOW:
                 hidden_states = hidden_states * self.overflow_scale
-            hidden_states_norm = hidden_states * torch.rsqrt(hidden_states.pow(2).sum(-1, keepdim=True) + self.variance_epsilon)
+            hidden_states_norm = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
             qkv = layer.self_attn.qkv(hidden_states_norm)
             q, k, v = torch.split(qkv, [layer.self_attn.q_out_features, layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
             q = q.view(batch_size, -1, self.num_heads, self.head_dim)
@@ -490,8 +505,8 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             v = v.half().view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).transpose(1, 3)
             q = layer.self_attn.q_norm(q).transpose(1, 2)
             k = layer.self_attn.k_norm(k).permute(0, 3, 2, 4, 1)
-            q = q * rotary_pos_emb_cos_q + self.rotate_half(q, self.head_dim_half, -1) * rotary_pos_emb_sin_q
-            k = k * rotary_pos_emb_cos_k + self.rotate_half(k, self.head_dim_half, -2) * rotary_pos_emb_sin_k
+            q = q * rotary_pos_emb_cos_q + self.rotate_half(q, -1) * rotary_pos_emb_sin_q
+            k = k * rotary_pos_emb_cos_k + self.rotate_half(k, -2) * rotary_pos_emb_sin_k
             k = torch.cat((all_inputs[i], k.half()), dim=-1)
             v = torch.cat((all_inputs[i + self.num_layers], v), dim=-2)
             self.save_key[i] = k
@@ -504,7 +519,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             residual = hidden_states
             if PREVENT_F16_OVERFLOW:
                 hidden_states = hidden_states * self.overflow_scale
-            hidden_states = hidden_states * torch.rsqrt(hidden_states.pow(2).sum(-1, keepdim=True) + self.variance_epsilon)
+            hidden_states = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
             gate_up = layer.mlp.gate_up_proj(hidden_states)
             gate, up = torch.split(gate_up, [layer.mlp.down_proj.in_features, layer.mlp.down_proj.in_features], dim=-1)
             hidden_states = layer.mlp.down_proj(layer.mlp.act_fn(gate) * up)
@@ -512,8 +527,8 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         hidden_states = hidden_states[:, -1]
         if PREVENT_F16_OVERFLOW:
             hidden_states = hidden_states * self.overflow_scale
-        hidden_states = hidden_states * torch.rsqrt(hidden_states.pow(2).sum(-1, keepdim=True) + self.variance_epsilon)
-        logits = self.funasr_nano_decoder_main.lm_head(hidden_states)
+        hidden_states = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
+        logits = self.funasr_nano.lm_head(hidden_states)
         return *self.save_key, *self.save_value, logits, kv_seq_len
 
 
@@ -918,7 +933,6 @@ def run_greedy_decoding(encoded_audio, encoded_len, limit):
         decoded_ids[num_decode] = max_logits_idx
         input_feed_C.update(zip(in_name_C[:num_keys_values], outputs_C))
         next_embed = ort_session_B.run_with_ort_values(out_name_B, input_feed_B, run_options=run_options)[0]
-        a = next_embed.numpy()
         input_feed_C[in_name_C[num_keys_values]] = next_embed
         input_feed_C[in_name_C[num_keys_values_plus_1]] = outputs_C[num_keys_values_plus_1]
         if num_decode < 1:
@@ -1117,3 +1131,4 @@ for prompt_embed, test_file in zip(init_all_outputs_B, test_audio):
     print(final_asr_result, end="", flush=True)
     print(f"\n\nRTF: {((time.time() - rtf_time) / (audio_full_len / SAMPLE_RATE)):.3f}")
     print("-" * 105)
+    
