@@ -394,14 +394,14 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         scale_factor = head_dim ** -0.25
         norm_factor = hidden_size ** 0.5
         position_ids = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(-1)
-        idx_theta = (position_ids * self.funasr_nano.model.rotary_emb.inv_freq).unsqueeze(0).unsqueeze(0)
+        idx_theta = (position_ids * self.funasr_nano.model.rotary_emb.inv_freq).unsqueeze(0).unsqueeze(0).unsqueeze(0)
         cos_rotary_pos_emb = torch.cos(idx_theta)
         sin_rotary_pos_emb = torch.sin(idx_theta)
         self.cos_rotary_pos_emb = torch.cat((cos_rotary_pos_emb, cos_rotary_pos_emb), dim=-1).half()
-        self.sin_rotary_pos_emb = torch.cat((sin_rotary_pos_emb, sin_rotary_pos_emb), dim=-1).half()
+        self.sin_rotary_pos_emb = torch.cat((-sin_rotary_pos_emb, sin_rotary_pos_emb), dim=-1).half()
         self.save_key = [None] * num_layers
         self.save_value = [None] * num_layers
-        self.attention_mask = (1 - torch.tril(torch.ones([1, 1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
+        self.attention_mask = (1 - torch.tril(torch.ones([1, 1, 1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
 
         # --- Fuse / Rearrange weights ---
         with torch.no_grad():
@@ -473,13 +473,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
     
     def rotate_half(self, x, dim):
         x1, x2 = torch.split(x, self.head_dim_half, dim=dim)
-        return torch.cat((-x2, x1), dim=dim)
-
-    def repeat_k(self, kv_states, num_key_value_groups, head_dim, num_heads, batch_size):
-        return torch.cat([kv_states for _ in range(num_key_value_groups)], dim=2).view(batch_size, num_heads, head_dim, -1)
-
-    def repeat_v(self, kv_states, num_key_value_groups, head_dim, num_heads, batch_size):
-        return torch.cat([kv_states for _ in range(num_key_value_groups)], dim=2).view(batch_size, num_heads, -1, head_dim)
+        return torch.cat((x2, x1), dim=dim)
 
     def forward(self, *all_inputs):
         hidden_states = all_inputs[-4]
@@ -489,8 +483,8 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         kv_seq_len = history_len + ids_len
         rotary_pos_emb_cos_q = self.cos_rotary_pos_emb[..., history_len:kv_seq_len, :].float()
         rotary_pos_emb_sin_q = self.sin_rotary_pos_emb[..., history_len:kv_seq_len, :].float()
-        rotary_pos_emb_cos_k = rotary_pos_emb_cos_q.transpose(-1, -2).unsqueeze(0)
-        rotary_pos_emb_sin_k = rotary_pos_emb_sin_q.transpose(-1, -2).unsqueeze(0)
+        rotary_pos_emb_cos_k = rotary_pos_emb_cos_q.transpose(-1, -2)
+        rotary_pos_emb_sin_k = rotary_pos_emb_sin_q.transpose(-1, -2)
         attention_mask = (self.attention_mask[..., :ids_len, :kv_seq_len] * mask).float()
         batch_size = hidden_states.shape[0].unsqueeze(0)
         for i, layer in enumerate(self.funasr_nano.model.layers):
@@ -500,10 +494,10 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             hidden_states_norm = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
             qkv = layer.self_attn.qkv(hidden_states_norm)
             q, k, v = torch.split(qkv, [layer.self_attn.q_out_features, layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
-            q = q.view(batch_size, -1, self.num_heads, self.head_dim)
+            q = q.view(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim)
             k = k.view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim)
             v = v.half().view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).transpose(1, 3)
-            q = layer.self_attn.q_norm(q).transpose(1, 2)
+            q = layer.self_attn.q_norm(q).permute(0, 2, 3, 1, 4)
             k = layer.self_attn.k_norm(k).permute(0, 3, 2, 4, 1)
             q = q * rotary_pos_emb_cos_q + self.rotate_half(q, -1) * rotary_pos_emb_sin_q
             k = k * rotary_pos_emb_cos_k + self.rotate_half(k, -2) * rotary_pos_emb_sin_k
@@ -511,10 +505,11 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             v = torch.cat((all_inputs[i + self.num_layers], v), dim=-2)
             self.save_key[i] = k
             self.save_value[i] = v
-            k = self.repeat_k(k.float(), self.num_key_value_groups, self.head_dim, self.num_heads, batch_size)
-            v = self.repeat_v(v.float(), self.num_key_value_groups, self.head_dim, self.num_heads, batch_size)
-            attn = torch.nn.functional.softmax(torch.matmul(q, k) + attention_mask, dim=-1, dtype=torch.float32)
-            attn_out = layer.self_attn.o_proj(torch.matmul(attn, v).transpose(1, 2).reshape(batch_size, -1, layer.self_attn.o_proj.in_features))
+            attn = torch.matmul(q, k.float())
+            attn = torch.nn.functional.softmax(attn + attention_mask, dim=-1, dtype=torch.float32)
+            attn = torch.matmul(attn, v.float())
+            attn = attn.permute(0, 3, 1, 2, 4).reshape(batch_size, -1, layer.self_attn.o_proj.in_features)
+            attn_out = layer.self_attn.o_proj(attn)
             hidden_states = residual + attn_out
             residual = hidden_states
             if PREVENT_F16_OVERFLOW:
