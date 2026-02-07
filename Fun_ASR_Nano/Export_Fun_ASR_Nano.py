@@ -60,7 +60,7 @@ REPEAT_PENALITY = 1.0                                       # Range from 0.0 to 
 PENALITY_RANGE = 10                                         # Penalizes the most recent output. "10" means the last 10 tokens.
 
 # Runtime & Export Settings
-PREVENT_F16_OVERFLOW = False                                # Prevent float16 overflow. Set True for Q4F16 or Q8F16 or F16 quantization.
+PREVENT_F16_OVERFLOW = False                                # Prevent float16 overflow. Set True for Q4F16 or Q8F16 or F16 quantization. Not recommended.
 MAX_THREADS = 0                                             # Parllel CPU threads. Set 0 for auto.
 DEVICE_ID = 0                                               # Default to zero.
 OPSET = 17                                                  # ONNX Runtime opset version.
@@ -491,8 +491,8 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             residual = hidden_states
             if PREVENT_F16_OVERFLOW:
                 hidden_states = hidden_states * self.overflow_scale
-            hidden_states_norm = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
-            qkv = layer.self_attn.qkv(hidden_states_norm)
+            hidden_states = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
+            qkv = layer.self_attn.qkv(hidden_states)
             q, k, v = torch.split(qkv, [layer.self_attn.q_out_features, layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
             q = q.view(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim)
             k = k.view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim)
