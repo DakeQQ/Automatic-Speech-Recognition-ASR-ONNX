@@ -307,13 +307,13 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[..., :1], audio[..., 1:] - self.pre_emphasis * audio[..., :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio, 'constant')
-        mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + self.variance_epsilon).log()
+        mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + self.variance_epsilon).log() * self.output_size_factor
         features_len = mel_features.shape[1].unsqueeze(0)
         left_padding = mel_features[:, [0]]
         padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
         _len = features_len // self.lfr_n - 1
         mel_features = padded_inputs[:, self.indices_mel[:_len].int()].reshape(1, _len, -1)
-        x = mel_features * self.output_size_factor + self.position_encoding[:, :_len].float()
+        x = mel_features + self.position_encoding[:, :_len].float()
         for encoder_layer in self.funasr_nano.audio_encoder.encoders0 + self.funasr_nano.audio_encoder.encoders:
             x1 = encoder_layer.norm1(x)
             qkv = encoder_layer.self_attn.linear_q_k_v(x1)
