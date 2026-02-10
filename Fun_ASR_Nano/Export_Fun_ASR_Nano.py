@@ -383,7 +383,6 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         self.head_dim_half = [head_dim // 2, head_dim // 2]
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.overflow_scale = torch.tensor([0.01], dtype=torch.float32)
-        self.eps = torch.tensor([1e-6], dtype=torch.float32)
         scale_factor = head_dim ** -0.25
         norm_factor = hidden_size ** 0.5
         position_ids = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(-1)
@@ -426,7 +425,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 del layer.self_attn.v_proj
 
                 qk_norm_weight = torch.cat([layer.self_attn.q_norm.weight.repeat(self.num_heads), layer.self_attn.k_norm.weight.repeat(self.num_key_value_heads)]) * scale_factor
-                layer.self_attn.qk_norm_weight = torch.nn.Parameter(qk_norm_weight.view(1, 1, self.total_qk_heads, self.head_dim))
+                layer.self_attn.qk_norm_weight = torch.nn.Parameter(qk_norm_weight.view(1, 1, self.total_qk_heads, self.head_dim) * norm_factor)
                 del layer.self_attn.q_norm
                 del layer.self_attn.k_norm
 
@@ -488,7 +487,9 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             qkv = layer.self_attn.qkv(hidden_states)
             qk, v = torch.split(qkv, [layer.self_attn.q_out_features + layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
             qk = qk.view(batch_size, -1, self.total_qk_heads, self.head_dim)
-            qk = layer.self_attn.qk_norm_weight * (qk * torch.rsqrt(qk.pow(2).mean(dim=-1, keepdim=True) + self.eps))
+            if PREVENT_F16_OVERFLOW:
+                qk = qk * self.overflow_scale
+            qk = layer.self_attn.qk_norm_weight * (qk * torch.rsqrt(qk.square().sum(dim=-1, keepdim=True)))
             qk_rotated = qk * rotary_pos_emb_cos + self.rotate_half(qk, -1) * rotary_pos_emb_sin
             q, k = torch.split(qk_rotated, [self.num_heads, self.num_key_value_heads], dim=2)
             q = q.view(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim).permute(0, 2, 3, 1, 4)
