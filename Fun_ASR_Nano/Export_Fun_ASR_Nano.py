@@ -379,18 +379,17 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.num_key_value_heads = num_key_value_heads
-        self.total_qk_heads = self.num_heads + self.num_key_value_heads
         self.head_dim_half = [head_dim // 2, head_dim // 2]
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.overflow_scale = torch.tensor([0.01], dtype=torch.float32)
         scale_factor = head_dim ** -0.25
         norm_factor = hidden_size ** 0.5
         position_ids = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(-1)
-        idx_theta = (position_ids * self.funasr_nano.model.rotary_emb.inv_freq).unsqueeze(1).unsqueeze(0)
+        idx_theta = (position_ids * self.funasr_nano.model.rotary_emb.inv_freq).unsqueeze(0).unsqueeze(0).unsqueeze(0)
         cos_rotary_pos_emb = torch.cos(idx_theta)
         sin_rotary_pos_emb = torch.sin(idx_theta)
-        self.register_buffer("cos_rotary_pos_emb", torch.cat((cos_rotary_pos_emb, cos_rotary_pos_emb), dim=-1).half(), persistent=False)
-        self.register_buffer("sin_rotary_pos_emb", torch.cat((-sin_rotary_pos_emb, sin_rotary_pos_emb), dim=-1).half(), persistent=False)
+        self.cos_rotary_pos_emb = torch.cat((cos_rotary_pos_emb, cos_rotary_pos_emb), dim=-1).half()
+        self.sin_rotary_pos_emb = torch.cat((-sin_rotary_pos_emb, sin_rotary_pos_emb), dim=-1).half()
         self.save_key = [None] * num_layers
         self.save_value = [None] * num_layers
         self.attention_mask = (1 - torch.tril(torch.ones([1, 1, 1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
@@ -424,10 +423,8 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 del layer.self_attn.k_proj
                 del layer.self_attn.v_proj
 
-                qk_norm_weight = torch.cat([layer.self_attn.q_norm.weight.repeat(self.num_heads), layer.self_attn.k_norm.weight.repeat(self.num_key_value_heads)]) * scale_factor
-                layer.self_attn.qk_norm_weight = torch.nn.Parameter(qk_norm_weight.view(1, 1, self.total_qk_heads, self.head_dim) * norm_factor)
-                del layer.self_attn.q_norm
-                del layer.self_attn.k_norm
+                layer.self_attn.q_norm.weight.mul_(scale_factor)
+                layer.self_attn.k_norm.weight.mul_(scale_factor)
 
                 # Fuse input rms norm weight into qkv input columns
                 w = layer.input_layernorm.weight.unsqueeze(0) * norm_factor
@@ -464,7 +461,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 print(f"Replaced GELU at: {name}")
             else:
                 self._replace_gelu_with_tanh_approximation(child)
-
+    
     def rotate_half(self, x, dim):
         x1, x2 = torch.split(x, self.head_dim_half, dim=dim)
         return torch.cat((x2, x1), dim=dim)
@@ -475,8 +472,10 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         ids_len = all_inputs[-2]
         mask = all_inputs[-1]
         kv_seq_len = history_len + ids_len
-        rotary_pos_emb_cos = self.cos_rotary_pos_emb[:, history_len:kv_seq_len].float()
-        rotary_pos_emb_sin = self.sin_rotary_pos_emb[:, history_len:kv_seq_len].float()
+        rotary_pos_emb_cos_q = self.cos_rotary_pos_emb[..., history_len:kv_seq_len, :].float()
+        rotary_pos_emb_sin_q = self.sin_rotary_pos_emb[..., history_len:kv_seq_len, :].float()
+        rotary_pos_emb_cos_k = rotary_pos_emb_cos_q.transpose(-1, -2)
+        rotary_pos_emb_sin_k = rotary_pos_emb_sin_q.transpose(-1, -2)
         attention_mask = (self.attention_mask[..., :ids_len, :kv_seq_len] * mask).float()
         batch_size = hidden_states.shape[0].unsqueeze(0)
         for i, layer in enumerate(self.funasr_nano.model.layers):
@@ -485,16 +484,14 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 hidden_states = hidden_states * self.overflow_scale
             hidden_states = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
             qkv = layer.self_attn.qkv(hidden_states)
-            qk, v = torch.split(qkv, [layer.self_attn.q_out_features + layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
-            qk = qk.view(batch_size, -1, self.total_qk_heads, self.head_dim)
-            if PREVENT_F16_OVERFLOW:
-                qk = qk * self.overflow_scale
-            qk = layer.self_attn.qk_norm_weight * (qk * torch.rsqrt(qk.square().sum(dim=-1, keepdim=True)))
-            qk_rotated = qk * rotary_pos_emb_cos + self.rotate_half(qk, -1) * rotary_pos_emb_sin
-            q, k = torch.split(qk_rotated, [self.num_heads, self.num_key_value_heads], dim=2)
-            q = q.view(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim).permute(0, 2, 3, 1, 4)
-            k = k.view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).permute(0, 3, 2, 4, 1)
+            q, k, v = torch.split(qkv, [layer.self_attn.q_out_features, layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
+            q = q.view(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim)
+            k = k.view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim)
             v = v.half().view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).transpose(1, 3)
+            q = layer.self_attn.q_norm(q).permute(0, 2, 3, 1, 4)
+            k = layer.self_attn.k_norm(k).permute(0, 3, 2, 4, 1)
+            q = q * rotary_pos_emb_cos_q + self.rotate_half(q, -1) * rotary_pos_emb_sin_q
+            k = k * rotary_pos_emb_cos_k + self.rotate_half(k, -2) * rotary_pos_emb_sin_k
             k = torch.cat((all_inputs[i], k.half()), dim=-1)
             v = torch.cat((all_inputs[i + self.num_layers], v), dim=-2)
             self.save_key[i] = k
