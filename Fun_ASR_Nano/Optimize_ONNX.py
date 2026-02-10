@@ -174,16 +174,17 @@ for model_name in model_names:
                 )
             model.save_model_to_file(quanted_model_path, use_external_data_format=two_parts_save)
         else:
-            slim(
-                model=quant_utils.load_model_with_shape_infer(Path(model_path)),
-                output_model=quanted_model_path,
-                no_shape_infer=True,
-                skip_fusion_patterns=False,
-                no_constant_folding=False,
-                save_as_external_data=two_parts_save,
-                verbose=False,
-                dtype='fp16' if use_f16 and "First_Beam_Search" in model_path else None
-            )
+            if "Main" not in model_path:
+                slim(
+                    model=quant_utils.load_model_with_shape_infer(Path(model_path)),
+                    output_model=quanted_model_path,
+                    no_shape_infer=True,
+                    skip_fusion_patterns=False,
+                    no_constant_folding=False,
+                    save_as_external_data=two_parts_save,
+                    verbose=False,
+                    dtype='fp16' if use_f16 and "First_Beam_Search" in model_path else None
+                )
 
     # transformers.optimizer
     if ("Reset_Penality" not in model_path) and ("First_Beam_Search" not in model_path):
@@ -220,7 +221,8 @@ for model_name in model_names:
             skip_fusion_patterns=False,
             no_constant_folding=False,
             save_as_external_data=two_parts_save,
-            verbose=False
+            verbose=False,
+            dtype='fp16' if use_f16 and "Main" in model_path else None
         )
 
     # Upgrade the Opset version. (optional process)
