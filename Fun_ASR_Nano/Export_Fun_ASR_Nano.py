@@ -317,15 +317,12 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         for encoder_layer in self.funasr_nano.audio_encoder.encoders0 + self.funasr_nano.audio_encoder.encoders:
             x1 = encoder_layer.norm1(x)
             qkv = encoder_layer.self_attn.linear_q_k_v(x1)
-            qkv = qkv.view(-1, 3, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k)
-            q, k, v = qkv.unbind(dim=1)
-            q_h = q.transpose(0, 1)
-            k_h = k.permute(1, 2, 0)
-            v_h = v.transpose(0, 1)
-            v = v.reshape(1, -1, encoder_layer.size)
+            qkv = qkv.view(-1, 3, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0, 3)
+            q_h, k_h, v_h = qkv.split([1, 1, 1], dim=0)
+            v = v_h.transpose(1, 2).reshape(1, -1, encoder_layer.size)
             fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
-            attn = torch.softmax(torch.matmul(q_h, k_h), dim=-1)
-            attn = torch.matmul(attn, v_h).transpose(0, 1).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
+            attn = torch.softmax(torch.matmul(q_h, k_h.transpose(-1, -2)), dim=-1, dtype=torch.float32)
+            attn = torch.matmul(attn, v_h).transpose(1, 2).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
             attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             if encoder_layer.in_size == encoder_layer.size:
                 x += attn
@@ -336,15 +333,12 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         for encoder_layer in self.funasr_nano.audio_encoder.tp_encoders:
             x1 = encoder_layer.norm1(x)
             qkv = encoder_layer.self_attn.linear_q_k_v(x1)
-            qkv = qkv.view(-1, 3, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k)
-            q, k, v = qkv.unbind(dim=1)
-            q_h = q.transpose(0, 1)
-            k_h = k.permute(1, 2, 0)
-            v_h = v.transpose(0, 1)
-            v = v.reshape(1, -1, encoder_layer.size)
+            qkv = qkv.view(-1, 3, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0, 3)
+            q_h, k_h, v_h = qkv.split([1, 1, 1], dim=0)
+            v = v_h.transpose(1, 2).reshape(1, -1, encoder_layer.size)
             fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
-            attn = torch.softmax(torch.matmul(q_h, k_h), dim=-1)
-            attn = torch.matmul(attn, v_h).transpose(0, 1).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
+            attn = torch.softmax(torch.matmul(q_h, k_h.transpose(-1, -2)), dim=-1)
+            attn = torch.matmul(attn, v_h).transpose(1, 2).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
             attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             x += attn
             x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(encoder_layer.norm2(x))))
@@ -355,13 +349,10 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         for block in self.funasr_nano.audio_adaptor.blocks:
             x1 = block.norm1(x)
             qkv = block.self_attn.linear_q_k_v(x1)
-            qkv = qkv.view(-1, 3, block.self_attn.h, block.self_attn.d_k)
-            q, k, v = qkv.unbind(dim=1)
-            q = q.transpose(0, 1)
-            k = k.permute(1, 2, 0)
-            v = v.transpose(0, 1)
-            attn = torch.softmax(torch.matmul(q, k), dim=-1)
-            attn = torch.matmul(attn, v).transpose(0, 1).reshape(1, -1, block.self_attn.linear_out.in_features)
+            qkv = qkv.view(-1, 3, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0, 3)
+            q, k, v = qkv.split([1, 1, 1], dim=0)
+            attn = torch.softmax(torch.matmul(q, k.transpose(-1, -2)), dim=-1)
+            attn = torch.matmul(attn, v).transpose(1, 2).reshape(1, -1, block.self_attn.linear_out.in_features)
             attn = block.self_attn.linear_out(attn)
             x += attn
             x = x + block.feed_forward.w_2(block.feed_forward.activation(block.feed_forward.w_1(block.norm2(x))))
