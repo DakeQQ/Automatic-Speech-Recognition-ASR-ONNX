@@ -9,16 +9,16 @@ from funasr import AutoModel
 from transformers import AutoTokenizer
 from STFT_Process import STFT_Process                                                                    # The custom STFT/ISTFT can be exported in ONNX format.
 
-model_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512'                                                 # Set the path where the [Fun-ASR-Nano-2512, Fun-ASR-MLT-Nano-2512] downloaded.  URL: https://modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512 / https://modelscope.cn/models/FunAudioLLM/Fun-ASR-MLT-Nano-2512
-tokenizer_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                                  # Set the tokenizer path.
-onnx_model_A = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Encoder.onnx'                      # The exported onnx model path.
-onnx_model_B = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Embed.onnx'
-onnx_model_C = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Main.onnx'
-onnx_model_D = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Greedy_Search.onnx'
-onnx_model_E = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/First_Beam_Search.onnx'
-onnx_model_F = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Second_Beam_Search.onnx'
-onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Reset_Penality.onnx'
-onnx_model_H = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Argmax.onnx'
+model_path = r'/home/iamjDakeQQ/Downloads/Fun-ASR-Nano-2512'                                                 # Set the path where the [Fun-ASR-Nano-2512, Fun-ASR-MLT-Nano-2512] downloaded.  URL: https://modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512 / https://modelscope.cn/models/FunAudioLLM/Fun-ASR-MLT-Nano-2512
+tokenizer_path = r'/home/iamjDakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                                  # Set the tokenizer path.
+onnx_model_A = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Encoder.onnx'                      # The exported onnx model path.
+onnx_model_B = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Embed.onnx'
+onnx_model_C = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Main.onnx'
+onnx_model_D = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/Greedy_Search.onnx'
+onnx_model_E = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/First_Beam_Search.onnx'
+onnx_model_F = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/Second_Beam_Search.onnx'
+onnx_model_G = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/Reset_Penality.onnx'
+onnx_model_H = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/Argmax.onnx'
 
 # The exported onnx model path.
 test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/yue.mp3", "./example/ja.mp3"]          # The test audio list.
@@ -382,26 +382,30 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         self.head_dim_half = [head_dim // 2, head_dim // 2]
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.overflow_scale = torch.tensor([0.01], dtype=torch.float32)
+        
+        # Scaling Factors
         scale_factor = head_dim ** -0.25
         norm_factor = hidden_size ** 0.5
+        norm_factor_qk = head_dim ** 0.5
+        
         position_ids = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(-1)
-        idx_theta = (position_ids * self.funasr_nano.model.rotary_emb.inv_freq).unsqueeze(0).unsqueeze(0).unsqueeze(0)
-        cos_rotary_pos_emb = torch.cos(idx_theta)
-        sin_rotary_pos_emb = torch.sin(idx_theta)
-        self.cos_rotary_pos_emb = torch.cat((cos_rotary_pos_emb, cos_rotary_pos_emb), dim=-1).half()
-        self.sin_rotary_pos_emb = torch.cat((-sin_rotary_pos_emb, sin_rotary_pos_emb), dim=-1).half()
+        idx_theta = (position_ids * self.funasr_nano.model.rotary_emb.inv_freq).unsqueeze(1).unsqueeze(0)
+        cos = torch.cos(idx_theta)
+        sin = torch.sin(idx_theta)
+        self.cos_rotary_pos_emb = torch.cat([cos, cos], dim=-1).half()
+        self.sin_rotary_pos_emb = torch.cat([-sin, sin], dim=-1).half()
+        
         self.save_key = [None] * num_layers
         self.save_value = [None] * num_layers
         self.attention_mask = (1 - torch.tril(torch.ones([1, 1, 1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
 
         # --- Fuse / Rearrange weights ---
         with torch.no_grad():
-            # 1) Fuse q/k/v into qkv & Fuse input rms norm
             for layer in self.funasr_nano.model.layers:
                 q_proj = layer.self_attn.q_proj
                 k_proj = layer.self_attn.k_proj
                 v_proj = layer.self_attn.v_proj
-                
+
                 layer.self_attn.q_out_features = int(q_proj.out_features)
                 layer.self_attn.k_out_features = int(k_proj.out_features)
                 layer.self_attn.v_out_features = int(v_proj.out_features)
@@ -409,29 +413,41 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 in_features = int(q_proj.in_features)
                 out_features = int(q_proj.out_features + k_proj.out_features + v_proj.out_features)
                 has_bias = (q_proj.bias is not None) or (k_proj.bias is not None) or (v_proj.bias is not None)
-                
+
+                # 1) qkv Fusion
                 qkv = torch.nn.Linear(in_features, out_features, bias=has_bias)
                 qkv.weight.copy_(torch.cat([q_proj.weight, k_proj.weight, v_proj.weight], dim=0))
-                
+
                 if has_bias:
                     dtype = qkv.weight.dtype
                     qb = q_proj.bias if q_proj.bias is not None else torch.zeros(q_proj.out_features, dtype=dtype)
                     kb = k_proj.bias if k_proj.bias is not None else torch.zeros(k_proj.out_features, dtype=dtype)
                     vb = v_proj.bias if v_proj.bias is not None else torch.zeros(v_proj.out_features, dtype=dtype)
                     qkv.bias.copy_(torch.cat([qb, kb, vb], dim=0))
+                
                 del layer.self_attn.q_proj
                 del layer.self_attn.k_proj
                 del layer.self_attn.v_proj
 
-                layer.self_attn.q_norm.weight.mul_(scale_factor)
-                layer.self_attn.k_norm.weight.mul_(scale_factor)
+                # 2) QK Norm Fusion (Combine Q and K norm weights)
+                layer.self_attn.q_norm.weight.mul_(scale_factor * norm_factor_qk)
+                layer.self_attn.k_norm.weight.mul_(scale_factor * norm_factor_qk)
+                
+                q_norm_w = layer.self_attn.q_norm.weight.repeat(self.num_heads)
+                k_norm_w = layer.self_attn.k_norm.weight.repeat(self.num_key_value_heads)
+                
+                # Shape: [1, 1, num_heads + num_kv_heads, head_dim] for broadcasting
+                layer.self_attn.qk_norm_weight = torch.nn.Parameter(torch.cat([q_norm_w, k_norm_w], dim=0).view(1, 1, -1, self.head_dim))
+                del layer.self_attn.q_norm
+                del layer.self_attn.k_norm
 
-                # Fuse input rms norm weight into qkv input columns
+                # 3) Fuse input rms norm into qkv
                 w = layer.input_layernorm.weight.unsqueeze(0) * norm_factor
                 qkv.weight.mul_(w)
                 layer.self_attn.qkv = qkv
                 del layer.input_layernorm
 
+                # 4) Fuse post attn norm into MLP
                 w = layer.post_attention_layernorm.weight.unsqueeze(0) * norm_factor
                 gate = layer.mlp.gate_proj
                 up = layer.mlp.up_proj
@@ -449,7 +465,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 del layer.mlp.up_proj
                 del layer.post_attention_layernorm
 
-            # 3) Fuse final norm weight into lm_head
+            # 5) Fuse final norm
             w = self.funasr_nano.model.norm.weight.unsqueeze(0) * norm_factor
             self.funasr_nano.lm_head.weight.mul_(w)
             del self.funasr_nano.model.norm
@@ -461,7 +477,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 print(f"Replaced GELU at: {name}")
             else:
                 self._replace_gelu_with_tanh_approximation(child)
-    
+
     def rotate_half(self, x, dim):
         x1, x2 = torch.split(x, self.head_dim_half, dim=dim)
         return torch.cat((x2, x1), dim=dim)
@@ -472,10 +488,8 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         ids_len = all_inputs[-2]
         mask = all_inputs[-1]
         kv_seq_len = history_len + ids_len
-        rotary_pos_emb_cos_q = self.cos_rotary_pos_emb[..., history_len:kv_seq_len, :].float()
-        rotary_pos_emb_sin_q = self.sin_rotary_pos_emb[..., history_len:kv_seq_len, :].float()
-        rotary_pos_emb_cos_k = rotary_pos_emb_cos_q.transpose(-1, -2)
-        rotary_pos_emb_sin_k = rotary_pos_emb_sin_q.transpose(-1, -2)
+        rotary_pos_emb_cos = self.cos_rotary_pos_emb[:, history_len:kv_seq_len].float()
+        rotary_pos_emb_sin = self.sin_rotary_pos_emb[:, history_len:kv_seq_len].float()
         attention_mask = (self.attention_mask[..., :ids_len, :kv_seq_len] * mask).float()
         batch_size = hidden_states.shape[0].unsqueeze(0)
         for i, layer in enumerate(self.funasr_nano.model.layers):
@@ -484,14 +498,16 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 hidden_states = hidden_states * self.overflow_scale
             hidden_states = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
             qkv = layer.self_attn.qkv(hidden_states)
-            q, k, v = torch.split(qkv, [layer.self_attn.q_out_features, layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
-            q = q.view(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim)
-            k = k.view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim)
+            qk, v = torch.split(qkv, [layer.self_attn.q_out_features + layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
+            qk = qk.view(batch_size, -1, self.num_heads + self.num_key_value_heads, self.head_dim)
+            if PREVENT_F16_OVERFLOW:
+                qk = qk * self.overflow_scale
+            qk = qk * torch.rsqrt(qk.square().sum(dim=-1, keepdim=True)) * layer.self_attn.qk_norm_weight
+            qk_rot = qk * rotary_pos_emb_cos + self.rotate_half(qk, -1) * rotary_pos_emb_sin
+            q, k = torch.split(qk_rot, [self.num_heads, self.num_key_value_heads], dim=2)
+            q = q.reshape(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim).permute(0, 2, 3, 1, 4)
+            k = k.reshape(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).permute(0, 3, 2, 4, 1)
             v = v.half().view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).transpose(1, 3)
-            q = layer.self_attn.q_norm(q).permute(0, 2, 3, 1, 4)
-            k = layer.self_attn.k_norm(k).permute(0, 3, 2, 4, 1)
-            q = q * rotary_pos_emb_cos_q + self.rotate_half(q, -1) * rotary_pos_emb_sin_q
-            k = k * rotary_pos_emb_cos_k + self.rotate_half(k, -2) * rotary_pos_emb_sin_k
             k = torch.cat((all_inputs[i], k.half()), dim=-1)
             v = torch.cat((all_inputs[i + self.num_layers], v), dim=-2)
             self.save_key[i] = k
