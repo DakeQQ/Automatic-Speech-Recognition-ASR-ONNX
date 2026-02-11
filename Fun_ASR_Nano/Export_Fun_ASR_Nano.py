@@ -478,9 +478,9 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             else:
                 self._replace_gelu_with_tanh_approximation(child)
 
-    def rotate_half(self, x, dim):
-        x1, x2 = torch.split(x, self.head_dim_half, dim=dim)
-        return torch.cat((x2, x1), dim=dim)
+    def rotate_half(self, x):
+        x1, x2 = torch.split(x, self.head_dim_half, dim=-1)
+        return torch.cat((x2, x1), dim=-1)
 
     def forward(self, *all_inputs):
         hidden_states = all_inputs[-4]
@@ -503,7 +503,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             if PREVENT_F16_OVERFLOW:
                 qk = qk * self.overflow_scale
             qk = qk * torch.rsqrt(qk.square().sum(dim=-1, keepdim=True)) * layer.self_attn.qk_norm_weight
-            qk_rot = qk * rotary_pos_emb_cos + self.rotate_half(qk, -1) * rotary_pos_emb_sin
+            qk_rot = qk * rotary_pos_emb_cos + self.rotate_half(qk) * rotary_pos_emb_sin
             q, k = torch.split(qk_rot, [self.num_heads, self.num_key_value_heads], dim=-2)
             q = q.reshape(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim)
             q = q.permute(0, 2, 3, 1, 4)
@@ -526,7 +526,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             gate_up = layer.mlp.gate_up_proj(hidden_states)
             gate, up = torch.split(gate_up, [layer.mlp.down_proj.in_features, layer.mlp.down_proj.in_features], dim=-1)
             hidden_states = layer.mlp.down_proj(layer.mlp.act_fn(gate) * up)
-            hidden_states += residual
+            hidden_states = residual + hidden_states
         hidden_states = hidden_states[:, -1]
         if PREVENT_F16_OVERFLOW:
             hidden_states = hidden_states * self.overflow_scale
