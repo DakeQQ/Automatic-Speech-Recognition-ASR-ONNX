@@ -9,16 +9,16 @@ from funasr import AutoModel
 from transformers import AutoTokenizer
 from STFT_Process import STFT_Process                                                                    # The custom STFT/ISTFT can be exported in ONNX format.
 
-model_path = r'/home/iamjDakeQQ/Downloads/Fun-ASR-Nano-2512'                                                 # Set the path where the [Fun-ASR-Nano-2512, Fun-ASR-MLT-Nano-2512] downloaded.  URL: https://modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512 / https://modelscope.cn/models/FunAudioLLM/Fun-ASR-MLT-Nano-2512
-tokenizer_path = r'/home/iamjDakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                                  # Set the tokenizer path.
-onnx_model_A = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Encoder.onnx'                      # The exported onnx model path.
-onnx_model_B = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Embed.onnx'
-onnx_model_C = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Main.onnx'
-onnx_model_D = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/Greedy_Search.onnx'
-onnx_model_E = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/First_Beam_Search.onnx'
-onnx_model_F = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/Second_Beam_Search.onnx'
-onnx_model_G = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/Reset_Penality.onnx'
-onnx_model_H = r'/home/iamjDakeQQ/Downloads/Fun_ASR_Nano_ONNX/Argmax.onnx'
+model_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512'                                                 # Set the path where the [Fun-ASR-Nano-2512, Fun-ASR-MLT-Nano-2512] downloaded.  URL: https://modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512 / https://modelscope.cn/models/FunAudioLLM/Fun-ASR-MLT-Nano-2512
+tokenizer_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                                  # Set the tokenizer path.
+onnx_model_A = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Encoder.onnx'                      # The exported onnx model path.
+onnx_model_B = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Embed.onnx'
+onnx_model_C = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Main.onnx'
+onnx_model_D = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Greedy_Search.onnx'
+onnx_model_E = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/First_Beam_Search.onnx'
+onnx_model_F = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Second_Beam_Search.onnx'
+onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Reset_Penality.onnx'
+onnx_model_H = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Argmax.onnx'
 
 # The exported onnx model path.
 test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/yue.mp3", "./example/ja.mp3"]          # The test audio list.
@@ -389,7 +389,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         norm_factor_qk = head_dim ** 0.5
         
         position_ids = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(-1)
-        idx_theta = (position_ids * self.funasr_nano.model.rotary_emb.inv_freq).unsqueeze(1).unsqueeze(0)
+        idx_theta = (position_ids * self.funasr_nano.model.rotary_emb.inv_freq).unsqueeze(1).unsqueeze(1).unsqueeze(0)
         cos = torch.cos(idx_theta)
         sin = torch.sin(idx_theta)
         self.cos_rotary_pos_emb = torch.cat([cos, cos], dim=-1).half()
@@ -437,7 +437,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 k_norm_w = layer.self_attn.k_norm.weight.repeat(self.num_key_value_heads)
                 
                 # Shape: [1, 1, num_heads + num_kv_heads, head_dim] for broadcasting
-                layer.self_attn.qk_norm_weight = torch.nn.Parameter(torch.cat([q_norm_w, k_norm_w], dim=0).view(1, 1, -1, self.head_dim))
+                layer.self_attn.qk_norm_weight = torch.nn.Parameter(torch.cat([q_norm_w, k_norm_w], dim=0).view(1, 1, 1, -1, self.head_dim))
                 del layer.self_attn.q_norm
                 del layer.self_attn.k_norm
 
@@ -498,17 +498,18 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 hidden_states = hidden_states * self.overflow_scale
             hidden_states = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
             qkv = layer.self_attn.qkv(hidden_states)
-            qk, v = torch.split(qkv, [layer.self_attn.q_out_features + layer.self_attn.k_out_features, layer.self_attn.v_out_features], dim=-1)
-            qk = qk.view(batch_size, -1, self.num_heads + self.num_key_value_heads, self.head_dim)
+            qkv = qkv.view(batch_size, -1, 1, self.num_heads + 2 * self.num_key_value_heads, self.head_dim)
+            qk, v = torch.split(qkv, [self.num_heads + self.num_key_value_heads, self.num_key_value_heads], dim=-2)
             if PREVENT_F16_OVERFLOW:
                 qk = qk * self.overflow_scale
             qk = qk * torch.rsqrt(qk.square().sum(dim=-1, keepdim=True)) * layer.self_attn.qk_norm_weight
             qk_rot = qk * rotary_pos_emb_cos + self.rotate_half(qk, -1) * rotary_pos_emb_sin
-            q, k = torch.split(qk_rot, [self.num_heads, self.num_key_value_heads], dim=2)
-            q = q.reshape(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim).permute(0, 2, 3, 1, 4)
-            k = k.reshape(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).permute(0, 3, 2, 4, 1)
-            v = v.half().view(batch_size, -1, 1, self.num_key_value_heads, self.head_dim).transpose(1, 3)
-            k = torch.cat((all_inputs[i], k.half()), dim=-1)
+            q, k = torch.split(qk_rot, [self.num_heads, self.num_key_value_heads], dim=-2)
+            q = q.reshape(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim)
+            q = q.permute(0, 2, 3, 1, 4)
+            k = k.half().permute(0, 3, 2, 4, 1)
+            v = v.half().transpose(1, 3)
+            k = torch.cat((all_inputs[i], k), dim=-1)
             v = torch.cat((all_inputs[i + self.num_layers], v), dim=-2)
             self.save_key[i] = k
             self.save_value[i] = v
