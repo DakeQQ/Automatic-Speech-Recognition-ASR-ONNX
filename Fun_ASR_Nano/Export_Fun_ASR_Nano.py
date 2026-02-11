@@ -379,8 +379,9 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.num_key_value_heads = num_key_value_heads
-        self.head_dim_half = [head_dim // 2, head_dim // 2]
+        self.head_dim_half = head_dim // 2
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.qk_heads = self.num_heads + self.num_key_value_heads
         self.overflow_scale = torch.tensor([0.01], dtype=torch.float32)
         
         # Scaling Factors
@@ -478,9 +479,10 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             else:
                 self._replace_gelu_with_tanh_approximation(child)
 
-    def rotate_half(self, x):
-        x1, x2 = torch.split(x, self.head_dim_half, dim=-1)
-        return torch.cat((x2, x1), dim=-1)
+    def rotate_half(self, x, batch_size):
+        x = x.view(batch_size, -1, 1, self.qk_heads, 2, self.head_dim_half)
+        x = x.flip(-2)
+        return x.view(batch_size, -1, 1, self.qk_heads, self.head_dim)
 
     def forward(self, *all_inputs):
         hidden_states = all_inputs[-4]
@@ -498,12 +500,12 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 hidden_states = hidden_states * self.overflow_scale
             hidden_states = hidden_states * torch.rsqrt(hidden_states.square().sum(-1, keepdim=True))
             qkv = layer.self_attn.qkv(hidden_states)
-            qkv = qkv.view(batch_size, -1, 1, self.num_heads + 2 * self.num_key_value_heads, self.head_dim)
-            qk, v = torch.split(qkv, [self.num_heads + self.num_key_value_heads, self.num_key_value_heads], dim=-2)
+            qkv = qkv.view(batch_size, -1, 1, self.qk_heads + self.num_key_value_heads, self.head_dim)
+            qk, v = torch.split(qkv, [self.qk_heads, self.num_key_value_heads], dim=-2)
             if PREVENT_F16_OVERFLOW:
                 qk = qk * self.overflow_scale
             qk = qk * torch.rsqrt(qk.square().sum(dim=-1, keepdim=True)) * layer.self_attn.qk_norm_weight
-            qk_rot = qk * rotary_pos_emb_cos + self.rotate_half(qk) * rotary_pos_emb_sin
+            qk_rot = qk * rotary_pos_emb_cos + self.rotate_half(qk, batch_size) * rotary_pos_emb_sin
             q, k = torch.split(qk_rot, [self.num_heads, self.num_key_value_heads], dim=-2)
             q = q.reshape(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim)
             q = q.permute(0, 2, 3, 1, 4)
