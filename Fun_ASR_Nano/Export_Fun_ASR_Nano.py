@@ -743,7 +743,7 @@ with torch.inference_mode():
     dynamic_axes['batch_indices'] = {0: 'batch'}
 
     torch.onnx.export(
-        FIRST_BEAM_SEARCH(num_layers),
+        FIRST_BEAM_SEARCH(num_layers + num_layers),
         tuple(all_inputs),
         onnx_model_E,
         input_names=input_names,
@@ -783,7 +783,7 @@ with torch.inference_mode():
     output_names.remove("batch_indices")
 
     torch.onnx.export(
-        SECOND_BEAM_SEARCH(num_layers),
+        SECOND_BEAM_SEARCH(num_layers + num_layers),
         tuple(all_inputs),
         onnx_model_F,
         input_names=input_names,
