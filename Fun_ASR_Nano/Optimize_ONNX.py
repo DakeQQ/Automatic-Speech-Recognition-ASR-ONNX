@@ -122,7 +122,7 @@ for model_name in model_names:
             True                                         # save_as_external_data
         )
 
-    elif use_int8 and ("Reset_Penality" not in model_path):
+    elif use_int8:
         print("Applying UINT8 quantization...")
         quantize_dynamic(
             model_input=quant_utils.load_model_with_shape_infer(Path(model_path)),
@@ -152,68 +152,8 @@ for model_name in model_names:
         )
     else:
         # ONNX Model Optimizer for non-INT8 or Reset_Penality model
-        print("Optimizing model (non-UINT8 path)...")
-        if "Reset_Penality" in model_path:
-            model = optimize_model(model_path,
-                                       use_gpu=False,
-                                       opt_level=2,
-                                       num_heads=0,
-                                       hidden_size=0,
-                                       verbose=False,
-                                       model_type='bert',
-                                       only_onnxruntime=False)
-            if use_f16:
-                model.convert_float_to_float16(
-                    keep_io_types=False,
-                    force_fp16_initializers=True,
-                    use_symbolic_shape_infer=True,  # True for more optimize but may get errors.
-                    max_finite_val=32767.0,
-                    min_positive_val=1e-7,
-                    op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'MatMulIntegerToFloat']
-                    # Common fp16 overflow operators: 'Pow', 'ReduceMean', 'ReduceSum', 'Softmax', 'Sigmoid', 'Erf'
-                )
-            model.save_model_to_file(quanted_model_path, use_external_data_format=two_parts_save)
-        else:
-            slim(
-                model=quant_utils.load_model_with_shape_infer(Path(model_path)),
-                output_model=quanted_model_path,
-                no_shape_infer=True,
-                skip_fusion_patterns=False,
-                no_constant_folding=False,
-                save_as_external_data=two_parts_save,
-                verbose=False,
-                dtype='fp16' if use_f16 and "First_Beam_Search" in model_path else None
-            )
-
-    # transformers.optimizer
-    if ("Reset_Penality" not in model_path) and ("First_Beam_Search" not in model_path):
-        print("Applying transformers.optimizer...")
-        model = optimize_model(quanted_model_path,
-                               use_gpu=False,
-                               opt_level=1 if use_openvino or ("Encoder" in model_path) else 2,
-                               num_heads=16,
-                               hidden_size=1024,
-                               verbose=False,
-                               model_type='bert',
-                               only_onnxruntime=use_openvino)
-        if use_f16:
-            model.convert_float_to_float16(
-                keep_io_types=False,
-                force_fp16_initializers=True,
-                use_symbolic_shape_infer=True,  # True for more optimize but may get errors.
-                max_finite_val=32767.0,
-                min_positive_val=1e-7,
-                op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'MatMulIntegerToFloat']
-                # Common fp16 overflow operators: 'Pow', 'ReduceMean', 'ReduceSum', 'Softmax', 'Sigmoid', 'Erf'
-            )
-        model.save_model_to_file(quanted_model_path, use_external_data_format=two_parts_save)
-        del model
-        gc.collect()
-
-        # onnxslim 2nd pass
-        print("Applying second onnxslim pass...")
         slim(
-            model=quanted_model_path,
+            model=quant_utils.load_model_with_shape_infer(Path(model_path)),
             output_model=quanted_model_path,
             no_shape_infer=True,
             skip_fusion_patterns=False,
@@ -221,6 +161,42 @@ for model_name in model_names:
             save_as_external_data=two_parts_save,
             verbose=False
         )
+
+    # transformers.optimizer
+    print("Applying transformers.optimizer...")
+    model = optimize_model(quanted_model_path,
+                           use_gpu=False,
+                           opt_level=1 if use_openvino or ("Encoder" in model_path) else 2,
+                           num_heads=16,
+                           hidden_size=1024,
+                           verbose=False,
+                           model_type='bert',
+                           only_onnxruntime=use_openvino)
+    if use_f16:
+        model.convert_float_to_float16(
+            keep_io_types=False,
+            force_fp16_initializers=True,
+            use_symbolic_shape_infer=True,  # True for more optimize but may get errors.
+            max_finite_val=32767.0,
+            min_positive_val=1e-7,
+            op_block_list=['DynamicQuantizeLinear', 'DequantizeLinear', 'DynamicQuantizeMatMul', 'MatMulIntegerToFloat']
+            # Common fp16 overflow operators: 'Pow', 'ReduceMean', 'ReduceSum', 'Softmax', 'Sigmoid', 'Erf'
+        )
+    model.save_model_to_file(quanted_model_path, use_external_data_format=two_parts_save)
+    del model
+    gc.collect()
+
+    # onnxslim 2nd pass
+    print("Applying second onnxslim pass...")
+    slim(
+        model=quanted_model_path,
+        output_model=quanted_model_path,
+        no_shape_infer=True,
+        skip_fusion_patterns=False,
+        no_constant_folding=False,
+        save_as_external_data=two_parts_save,
+        verbose=False
+    )
 
     # Upgrade the Opset version. (optional process)
     if upgrade_opset > 0:
