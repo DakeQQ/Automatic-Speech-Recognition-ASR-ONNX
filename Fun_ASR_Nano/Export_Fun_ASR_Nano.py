@@ -85,11 +85,11 @@ class ARGMAX(torch.nn.Module):
 class GREEDY_SEARCH(torch.nn.Module):
     def __init__(self):
         super(GREEDY_SEARCH, self).__init__()
-        self.batch_indices = torch.arange(MAX_BEAM_SIZE, dtype=torch.int8)
+        self.batch_indices = torch.arange(MAX_BEAM_SIZE, dtype=torch.int64)
 
     def forward(self, logits, repeat_penality, penality_value, batch_size):
         max_logits_idx = torch.argmax(logits * repeat_penality, dim=-1, keepdim=True)
-        batch_indices = self.batch_indices[:batch_size].long()
+        batch_indices = self.batch_indices[:batch_size]
         repeat_penality[batch_indices, max_logits_idx.squeeze(-1)] *= penality_value
         return max_logits_idx.int(), repeat_penality
 
