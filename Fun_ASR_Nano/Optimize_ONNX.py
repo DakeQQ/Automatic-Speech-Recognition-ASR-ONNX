@@ -27,7 +27,8 @@ model_names = [
     "Greedy_Search",
     "First_Beam_Search",
     "Second_Beam_Search",
-    "Reset_Penality",
+    "Reset_Penality_Beam",
+    "Reset_Penality_Greedy",
     "Argmax"
 ]
 

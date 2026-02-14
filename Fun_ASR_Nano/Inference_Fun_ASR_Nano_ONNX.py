@@ -12,8 +12,9 @@ onnx_model_C = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Decod
 onnx_model_D = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Greedy_Search.onnx'
 onnx_model_E = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/First_Beam_Search.onnx'
 onnx_model_F = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Second_Beam_Search.onnx'
-onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Reset_Penality.onnx'
-onnx_model_H = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Argmax.onnx'
+onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Reset_Penality_Beam.onnx'
+onnx_model_H = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Reset_Penality_Greedy.onnx'
+onnx_model_I = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Argmax.onnx'
 
 
 # The exported onnx model path.
@@ -148,7 +149,7 @@ session_opts.add_session_config_entry('session.graph_optimizations_loop_level', 
 run_options.add_run_config_entry('disable_synchronize_execution_providers', '0')
 
 
-def bind_ort_values(binding, names, values, num=0):
+def bind_ort_in(binding, names, values, num=0):
     if num != 0:
         for i in range(num):
             binding.bind_ortvalue_input(names[i], values[i])
@@ -157,7 +158,7 @@ def bind_ort_values(binding, names, values, num=0):
             binding.bind_ortvalue_input(name, val)
 
 
-def bind_outputs_generic(binding, output_names, device_type):
+def bind_ort_out(binding, output_names, device_type):
     for name in output_names:
         binding._iobinding.bind_output(name, device_type)
 
@@ -200,12 +201,15 @@ num_keys_values_plus_5 = num_keys_values + 5
 num_keys_values_plus_6 = num_keys_values + 6
 vocab_size = ort_session_C._outputs_meta[num_keys_values].shape[1]
 
-generate_limit = MAX_SEQ_LEN - 20
+generate_limit = MAX_SEQ_LEN - 10
 topK = create_ortvalue([TOP_K], np.int64, device_type, DEVICE_ID)
 beam_size = create_ortvalue([BEAM_SIZE], np.int64, device_type, DEVICE_ID)
+init_ids_len_1 = create_ortvalue([1], np.int64, device_type, DEVICE_ID)
+init_history_len = create_ortvalue([0], np.int64, device_type, DEVICE_ID)
+init_attention_mask_0 = create_ortvalue([0], np.int8, device_type, DEVICE_ID)
+init_attention_mask_1 = create_ortvalue([1], np.int8, device_type, DEVICE_ID)
 
 if USE_BEAM_SEARCH and (TOP_K < BEAM_SIZE):
-    print("\nBeam Search does not display the immediate decoding results; the best result is shown only after the entire decoding process is complete.\n")
     TOP_K = BEAM_SIZE
 
 if (TOP_K < 2) or (BEAM_SIZE < 2):
@@ -213,9 +217,10 @@ if (TOP_K < 2) or (BEAM_SIZE < 2):
     print("\nInappropriate Beam Search setting detected. Falling back to Greedy Search.")
     BEAM_SIZE = 1
 
-do_repeat_penalty = (REPEAT_PENALITY != 1.0)
+USE_PENALTY = (REPEAT_PENALITY != 1.0)
 
 if USE_BEAM_SEARCH:
+    print("\nBeam Search does not display the immediate decoding results; the best result is shown only after the entire decoding process is complete.\n")
     ort_session_E = onnxruntime.InferenceSession(onnx_model_E, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
     binding_E = ort_session_E.io_binding()
     in_name_E = [x.name for x in ort_session_E.get_inputs()]
@@ -232,9 +237,11 @@ if USE_BEAM_SEARCH:
     out_name_G = [x.name for x in ort_session_G.get_outputs()]
     penality_dtype = np.float16 if 'float16' in ort_session_E._inputs_meta[num_keys_values_plus_4].type else np.float32
     penality_value = create_ortvalue([REPEAT_PENALITY], penality_dtype, device_type, DEVICE_ID)
-    init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, vocab_size), dtype=penality_dtype), device_type, DEVICE_ID)
+    repeat_penality = np.ones((BEAM_SIZE, vocab_size), dtype=penality_dtype)
+    penality_reset_count = np.zeros([BEAM_SIZE, 1], dtype=np.int32)
     init_save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 0), dtype=np.int32), device_type, DEVICE_ID)
-    init_penality_reset_count = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros([BEAM_SIZE, 1], dtype=np.int32), device_type, DEVICE_ID)
+    init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
+    init_penality_reset_count = onnxruntime.OrtValue.ortvalue_from_numpy(penality_reset_count, device_type, DEVICE_ID)
     binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_1], init_save_id_beam)
     binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_2], init_repeat_penality)
     binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_3], penality_value)
@@ -246,31 +253,33 @@ if USE_BEAM_SEARCH:
 else:
     BEAM_SIZE = 1
     save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
-    if do_repeat_penalty:
+    ort_idx = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 1), dtype=np.int32), device_type, DEVICE_ID)
+    if USE_PENALTY:
         ort_session_D = onnxruntime.InferenceSession(onnx_model_D, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
         binding_D = ort_session_D.io_binding()
         in_name_D = [x.name for x in ort_session_D.get_inputs()]
         out_name_D = [x.name for x in ort_session_D.get_outputs()]
-        penality_dtype = np.float16 if 'float16' in ort_session_D._inputs_meta[2].type else np.float32
-        penality_value = create_ortvalue([REPEAT_PENALITY], penality_dtype, device_type, DEVICE_ID)
-        penalty_shape = (BEAM_SIZE, vocab_size)
-        init_penalty = np.ones(penalty_shape, dtype=penality_dtype)
-        current_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(init_penalty, device_type, DEVICE_ID)
-        next_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(init_penalty, device_type, DEVICE_ID)
-        binding_D.bind_ortvalue_input(in_name_D[2], penality_value)
-        binding_D.bind_output(name=out_name_D[0], device_type=device_type, device_id=DEVICE_ID)
-        binding_D.bind_output(name=out_name_D[1], device_type=device_type, device_id=DEVICE_ID, element_type=penality_dtype, shape=penalty_shape, buffer_ptr=next_penalty.data_ptr())
-        init_penality_reset_count = 0
-    else:
         ort_session_H = onnxruntime.InferenceSession(onnx_model_H, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
         binding_H = ort_session_H.io_binding()
-        in_name_H = ort_session_H.get_inputs()[0].name
-        out_name_H = [ort_session_H.get_outputs()[0].name]
-
-init_ids_len_1 = create_ortvalue([1], np.int64, device_type, DEVICE_ID)
-init_history_len = create_ortvalue([0], np.int64, device_type, DEVICE_ID)
-init_attention_mask_0 = create_ortvalue([0], np.int8, device_type, DEVICE_ID)
-init_attention_mask_1 = create_ortvalue([1], np.int8, device_type, DEVICE_ID)
+        in_name_H = [x.name for x in ort_session_H.get_inputs()]
+        out_name_H = ort_session_H.get_outputs()[0].name  # Only one output for Greedy Penalty Reset
+        penality_dtype = np.float16 if 'float16' in ort_session_D._inputs_meta[2].type else np.float32
+        penality_value = create_ortvalue([REPEAT_PENALITY], penality_dtype, device_type, DEVICE_ID)
+        repeat_penality = np.ones((BEAM_SIZE, vocab_size), dtype=penality_dtype)
+        current_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
+        binding_D.bind_ortvalue_input(in_name_D[1], current_penalty)
+        binding_D.bind_ortvalue_output(out_name_D[1], current_penalty)
+        binding_D.bind_ortvalue_input(in_name_D[2], penality_value)
+        binding_D.bind_ortvalue_output(out_name_D[0], ort_idx)
+        binding_H.bind_ortvalue_input(in_name_H[0], current_penalty)
+        binding_H.bind_ortvalue_output(out_name_H, current_penalty)
+        init_penality_reset_count = 0
+    else:
+        ort_session_I = onnxruntime.InferenceSession(onnx_model_I, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
+        binding_I = ort_session_I.io_binding()
+        in_name_I = ort_session_I.get_inputs()[0].name
+        out_name_I = ort_session_I.get_outputs()[0].name
+        binding_I.bind_ortvalue_output(out_name_I, ort_idx)
 
 if 'dml' in device_type:
     kv_device = 'cpu'
@@ -287,7 +296,7 @@ for i in task_prompt:
     tokens = tokenizer(i, return_tensors='np')['input_ids'].astype(np.int32)
     input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(tokens, device_type, DEVICE_ID)
     binding_B.bind_ortvalue_input(in_name_B, input_ids)
-    bind_outputs_generic(binding_B, out_name_B, _ort_device_type)
+    bind_ort_out(binding_B, out_name_B, _ort_device_type)
     ort_session_B.run_with_iobinding(binding_B, run_options=run_options)
     init_all_outputs_B.append(onnxruntime.OrtValue.ortvalue_from_numpy(binding_B.get_outputs()[0].numpy(), device_type, DEVICE_ID))
 
@@ -319,7 +328,7 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
         ort_audio = onnxruntime.OrtValue.ortvalue_from_numpy(audio_slice, device_type, DEVICE_ID)
         binding_A.bind_ortvalue_input(in_name_A[0], ort_audio)
         binding_A.bind_ortvalue_input(in_name_A[1], prompt_embed)
-        bind_outputs_generic(binding_A, out_name_A, _ort_device_type)
+        bind_ort_out(binding_A, out_name_A, _ort_device_type)
         ort_session_A.run_with_iobinding(binding_A, run_options=run_options)
         all_outputs_A = binding_A.get_outputs()
         i = 0
@@ -335,95 +344,79 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
         binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_1], init_history_len)
         binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_2], all_outputs_A[1])
         binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_3], init_attention_mask_1)
-        if USE_BEAM_SEARCH:
-            binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_1], init_save_id_beam)
-            binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_2], init_repeat_penality)
-            if do_repeat_penalty:
+        if USE_PENALTY:
+            if USE_BEAM_SEARCH:
+                init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
+                init_penality_reset_count = onnxruntime.OrtValue.ortvalue_from_numpy(penality_reset_count, device_type, DEVICE_ID)
+                binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_2], init_repeat_penality)
                 binding_G.bind_ortvalue_input(in_name_G[2], init_penality_reset_count)
-        else:
-            if do_repeat_penalty:
-                current_penalty.update_inplace(init_penalty)
-                next_penalty.update_inplace(init_penalty)
-                binding_D.bind_output(name=out_name_D[1], device_type=device_type, device_id=DEVICE_ID, element_type=penality_dtype, shape=penalty_shape, buffer_ptr=next_penalty.data_ptr())
+            else:
+                current_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
+                binding_D.bind_ortvalue_input(in_name_D[1], current_penalty)
+                binding_D.bind_ortvalue_output(out_name_D[1], current_penalty)
+                binding_H.bind_ortvalue_input(in_name_H[0], current_penalty)
+                binding_H.bind_ortvalue_output(out_name_H, current_penalty)
                 init_penality_reset_count = 0
 
         num_decode = 0
         limit = generate_limit - all_outputs_A[1].numpy()
         start_time = time.time()
         while num_decode < limit:
-            bind_outputs_generic(binding_C, out_name_C, _ort_device_type)
+            bind_ort_out(binding_C, out_name_C, _ort_device_type)
             ort_session_C.run_with_iobinding(binding_C, run_options=run_options)
             all_outputs_C = binding_C.get_outputs()
             if USE_BEAM_SEARCH:
                 if num_decode < 1:
-                    bind_ort_values(binding_E, in_name_E_parts, all_outputs_C)
-                    bind_outputs_generic(binding_E, out_name_E, _ort_device_type)
+                    bind_ort_in(binding_E, in_name_E_parts, all_outputs_C)
+                    bind_ort_out(binding_E, out_name_E, _ort_device_type)
                     ort_session_E.run_with_iobinding(binding_E, run_options=run_options)
-                    all_outputs_E = binding_E.get_outputs()
-                    max_logits_idx = all_outputs_E[num_keys_values_plus_4].numpy()
-                    if max_logits_idx in STOP_TOKEN:
-                        print("\nBad first token generated, stopping decoding.\n")
-                        break
+                    all_outputs = binding_E.get_outputs()
                 else:
-                    bind_ort_values(binding_F, in_name_F_parts, all_outputs_C)
-                    bind_outputs_generic(binding_F, out_name_F, _ort_device_type)
+                    bind_ort_in(binding_F, in_name_F_parts, all_outputs_C)
+                    bind_ort_out(binding_F, out_name_F, _ort_device_type)
                     ort_session_F.run_with_iobinding(binding_F, run_options=run_options)
-                    all_outputs_F = binding_F.get_outputs()
-                    max_logits_idx = all_outputs_F[num_keys_values_plus_4].numpy()
-                    if max_logits_idx in STOP_TOKEN:
-                        break
-                if do_repeat_penalty and (num_decode >= PENALTY_RANGE):
-                    binding_G.bind_ortvalue_input(in_name_G[0], all_outputs_F[num_keys_values_plus_1])
-                    binding_G.bind_ortvalue_input(in_name_G[1], all_outputs_F[num_keys_values_plus_2])
-                    bind_outputs_generic(binding_G, out_name_G, _ort_device_type)
+                    all_outputs = binding_F.get_outputs()
+                max_logits_idx = all_outputs[num_keys_values_plus_4].numpy()
+                if max_logits_idx in STOP_TOKEN:
+                    break
+                if USE_PENALTY and (num_decode >= PENALTY_RANGE):
+                    binding_G.bind_ortvalue_input(in_name_G[0], all_outputs[num_keys_values_plus_1])
+                    binding_G.bind_ortvalue_input(in_name_G[1], all_outputs[num_keys_values_plus_2])
+                    bind_ort_out(binding_G, out_name_G, _ort_device_type)
                     ort_session_G.run_with_iobinding(binding_G, run_options=run_options)
                     all_outputs_G = binding_G.get_outputs()
                     binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs_G[0])
                     binding_G.bind_ortvalue_input(in_name_G[2], all_outputs_G[1])
-                if num_decode < 1:
-                    bind_ort_values(binding_C, in_name_C_parts, all_outputs_E)
-                    binding_B.bind_ortvalue_input(in_name_B, all_outputs_E[num_keys_values])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_1], all_outputs_E[num_keys_values_plus_1])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs_E[num_keys_values_plus_2])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_3], all_outputs_E[num_keys_values_plus_3])
-                else:
-                    bind_ort_values(binding_C, in_name_C_parts, all_outputs_F)
-                    binding_B.bind_ortvalue_input(in_name_B, all_outputs_F[num_keys_values])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_1], all_outputs_F[num_keys_values_plus_1])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs_F[num_keys_values_plus_2])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_3], all_outputs_F[num_keys_values_plus_3])
+                bind_ort_in(binding_C, in_name_C_parts, all_outputs)
+                binding_B.bind_ortvalue_input(in_name_B, all_outputs[num_keys_values])
+                binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_1], all_outputs[num_keys_values_plus_1])
+                binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs[num_keys_values_plus_2])
+                binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_3], all_outputs[num_keys_values_plus_3])
             else:
-                if do_repeat_penalty:
+                if USE_PENALTY:
                     binding_D.bind_ortvalue_input(in_name_D[0], all_outputs_C[num_keys_values])
-                    binding_D.bind_ortvalue_input(in_name_D[1], current_penalty)
                     ort_session_D.run_with_iobinding(binding_D, run_options=run_options)
-                    all_outputs_D = binding_D.get_outputs()
-                    max_logits_idx = all_outputs_D[0].numpy().flat[0]
+                    max_logits_idx = ort_idx.numpy().flat[0]
                     if max_logits_idx in STOP_TOKEN:
                         break
                     if num_decode >= PENALTY_RANGE:
                         reset_ids = save_id_greedy[init_penality_reset_count]
                         if reset_ids != max_logits_idx:
-                            tmp = next_penalty.numpy()
-                            tmp[:, reset_ids] = 1.0
-                            next_penalty.update_inplace(tmp)
+                            reset_ids = create_ortvalue([[reset_ids]], np.int64, device_type, DEVICE_ID)
+                            binding_H.bind_ortvalue_input(in_name_H[1], reset_ids)
+                            ort_session_H.run_with_iobinding(binding_H, run_options=run_options)
                         init_penality_reset_count += 1
-                    current_penalty, next_penalty = next_penalty, current_penalty
-                    binding_D.bind_output(name=out_name_D[1], device_type=device_type, device_id=DEVICE_ID, element_type=penality_dtype, shape=penalty_shape, buffer_ptr=next_penalty.data_ptr())
-                    binding_B.bind_ortvalue_input(in_name_B, all_outputs_D[0])
                 else:
-                    binding_H.bind_ortvalue_input(in_name_H, all_outputs_C[num_keys_values])
-                    bind_outputs_generic(binding_H, out_name_H, _ort_device_type)
-                    ort_session_H.run_with_iobinding(binding_H)
-                    all_outputs_H = binding_H.get_outputs()
-                    binding_B.bind_ortvalue_input(in_name_B, all_outputs_H[0])
-                    max_logits_idx = all_outputs_H[0].numpy().flat[0]
+                    binding_I.bind_ortvalue_input(in_name_I, all_outputs_C[num_keys_values])
+                    ort_session_I.run_with_iobinding(binding_I, run_options=run_options)
+                    max_logits_idx = ort_idx.numpy().flat[0]
                     if max_logits_idx in STOP_TOKEN:
                         break
-                bind_ort_values(binding_C, in_name_C_parts, all_outputs_C)
+                binding_B.bind_ortvalue_input(in_name_B, ort_idx)
+                bind_ort_in(binding_C, in_name_C_parts, all_outputs_C)
                 save_id_greedy[num_decode] = max_logits_idx
-            bind_outputs_generic(binding_B, out_name_B, _ort_device_type)
-            ort_session_B.run_with_iobinding(binding_B)
+            bind_ort_out(binding_B, out_name_B, _ort_device_type)
+            ort_session_B.run_with_iobinding(binding_B, run_options=run_options)
             binding_C.bind_ortvalue_input(in_name_C[num_keys_values], binding_B.get_outputs()[0])
             binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_1], all_outputs_C[num_keys_values_plus_1])
             if num_decode < 1:
@@ -434,11 +427,10 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
         slice_end = slice_start + INPUT_AUDIO_LENGTH
         if num_decode > 0:
             if USE_BEAM_SEARCH:
-                asr_result += tokenizer.decode(all_outputs_F[num_keys_values_plus_1].numpy()[0, :num_decode], skip_special_tokens=True)
+                asr_result += tokenizer.decode(all_outputs[num_keys_values_plus_1].numpy()[0, :num_decode], skip_special_tokens=True)
             else:
                 asr_result += tokenizer.decode(save_id_greedy[:num_decode], skip_special_tokens=True)
         print(f"\nDecode: {((num_decode + 1) / (time.time() - start_time)):.3f} token/s\n")
     print(asr_result, end="", flush=True)
     print(f"\n\nRTF: {((time.time() - rtf_time) / (audio_full_len / SAMPLE_RATE)):.3f}")
     print("----------------------------------------------------------------------------------------------------------")
-

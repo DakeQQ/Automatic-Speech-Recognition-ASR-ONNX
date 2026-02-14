@@ -18,8 +18,9 @@ onnx_model_C = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/FunASR_Nano_Decoder_Ma
 onnx_model_D = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Greedy_Search.onnx'
 onnx_model_E = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/First_Beam_Search.onnx'
 onnx_model_F = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Second_Beam_Search.onnx'
-onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Reset_Penality.onnx'
-onnx_model_H = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Argmax.onnx'
+onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Reset_Penality_Beam.onnx'
+onnx_model_H = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Reset_Penality_Greedy.onnx'
+onnx_model_I = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_ONNX/Argmax.onnx'
 
 # The exported onnx model path.
 test_audio = ["./example/zh.mp3", "./example/en.mp3", "./example/yue.mp3", "./example/ja.mp3"]          # The test audio list.
@@ -157,9 +158,9 @@ class SECOND_BEAM_SEARCH(torch.nn.Module):
         return *self.save_keys_values, top_beam_indices, save_id, repeat_penality, top_beam_prob.unsqueeze(-1), max_logits_idx
 
 
-class RESET_PENALITY(torch.nn.Module):
+class RESET_PENALITY_BEAM(torch.nn.Module):
     def __init__(self):
-        super(RESET_PENALITY, self).__init__()
+        super(RESET_PENALITY_BEAM, self).__init__()
         pass
 
     def forward(self, save_id, repeat_penality, penality_reset_count):
@@ -167,6 +168,16 @@ class RESET_PENALITY(torch.nn.Module):
         repeat_penality.scatter_(1, token_indices, 1.0)
         penality_reset_count += 1
         return repeat_penality, penality_reset_count
+
+
+class RESET_PENALITY_GREEDY(torch.nn.Module):
+    def __init__(self):
+        super(RESET_PENALITY_GREEDY, self).__init__()
+        pass
+
+    def forward(self, repeat_penality, target_id):
+        repeat_penality.scatter_(1, target_id, 1.0)
+        return repeat_penality
 
 
 class FUNASR_NANO_ENCODER(torch.nn.Module):
@@ -544,7 +555,8 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
 
 print('\nExport start ...\n')
 with torch.inference_mode():
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
+    # Load model and tokenizer
+    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()
     model = AutoModel(
         model=model_path,
         trust_remote_code=True,
@@ -552,21 +564,27 @@ with torch.inference_mode():
         device="cpu",
         disable_update=True
     )
-
-    num_heads = model.model.llm.config.num_attention_heads
-    num_key_value_heads = model.model.llm.config.num_key_value_heads
-    head_dim = model.model.llm.config.head_dim
-    num_layers = model.model.llm.config.num_hidden_layers
-    vocab_size = model.model.llm.model.vocab_size
-    hidden_size = model.model.llm.model.embed_tokens.embedding_dim
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
-    funasr_nano_encoder = FUNASR_NANO_ENCODER(model.model, custom_stft, NFFT_STFT, MAX_STFT_SIGNAL_LENGTH, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, tokenizer)
-    audio = torch.ones((1, 1, MAX_INPUT_AUDIO_LENGTH), dtype=torch.int16)
-    query_embed = torch.ones((1, 10, hidden_size), dtype=torch.float32)  # "10" is just a dummy value.
+    # Extract model config
+    llm_config = model.model.llm.config
+    llm_model = model.model.llm.model
+    num_heads = llm_config.num_attention_heads
+    num_key_value_heads = llm_config.num_key_value_heads
+    head_dim = llm_config.head_dim
+    num_layers = llm_config.num_hidden_layers
+    vocab_size = llm_model.vocab_size
+    hidden_size = llm_model.embed_tokens.embedding_dim
+
+    # ==================== Export Encoder (Model A) ====================
+    funasr_nano_encoder = FUNASR_NANO_ENCODER(
+        model.model, custom_stft, NFFT_STFT, MAX_STFT_SIGNAL_LENGTH, 
+        N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, LFR_M, LFR_N, LFR_LENGTH, tokenizer
+    )
     torch.onnx.export(
         funasr_nano_encoder,
-        (audio, query_embed),
+        (torch.ones((1, 1, MAX_INPUT_AUDIO_LENGTH), dtype=torch.int16),
+         torch.ones((1, 10, hidden_size), dtype=torch.float32)),
         onnx_model_A,
         input_names=['audio', 'query_embed'],
         output_names=['concat_embed', 'ids_len'],
@@ -578,25 +596,13 @@ with torch.inference_mode():
         opset_version=OPSET,
         dynamo=False
     )
-    del funasr_nano_encoder
-    del audio
-    del custom_stft
+    del funasr_nano_encoder, custom_stft
     gc.collect()
 
-    batch_size = 3
-    ids_len = torch.tensor([10], dtype=torch.long)
-    history_len = torch.tensor([0], dtype=torch.long)
-    input_ids = torch.ones((1, ids_len), dtype=torch.int32)
-    hidden_states = torch.ones((batch_size, ids_len, hidden_size), dtype=torch.float32)
-    attention_mask = torch.tensor([1], dtype=torch.int8)
-    past_keys = torch.zeros((batch_size, num_key_value_heads, 1, head_dim, 0), dtype=torch.float16)
-    past_values = torch.zeros((batch_size, num_key_value_heads, 1, 0, head_dim), dtype=torch.float16)
-    kv_seq_len = history_len + ids_len
-
-    model_B = FUNASR_NANO_DECODER_EMBED(model.model)
+    # ==================== Export Decoder Embed (Model B) ====================
     torch.onnx.export(
-        model_B,
-        (input_ids,),
+        FUNASR_NANO_DECODER_EMBED(model.model),
+        (torch.ones((1, 10), dtype=torch.int32),),
         onnx_model_B,
         input_names=['input_ids'],
         output_names=['hidden_states'],
@@ -607,45 +613,43 @@ with torch.inference_mode():
         opset_version=OPSET,
         dynamo=False
     )
-    del model_B
-    del input_ids
 
-    # Prepare input and output names
-    all_inputs = []
-    input_names = []
-    output_names = []
-    dynamic_axes = {'hidden_states': {0: 'batch', 1: 'ids_len'}}
+    # ==================== Export Decoder Main (Model C) ====================
+    batch_size = 3
+    ids_len = torch.tensor([10], dtype=torch.long)
+    
+    # Build input/output names and dynamic axes for KV cache
+    input_names, output_names, all_inputs = [], [], []
+    dynamic_axes = {'hidden_states': {0: 'batch', 1: 'ids_len'}, 'logits': {0: 'batch'}}
+    
+    past_keys = torch.zeros((batch_size, num_key_value_heads, 1, head_dim, 0), dtype=torch.float16)
+    past_values = torch.zeros((batch_size, num_key_value_heads, 1, 0, head_dim), dtype=torch.float16)
+    
     for i in range(num_layers):
-        name = f'in_key_{i}'
-        input_names.append(name)
+        input_names.append(f'in_key_{i}')
+        output_names.append(f'out_key_{i}')
         all_inputs.append(past_keys)
-        dynamic_axes[name] = {0: 'batch', 4: 'history_len'}
-        name = f'out_key_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 4: 'ks_seq_len'}
+        dynamic_axes[f'in_key_{i}'] = {0: 'batch', 4: 'history_len'}
+        dynamic_axes[f'out_key_{i}'] = {0: 'batch', 4: 'kv_seq_len'}
+    
     for i in range(num_layers):
-        name = f'in_value_{i}'
-        input_names.append(name)
+        input_names.append(f'in_value_{i}')
+        output_names.append(f'out_value_{i}')
         all_inputs.append(past_values)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len'}
-        name = f'out_value_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 3: 'ks_seq_len'}
-    input_names.append('hidden_states')
-    all_inputs.append(hidden_states)
-    input_names.append('history_len')
-    all_inputs.append(history_len)
-    input_names.append('ids_len')
-    all_inputs.append(ids_len)
-    input_names.append('attention_mask')
-    all_inputs.append(attention_mask)
-    output_names.append('logits')
-    output_names.append('kv_seq_len')
-    dynamic_axes['logits'] = {0: 'batch'}
-
-    model_C = FUNASR_NANO_DECODER_MAIN(model.model, MAX_SEQ_LEN, num_heads, num_key_value_heads, head_dim, num_layers, hidden_size)
+        dynamic_axes[f'in_value_{i}'] = {0: 'batch', 3: 'history_len'}
+        dynamic_axes[f'out_value_{i}'] = {0: 'batch', 3: 'kv_seq_len'}
+    
+    input_names.extend(['hidden_states', 'history_len', 'ids_len', 'attention_mask'])
+    output_names.extend(['logits', 'kv_seq_len'])
+    all_inputs.extend([
+        torch.ones((batch_size, ids_len, hidden_size), dtype=torch.float32),
+        torch.tensor([0], dtype=torch.long),
+        ids_len,
+        torch.tensor([1], dtype=torch.int8)
+    ])
+    
     torch.onnx.export(
-        model_C,
+        FUNASR_NANO_DECODER_MAIN(model.model, MAX_SEQ_LEN, num_heads, num_key_value_heads, head_dim, num_layers, hidden_size),
         tuple(all_inputs),
         onnx_model_C,
         input_names=input_names,
@@ -654,34 +658,19 @@ with torch.inference_mode():
         opset_version=OPSET,
         dynamo=False
     )
-    del model
-    del model_C
-    del input_names
-    del output_names
-    del dynamic_axes
-    del all_inputs
-    del num_heads
-    del num_key_value_heads
-    del head_dim
-    del hidden_size
-    del ids_len
-    del history_len
-    del batch_size
-    del hidden_states
-    del attention_mask
-    del kv_seq_len
+    del model, all_inputs, input_names, output_names, dynamic_axes
     gc.collect()
 
-    beam_size = torch.tensor([BEAM_SIZE], dtype=torch.int64)
-    repeat_penality = torch.ones((beam_size, vocab_size), dtype=torch.float32)
-    penality_reset_count = torch.zeros([beam_size, 1], dtype=torch.int32)
-    logits = torch.ones((beam_size, vocab_size), dtype=torch.float32)
+    # ==================== Export Search Models (D, E, F, G, H, I) ====================
+    beam_size_val = torch.tensor([BEAM_SIZE], dtype=torch.int64)
+    logits = torch.ones((BEAM_SIZE, vocab_size), dtype=torch.float32)
+    repeat_penality = torch.ones((BEAM_SIZE, vocab_size), dtype=torch.float32)
     penality_value = torch.tensor([REPEAT_PENALITY], dtype=torch.float32)
-
+    
+    # Export Greedy Search (Model D)
     torch.onnx.export(
         GREEDY_SEARCH(),
         (logits, repeat_penality, penality_value),
-        # Reuse the beam_size tensor as batch_size during export process.
         onnx_model_D,
         input_names=['logits', 'repeat_penality_in', 'penality_value'],
         output_names=['max_logits_idx', 'repeat_penality_out'],
@@ -695,116 +684,98 @@ with torch.inference_mode():
         dynamo=False
     )
 
+    # Prepare beam search inputs
+    save_id = torch.zeros((BEAM_SIZE, 10), dtype=torch.int32)
     topK = torch.tensor([TOP_K], dtype=torch.int64)
-    save_id = torch.zeros((beam_size, 10), dtype=torch.int32)
-    previous_prob = torch.zeros((beam_size, 1), dtype=torch.float32)
-    past_keys_greedy = past_keys[[0]]
-    past_values_greedy = past_values[[0]]
+    total_layers = num_layers * 2
+    
+    past_keys_single = past_keys[[0]]
+    past_values_single = past_values[[0]]
+    
+    # Build KV cache inputs for beam search
+    def build_kv_inputs_outputs(past_k, past_v, extra_inputs, extra_input_names, extra_output_names):
+        inputs, in_names, out_names = [], [], []
+        dyn_axes = {}
+        for i in range(num_layers):
+            in_names.append(f'in_key_{i}')
+            out_names.append(f'out_key_{i}')
+            inputs.append(past_k)
+            dyn_axes[f'in_key_{i}'] = {0: 'batch', 4: 'history_len'}
+            dyn_axes[f'out_key_{i}'] = {0: 'batch', 4: 'kv_seq_len'}
+        for i in range(num_layers):
+            in_names.append(f'in_value_{i}')
+            out_names.append(f'out_value_{i}')
+            inputs.append(past_v)
+            dyn_axes[f'in_value_{i}'] = {0: 'batch', 3: 'history_len'}
+            dyn_axes[f'out_value_{i}'] = {0: 'batch', 3: 'kv_seq_len'}
+        in_names.extend(extra_input_names)
+        inputs.extend(extra_inputs)
+        out_names.extend(extra_output_names)
+        return inputs, in_names, out_names, dyn_axes
 
-    all_inputs = []
-    input_names = []
-    output_names = []
-    dynamic_axes = {}
-    for i in range(num_layers):
-        name = f'in_key_{i}'
-        input_names.append(name)
-        all_inputs.append(past_keys_greedy)
-        dynamic_axes[name] = {0: 'batch', 4: 'history_len'}
-        name = f'out_key_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 4: 'kv_seq_len'}
-    for i in range(num_layers):
-        name = f'in_value_{i}'
-        input_names.append(name)
-        all_inputs.append(past_values_greedy)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len'}
-        name = f'out_value_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 3: 'kv_seq_len'}
-    input_names.append('logits')
-    all_inputs.append(logits[[0]])
-    input_names.append('save_id_in')
-    all_inputs.append(save_id)
-    input_names.append('repeat_penality_in')
-    all_inputs.append(repeat_penality)
-    input_names.append('penality_value')
-    all_inputs.append(penality_value)
-    input_names.append('beam_size')
-    all_inputs.append(beam_size)
-    output_names.append('top_beam_indices')
-    output_names.append('save_id_out')
-    output_names.append('repeat_penality_out')
-    output_names.append('top_beam_prob')
-    output_names.append('max_logits_idx')
-    dynamic_axes['save_id_in'] = {0: 'batch', 1: 'history_len'}
-    dynamic_axes['save_id_out'] = {0: 'batch', 1: 'history_len'}
-    dynamic_axes['repeat_penality_in'] = {0: 'batch'}
-    dynamic_axes['repeat_penality_out'] = {0: 'batch'}
-    dynamic_axes['logits'] = {0: 'batch'}
-    dynamic_axes['top_beam_prob'] = {0: 'batch'}
-    dynamic_axes['top_beam_indices'] = {0: 'batch'}
-    dynamic_axes['max_logits_idx'] = {0: 'batch'}
-
+    # Export First Beam Search (Model E)
+    inputs, in_names, out_names, dyn_axes = build_kv_inputs_outputs(
+        past_keys_single, past_values_single,
+        [logits[[0]], save_id, repeat_penality, penality_value, beam_size_val],
+        ['logits', 'save_id_in', 'repeat_penality_in', 'penality_value', 'beam_size'],
+        ['top_beam_indices', 'save_id_out', 'repeat_penality_out', 'top_beam_prob', 'max_logits_idx']
+    )
+    dyn_axes.update({
+        'save_id_in': {0: 'batch', 1: 'history_len'},
+        'save_id_out': {0: 'batch', 1: 'history_len'},
+        'repeat_penality_in': {0: 'batch'},
+        'repeat_penality_out': {0: 'batch'},
+        'logits': {0: 'batch'},
+        'top_beam_prob': {0: 'batch'},
+        'top_beam_indices': {0: 'batch'},
+        'max_logits_idx': {0: 'batch'}
+    })
     torch.onnx.export(
-        FIRST_BEAM_SEARCH(num_layers + num_layers),
-        tuple(all_inputs),
+        FIRST_BEAM_SEARCH(total_layers),
+        tuple(inputs),
         onnx_model_E,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
+        input_names=in_names,
+        output_names=out_names,
+        dynamic_axes=dyn_axes,
         opset_version=OPSET,
         dynamo=False
     )
 
-    all_inputs = []
-    input_names = []
-    for i in range(num_layers):
-        name = f'in_key_{i}'
-        input_names.append(name)
-        all_inputs.append(past_keys)
-    for i in range(num_layers):
-        name = f'in_value_{i}'
-        input_names.append(name)
-        all_inputs.append(past_values)
-    input_names.append('logits')
-    all_inputs.append(logits)
-    input_names.append('save_id_in')
-    all_inputs.append(save_id)
-    input_names.append('repeat_penality_in')
-    all_inputs.append(repeat_penality)
-    input_names.append('previous_prob')
-    all_inputs.append(previous_prob)
-    input_names.append('penality_value')
-    all_inputs.append(penality_value)
-    input_names.append('beam_size')
-    all_inputs.append(beam_size)
-    input_names.append('topK')
-    all_inputs.append(topK)
-    dynamic_axes['previous_prob'] = {0: 'batch'}
-
+    # Export Second Beam Search (Model F)
+    inputs, in_names, out_names, dyn_axes = build_kv_inputs_outputs(
+        past_keys, past_values,
+        [logits, save_id, repeat_penality, torch.zeros((BEAM_SIZE, 1), dtype=torch.float32),
+         penality_value, beam_size_val, topK],
+        ['logits', 'save_id_in', 'repeat_penality_in', 'previous_prob', 'penality_value', 'beam_size', 'topK'],
+        ['top_beam_indices', 'save_id_out', 'repeat_penality_out', 'top_beam_prob', 'max_logits_idx']
+    )
+    dyn_axes.update({
+        'save_id_in': {0: 'batch', 1: 'history_len'},
+        'save_id_out': {0: 'batch', 1: 'history_len'},
+        'repeat_penality_in': {0: 'batch'},
+        'repeat_penality_out': {0: 'batch'},
+        'logits': {0: 'batch'},
+        'top_beam_prob': {0: 'batch'},
+        'top_beam_indices': {0: 'batch'},
+        'max_logits_idx': {0: 'batch'},
+        'previous_prob': {0: 'batch'}
+    })
     torch.onnx.export(
-        SECOND_BEAM_SEARCH(num_layers + num_layers),
-        tuple(all_inputs),
+        SECOND_BEAM_SEARCH(total_layers), tuple(inputs),
         onnx_model_F,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
+        input_names=in_names,
+        output_names=out_names,
+        dynamic_axes=dyn_axes,
         opset_version=OPSET,
         dynamo=False
     )
-    del num_layers
-    del past_keys
-    del past_values
-    del input_names
-    del output_names
-    del dynamic_axes
-    del all_inputs
-    del beam_size
-    del penality_value
+    del past_keys, past_values, past_keys_single, past_values_single, inputs, in_names, out_names, dyn_axes
 
+    # Export Reset Penality Beam (Model G)
+    penality_reset_count_in = torch.zeros([BEAM_SIZE, 1], dtype=torch.int32)
     torch.onnx.export(
-        RESET_PENALITY(),
-        (save_id, repeat_penality, penality_reset_count),
+        RESET_PENALITY_BEAM(),
+        (save_id, repeat_penality, penality_reset_count_in),
         onnx_model_G,
         input_names=['save_id_in', 'repeat_penality_in', 'penality_reset_count_in'],
         output_names=['repeat_penality_out', 'penality_reset_count_out'],
@@ -818,15 +789,33 @@ with torch.inference_mode():
         opset_version=OPSET,
         dynamo=False
     )
-    del save_id
-    del repeat_penality
-    del penality_reset_count
+    del save_id, penality_reset_count_in
 
+    # Export Reset Penality Greedy (Model H)
+    target_id = torch.tensor([[0]], dtype=torch.int64)
+    torch.onnx.export(
+        RESET_PENALITY_GREEDY(),
+        (repeat_penality, target_id),
+        onnx_model_H,
+        input_names=['repeat_penality_in', 'target_id'],
+        output_names=['repeat_penality_out'],
+        dynamic_axes={
+            'repeat_penality_in': {0: 'batch'},
+            'repeat_penality_out': {0: 'batch'},
+            'target_id': {0: 'batch'}
+        },
+        opset_version=OPSET,
+        dynamo=False
+    )
+    del repeat_penality, penality_value, beam_size_val, topK, target_id
+
+    # Export Argmax (Model I)
     torch.onnx.export(
         ARGMAX(),
         (logits,),
-        onnx_model_H,
-        input_names=['logits'], output_names=['max_logits_idx'],
+        onnx_model_I,
+        input_names=['logits'],
+        output_names=['max_logits_idx'],
         dynamic_axes={
             'logits': {0: 'batch'},
             'max_logits_idx': {0: 'batch'}
@@ -835,7 +824,27 @@ with torch.inference_mode():
         dynamo=False
     )
     del logits
+    gc.collect()
+
 print('\nExport done!\n\nStart to run FunASR-Nano by ONNX Runtime.\n\nNow, loading the model...')
+
+
+def bind_ort_in(binding, names, values, num=0):
+    if num != 0:
+        for i in range(num):
+            binding.bind_ortvalue_input(names[i], values[i])
+    else:
+        for name, val in zip(names, values):
+            binding.bind_ortvalue_input(name, val)
+
+
+def bind_ort_out(binding, output_names, device_type):
+    for name in output_names:
+        binding._iobinding.bind_output(name, device_type)
+
+
+def create_ortvalue(data, dtype, device_type, device_id):
+    return onnxruntime.OrtValue.ortvalue_from_numpy(np.array(data, dtype=dtype), device_type, device_id)
 
 
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
@@ -863,7 +872,6 @@ session_opts.add_session_config_entry('session.use_device_allocator_for_initiali
 session_opts.add_session_config_entry('optimization.enable_cast_chain_elimination', '1')
 session_opts.add_session_config_entry('session.graph_optimizations_loop_level', '2')
 run_options.add_run_config_entry('disable_synchronize_execution_providers', '0')
-
 
 if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
     provider_options = [
@@ -919,25 +927,6 @@ else:
     _ort_device_type = C.OrtDevice.cpu()
     provider_options = None
     
-
-def bind_ort_values(binding, names, values, num=0):
-    if num != 0:
-        for i in range(num):
-            binding.bind_ortvalue_input(names[i], values[i])
-    else:
-        for name, val in zip(names, values):
-            binding.bind_ortvalue_input(name, val)
-
-
-def bind_outputs_generic(binding, output_names, device_type):
-    for name in output_names:
-        binding._iobinding.bind_output(name, device_type)
-
-
-def create_ortvalue(data, dtype, device_type, device_id):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(np.array(data, dtype=dtype), device_type, device_id)
-
-
 _ort_device_type = C.OrtDevice(_ort_device_type, C.OrtDevice.default_memory(), DEVICE_ID)
 
 ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
@@ -972,12 +961,15 @@ num_keys_values_plus_5 = num_keys_values + 5
 num_keys_values_plus_6 = num_keys_values + 6
 vocab_size = ort_session_C._outputs_meta[num_keys_values].shape[1]
 
-generate_limit = MAX_SEQ_LEN - 20
+generate_limit = MAX_SEQ_LEN - 10
 topK = create_ortvalue([TOP_K], np.int64, device_type, DEVICE_ID)
 beam_size = create_ortvalue([BEAM_SIZE], np.int64, device_type, DEVICE_ID)
+init_ids_len_1 = create_ortvalue([1], np.int64, device_type, DEVICE_ID)
+init_history_len = create_ortvalue([0], np.int64, device_type, DEVICE_ID)
+init_attention_mask_0 = create_ortvalue([0], np.int8, device_type, DEVICE_ID)
+init_attention_mask_1 = create_ortvalue([1], np.int8, device_type, DEVICE_ID)
 
 if USE_BEAM_SEARCH and (TOP_K < BEAM_SIZE):
-    print("\nBeam Search does not display the immediate decoding results; the best result is shown only after the entire decoding process is complete.\n")
     TOP_K = BEAM_SIZE
 
 if (TOP_K < 2) or (BEAM_SIZE < 2):
@@ -985,9 +977,10 @@ if (TOP_K < 2) or (BEAM_SIZE < 2):
     print("\nInappropriate Beam Search setting detected. Falling back to Greedy Search.")
     BEAM_SIZE = 1
 
-do_repeat_penalty = (REPEAT_PENALITY != 1.0)
+USE_PENALTY = (REPEAT_PENALITY != 1.0)
 
 if USE_BEAM_SEARCH:
+    print("\nBeam Search does not display the immediate decoding results; the best result is shown only after the entire decoding process is complete.\n")
     ort_session_E = onnxruntime.InferenceSession(onnx_model_E, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
     binding_E = ort_session_E.io_binding()
     in_name_E = [x.name for x in ort_session_E.get_inputs()]
@@ -1004,9 +997,11 @@ if USE_BEAM_SEARCH:
     out_name_G = [x.name for x in ort_session_G.get_outputs()]
     penality_dtype = np.float16 if 'float16' in ort_session_E._inputs_meta[num_keys_values_plus_4].type else np.float32
     penality_value = create_ortvalue([REPEAT_PENALITY], penality_dtype, device_type, DEVICE_ID)
-    init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(np.ones((BEAM_SIZE, vocab_size), dtype=penality_dtype), device_type, DEVICE_ID)
+    repeat_penality = np.ones((BEAM_SIZE, vocab_size), dtype=penality_dtype)
+    penality_reset_count = np.zeros([BEAM_SIZE, 1], dtype=np.int32)
     init_save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 0), dtype=np.int32), device_type, DEVICE_ID)
-    init_penality_reset_count = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros([BEAM_SIZE, 1], dtype=np.int32), device_type, DEVICE_ID)
+    init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
+    init_penality_reset_count = onnxruntime.OrtValue.ortvalue_from_numpy(penality_reset_count, device_type, DEVICE_ID)
     binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_1], init_save_id_beam)
     binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_2], init_repeat_penality)
     binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_3], penality_value)
@@ -1018,31 +1013,33 @@ if USE_BEAM_SEARCH:
 else:
     BEAM_SIZE = 1
     save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
-    if do_repeat_penalty:
+    ort_idx = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 1), dtype=np.int32), device_type, DEVICE_ID)
+    if USE_PENALTY:
         ort_session_D = onnxruntime.InferenceSession(onnx_model_D, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
         binding_D = ort_session_D.io_binding()
         in_name_D = [x.name for x in ort_session_D.get_inputs()]
         out_name_D = [x.name for x in ort_session_D.get_outputs()]
-        penality_dtype = np.float16 if 'float16' in ort_session_D._inputs_meta[2].type else np.float32
-        penality_value = create_ortvalue([REPEAT_PENALITY], penality_dtype, device_type, DEVICE_ID)
-        penalty_shape = (BEAM_SIZE, vocab_size)
-        init_penalty = np.ones(penalty_shape, dtype=penality_dtype)
-        current_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(init_penalty, device_type, DEVICE_ID)
-        next_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(init_penalty, device_type, DEVICE_ID)
-        binding_D.bind_ortvalue_input(in_name_D[2], penality_value)
-        binding_D.bind_output(name=out_name_D[0], device_type=device_type, device_id=DEVICE_ID)
-        binding_D.bind_output(name=out_name_D[1], device_type=device_type, device_id=DEVICE_ID, element_type=penality_dtype, shape=penalty_shape, buffer_ptr=next_penalty.data_ptr())
-        init_penality_reset_count = 0
-    else:
         ort_session_H = onnxruntime.InferenceSession(onnx_model_H, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
         binding_H = ort_session_H.io_binding()
-        in_name_H = ort_session_H.get_inputs()[0].name
-        out_name_H = [ort_session_H.get_outputs()[0].name]
-
-init_ids_len_1 = create_ortvalue([1], np.int64, device_type, DEVICE_ID)
-init_history_len = create_ortvalue([0], np.int64, device_type, DEVICE_ID)
-init_attention_mask_0 = create_ortvalue([0], np.int8, device_type, DEVICE_ID)
-init_attention_mask_1 = create_ortvalue([1], np.int8, device_type, DEVICE_ID)
+        in_name_H = [x.name for x in ort_session_H.get_inputs()]
+        out_name_H = ort_session_H.get_outputs()[0].name  # Only one output for Greedy Penalty Reset
+        penality_dtype = np.float16 if 'float16' in ort_session_D._inputs_meta[2].type else np.float32
+        penality_value = create_ortvalue([REPEAT_PENALITY], penality_dtype, device_type, DEVICE_ID)
+        repeat_penality = np.ones((BEAM_SIZE, vocab_size), dtype=penality_dtype)
+        current_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
+        binding_D.bind_ortvalue_input(in_name_D[1], current_penalty)
+        binding_D.bind_ortvalue_output(out_name_D[1], current_penalty)
+        binding_D.bind_ortvalue_input(in_name_D[2], penality_value)
+        binding_D.bind_ortvalue_output(out_name_D[0], ort_idx)
+        binding_H.bind_ortvalue_input(in_name_H[0], current_penalty)
+        binding_H.bind_ortvalue_output(out_name_H, current_penalty)
+        init_penality_reset_count = 0
+    else:
+        ort_session_I = onnxruntime.InferenceSession(onnx_model_I, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
+        binding_I = ort_session_I.io_binding()
+        in_name_I = ort_session_I.get_inputs()[0].name
+        out_name_I = ort_session_I.get_outputs()[0].name
+        binding_I.bind_ortvalue_output(out_name_I, ort_idx)
 
 if 'dml' in device_type:
     kv_device = 'cpu'
@@ -1059,7 +1056,7 @@ for i in task_prompt:
     tokens = tokenizer(i, return_tensors='np')['input_ids'].astype(np.int32)
     input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(tokens, device_type, DEVICE_ID)
     binding_B.bind_ortvalue_input(in_name_B, input_ids)
-    bind_outputs_generic(binding_B, out_name_B, _ort_device_type)
+    bind_ort_out(binding_B, out_name_B, _ort_device_type)
     ort_session_B.run_with_iobinding(binding_B, run_options=run_options)
     init_all_outputs_B.append(onnxruntime.OrtValue.ortvalue_from_numpy(binding_B.get_outputs()[0].numpy(), device_type, DEVICE_ID))
 
@@ -1091,7 +1088,7 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
         ort_audio = onnxruntime.OrtValue.ortvalue_from_numpy(audio_slice, device_type, DEVICE_ID)
         binding_A.bind_ortvalue_input(in_name_A[0], ort_audio)
         binding_A.bind_ortvalue_input(in_name_A[1], prompt_embed)
-        bind_outputs_generic(binding_A, out_name_A, _ort_device_type)
+        bind_ort_out(binding_A, out_name_A, _ort_device_type)
         ort_session_A.run_with_iobinding(binding_A, run_options=run_options)
         all_outputs_A = binding_A.get_outputs()
         i = 0
@@ -1107,95 +1104,79 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
         binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_1], init_history_len)
         binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_2], all_outputs_A[1])
         binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_3], init_attention_mask_1)
-        if USE_BEAM_SEARCH:
-            binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_1], init_save_id_beam)
-            binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_2], init_repeat_penality)
-            if do_repeat_penalty:
+        if USE_PENALTY:
+            if USE_BEAM_SEARCH:
+                init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
+                init_penality_reset_count = onnxruntime.OrtValue.ortvalue_from_numpy(penality_reset_count, device_type, DEVICE_ID)
+                binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_2], init_repeat_penality)
                 binding_G.bind_ortvalue_input(in_name_G[2], init_penality_reset_count)
-        else:
-            if do_repeat_penalty:
-                current_penalty.update_inplace(init_penalty)
-                next_penalty.update_inplace(init_penalty)
-                binding_D.bind_output(name=out_name_D[1], device_type=device_type, device_id=DEVICE_ID, element_type=penality_dtype, shape=penalty_shape, buffer_ptr=next_penalty.data_ptr())
+            else:
+                current_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
+                binding_D.bind_ortvalue_input(in_name_D[1], current_penalty)
+                binding_D.bind_ortvalue_output(out_name_D[1], current_penalty)
+                binding_H.bind_ortvalue_input(in_name_H[0], current_penalty)
+                binding_H.bind_ortvalue_output(out_name_H, current_penalty)
                 init_penality_reset_count = 0
 
         num_decode = 0
         limit = generate_limit - all_outputs_A[1].numpy()
         start_time = time.time()
         while num_decode < limit:
-            bind_outputs_generic(binding_C, out_name_C, _ort_device_type)
+            bind_ort_out(binding_C, out_name_C, _ort_device_type)
             ort_session_C.run_with_iobinding(binding_C, run_options=run_options)
             all_outputs_C = binding_C.get_outputs()
             if USE_BEAM_SEARCH:
                 if num_decode < 1:
-                    bind_ort_values(binding_E, in_name_E_parts, all_outputs_C)
-                    bind_outputs_generic(binding_E, out_name_E, _ort_device_type)
+                    bind_ort_in(binding_E, in_name_E_parts, all_outputs_C)
+                    bind_ort_out(binding_E, out_name_E, _ort_device_type)
                     ort_session_E.run_with_iobinding(binding_E, run_options=run_options)
-                    all_outputs_E = binding_E.get_outputs()
-                    max_logits_idx = all_outputs_E[num_keys_values_plus_4].numpy()
-                    if max_logits_idx in STOP_TOKEN:
-                        print("\nBad first token generated, stopping decoding.\n")
-                        break
+                    all_outputs = binding_E.get_outputs()
                 else:
-                    bind_ort_values(binding_F, in_name_F_parts, all_outputs_C)
-                    bind_outputs_generic(binding_F, out_name_F, _ort_device_type)
+                    bind_ort_in(binding_F, in_name_F_parts, all_outputs_C)
+                    bind_ort_out(binding_F, out_name_F, _ort_device_type)
                     ort_session_F.run_with_iobinding(binding_F, run_options=run_options)
-                    all_outputs_F = binding_F.get_outputs()
-                    max_logits_idx = all_outputs_F[num_keys_values_plus_4].numpy()
-                    if max_logits_idx in STOP_TOKEN:
-                        break
-                if do_repeat_penalty and (num_decode >= PENALTY_RANGE):
-                    binding_G.bind_ortvalue_input(in_name_G[0], all_outputs_F[num_keys_values_plus_1])
-                    binding_G.bind_ortvalue_input(in_name_G[1], all_outputs_F[num_keys_values_plus_2])
-                    bind_outputs_generic(binding_G, out_name_G, _ort_device_type)
+                    all_outputs = binding_F.get_outputs()
+                max_logits_idx = all_outputs[num_keys_values_plus_4].numpy()
+                if max_logits_idx in STOP_TOKEN:
+                    break
+                if USE_PENALTY and (num_decode >= PENALTY_RANGE):
+                    binding_G.bind_ortvalue_input(in_name_G[0], all_outputs[num_keys_values_plus_1])
+                    binding_G.bind_ortvalue_input(in_name_G[1], all_outputs[num_keys_values_plus_2])
+                    bind_ort_out(binding_G, out_name_G, _ort_device_type)
                     ort_session_G.run_with_iobinding(binding_G, run_options=run_options)
                     all_outputs_G = binding_G.get_outputs()
                     binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs_G[0])
                     binding_G.bind_ortvalue_input(in_name_G[2], all_outputs_G[1])
-                if num_decode < 1:
-                    bind_ort_values(binding_C, in_name_C_parts, all_outputs_E)
-                    binding_B.bind_ortvalue_input(in_name_B, all_outputs_E[num_keys_values])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_1], all_outputs_E[num_keys_values_plus_1])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs_E[num_keys_values_plus_2])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_3], all_outputs_E[num_keys_values_plus_3])
-                else:
-                    bind_ort_values(binding_C, in_name_C_parts, all_outputs_F)
-                    binding_B.bind_ortvalue_input(in_name_B, all_outputs_F[num_keys_values])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_1], all_outputs_F[num_keys_values_plus_1])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs_F[num_keys_values_plus_2])
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_3], all_outputs_F[num_keys_values_plus_3])
+                bind_ort_in(binding_C, in_name_C_parts, all_outputs)
+                binding_B.bind_ortvalue_input(in_name_B, all_outputs[num_keys_values])
+                binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_1], all_outputs[num_keys_values_plus_1])
+                binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs[num_keys_values_plus_2])
+                binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_3], all_outputs[num_keys_values_plus_3])
             else:
-                if do_repeat_penalty:
+                if USE_PENALTY:
                     binding_D.bind_ortvalue_input(in_name_D[0], all_outputs_C[num_keys_values])
-                    binding_D.bind_ortvalue_input(in_name_D[1], current_penalty)
                     ort_session_D.run_with_iobinding(binding_D, run_options=run_options)
-                    all_outputs_D = binding_D.get_outputs()
-                    max_logits_idx = all_outputs_D[0].numpy().flat[0]
+                    max_logits_idx = ort_idx.numpy().flat[0]
                     if max_logits_idx in STOP_TOKEN:
                         break
                     if num_decode >= PENALTY_RANGE:
                         reset_ids = save_id_greedy[init_penality_reset_count]
                         if reset_ids != max_logits_idx:
-                            tmp = next_penalty.numpy()
-                            tmp[:, reset_ids] = 1.0
-                            next_penalty.update_inplace(tmp)
+                            reset_ids = create_ortvalue([[reset_ids]], np.int64, device_type, DEVICE_ID)
+                            binding_H.bind_ortvalue_input(in_name_H[1], reset_ids)
+                            ort_session_H.run_with_iobinding(binding_H, run_options=run_options)
                         init_penality_reset_count += 1
-                    current_penalty, next_penalty = next_penalty, current_penalty
-                    binding_D.bind_output(name=out_name_D[1], device_type=device_type, device_id=DEVICE_ID, element_type=penality_dtype, shape=penalty_shape, buffer_ptr=next_penalty.data_ptr())
-                    binding_B.bind_ortvalue_input(in_name_B, all_outputs_D[0])
                 else:
-                    binding_H.bind_ortvalue_input(in_name_H, all_outputs_C[num_keys_values])
-                    bind_outputs_generic(binding_H, out_name_H, _ort_device_type)
-                    ort_session_H.run_with_iobinding(binding_H)
-                    all_outputs_H = binding_H.get_outputs()
-                    binding_B.bind_ortvalue_input(in_name_B, all_outputs_H[0])
-                    max_logits_idx = all_outputs_H[0].numpy().flat[0]
+                    binding_I.bind_ortvalue_input(in_name_I, all_outputs_C[num_keys_values])
+                    ort_session_I.run_with_iobinding(binding_I, run_options=run_options)
+                    max_logits_idx = ort_idx.numpy().flat[0]
                     if max_logits_idx in STOP_TOKEN:
                         break
-                bind_ort_values(binding_C, in_name_C_parts, all_outputs_C)
+                binding_B.bind_ortvalue_input(in_name_B, ort_idx)
+                bind_ort_in(binding_C, in_name_C_parts, all_outputs_C)
                 save_id_greedy[num_decode] = max_logits_idx
-            bind_outputs_generic(binding_B, out_name_B, _ort_device_type)
-            ort_session_B.run_with_iobinding(binding_B)
+            bind_ort_out(binding_B, out_name_B, _ort_device_type)
+            ort_session_B.run_with_iobinding(binding_B, run_options=run_options)
             binding_C.bind_ortvalue_input(in_name_C[num_keys_values], binding_B.get_outputs()[0])
             binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_1], all_outputs_C[num_keys_values_plus_1])
             if num_decode < 1:
@@ -1206,11 +1187,10 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
         slice_end = slice_start + INPUT_AUDIO_LENGTH
         if num_decode > 0:
             if USE_BEAM_SEARCH:
-                asr_result += tokenizer.decode(all_outputs_F[num_keys_values_plus_1].numpy()[0, :num_decode], skip_special_tokens=True)
+                asr_result += tokenizer.decode(all_outputs[num_keys_values_plus_1].numpy()[0, :num_decode], skip_special_tokens=True)
             else:
                 asr_result += tokenizer.decode(save_id_greedy[:num_decode], skip_special_tokens=True)
         print(f"\nDecode: {((num_decode + 1) / (time.time() - start_time)):.3f} token/s\n")
     print(asr_result, end="", flush=True)
     print(f"\n\nRTF: {((time.time() - rtf_time) / (audio_full_len / SAMPLE_RATE)):.3f}")
     print("----------------------------------------------------------------------------------------------------------")
-
