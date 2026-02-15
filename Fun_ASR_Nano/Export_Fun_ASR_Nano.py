@@ -335,8 +335,10 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             qkv = encoder_layer.self_attn.linear_q_k_v(x1)
             qkv = qkv.view(-1, 3, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0, 3)
             q_h, k_h, v_h = qkv.split([1, 1, 1], dim=0)
-            v = v_h.transpose(1, 2).reshape(1, -1, encoder_layer.size)
-            fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
+            v_fsmn = v_h.transpose(-1, -2).reshape(1, encoder_layer.size, -1)
+            fsmn_in = torch.cat([self.pad_zeros, v_fsmn, self.pad_zeros], dim=-1)
+            fsmn_out = encoder_layer.self_attn.fsmn_block(fsmn_in)
+            fsmn_memory = (fsmn_out + v_fsmn).transpose(1, 2).reshape(1, -1, encoder_layer.size)
             attn = torch.softmax(torch.matmul(q_h, k_h.transpose(-1, -2)), dim=-1, dtype=torch.float32)
             attn = torch.matmul(attn, v_h).transpose(1, 2).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
             attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
@@ -351,9 +353,11 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             qkv = encoder_layer.self_attn.linear_q_k_v(x1)
             qkv = qkv.view(-1, 3, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0, 3)
             q_h, k_h, v_h = qkv.split([1, 1, 1], dim=0)
-            v = v_h.transpose(1, 2).reshape(1, -1, encoder_layer.size)
-            fsmn_memory = encoder_layer.self_attn.fsmn_block(torch.cat([self.pad_zeros, v.transpose(1, 2), self.pad_zeros], dim=-1)).transpose(1, 2) + v
-            attn = torch.softmax(torch.matmul(q_h, k_h.transpose(-1, -2)), dim=-1)
+            v_fsmn = v_h.transpose(-1, -2).reshape(1, encoder_layer.size, -1)
+            fsmn_in = torch.cat([self.pad_zeros, v_fsmn, self.pad_zeros], dim=-1)
+            fsmn_out = encoder_layer.self_attn.fsmn_block(fsmn_in)
+            fsmn_memory = (fsmn_out + v_fsmn).transpose(1, 2).reshape(1, -1, encoder_layer.size)
+            attn = torch.softmax(torch.matmul(q_h, k_h.transpose(-1, -2)), dim=-1, dtype=torch.float32)
             attn = torch.matmul(attn, v_h).transpose(1, 2).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
             attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             x += attn
