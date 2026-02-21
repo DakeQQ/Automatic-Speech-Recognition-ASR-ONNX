@@ -99,7 +99,7 @@ class GREEDY_SEARCH(torch.nn.Module):
 
     def forward(self, logits, repeat_penality, penality_value):
         max_logits_idx = torch.argmax(logits * repeat_penality, dim=-1, keepdim=True)
-        repeat_penality.scatter_(1, max_logits_idx, repeat_penality.gather(1, max_logits_idx) * penality_value)
+        repeat_penality = repeat_penality.scatter(1, max_logits_idx, repeat_penality.gather(1, max_logits_idx) * penality_value)
         return max_logits_idx.int(), repeat_penality
 
 
@@ -115,12 +115,13 @@ class FIRST_BEAM_SEARCH(torch.nn.Module):
         repeat_penality = all_inputs[-3]
         penality_value = all_inputs[-2]
         beam_size = all_inputs[-1]
-        logits = torch.log_softmax(logits, dim=-1)
-        top_beam_prob, top_beam_indices = torch.topk(logits, dim=-1, k=beam_size, sorted=True, largest=True)
+        row_logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
+        top_beam_logits, top_beam_indices = torch.topk(logits, dim=-1, k=beam_size, sorted=False, largest=True)
+        top_beam_prob = top_beam_logits - row_logsumexp
         for i in range(self.total_layers):
             self.save_keys_values[i] = all_inputs[i].repeat(beam_size, *([1] * (all_inputs[i].dim() - 1)))
         top_beam_indices = top_beam_indices.transpose(0, 1)
-        repeat_penality.scatter_(1, top_beam_indices, repeat_penality.gather(1, top_beam_indices) * penality_value)
+        repeat_penality = repeat_penality.scatter(1, top_beam_indices, repeat_penality.gather(1, top_beam_indices) * penality_value)
         top_beam_indices = top_beam_indices.int()
         save_id = torch.cat([save_id, top_beam_indices], dim=-1)
         max_logits_idx = top_beam_indices[0]
@@ -141,20 +142,23 @@ class SECOND_BEAM_SEARCH(torch.nn.Module):
         penality_value = all_inputs[-3]
         beam_size = all_inputs[-2]
         topK = all_inputs[-1]
-        logits = torch.log_softmax(logits * repeat_penality, dim=-1)
-        top_k_prob, top_k_indices = torch.topk(logits, k=topK, dim=-1, largest=True, sorted=True)
+        penalized_logits = logits * repeat_penality
+        row_logsumexp = torch.logsumexp(penalized_logits, dim=-1, keepdim=True)
+        top_k_logits, top_k_indices = torch.topk(penalized_logits, k=topK, dim=-1, largest=True, sorted=False)
+        top_k_prob = top_k_logits - row_logsumexp
         current_prob = (top_k_prob + previous_prob).view(-1)
-        top_beam_prob, top_beam_indices = torch.topk(current_prob, k=beam_size, dim=-1, largest=True, sorted=True)
+        top_beam_prob, top_beam_indices = torch.topk(current_prob, k=beam_size, dim=-1, largest=True, sorted=False)
         beam_index = top_beam_indices // topK
         top_beam_indices = top_k_indices.view(-1)[top_beam_indices]
         for i in range(self.total_layers):
-            self.save_keys_values[i] = all_inputs[i][beam_index]
-        repeat_penality = repeat_penality[beam_index]
+            self.save_keys_values[i] = torch.index_select(all_inputs[i], dim=0, index=beam_index)
+        repeat_penality = torch.index_select(repeat_penality, dim=0, index=beam_index)
+        gathered_save_id = torch.index_select(save_id, dim=0, index=beam_index)
         top_beam_indices = top_beam_indices.unsqueeze(-1)
-        repeat_penality.scatter_(1, top_beam_indices, repeat_penality.gather(1, top_beam_indices) * penality_value)
+        repeat_penality = repeat_penality.scatter(1, top_beam_indices, repeat_penality.gather(1, top_beam_indices) * penality_value)
         top_beam_indices = top_beam_indices.int()
         max_logits_idx = top_beam_indices[0]
-        save_id = torch.cat([save_id[beam_index], top_beam_indices], dim=-1)
+        save_id = torch.cat([gathered_save_id, top_beam_indices], dim=-1)
         return *self.save_keys_values, top_beam_indices, save_id, repeat_penality, top_beam_prob.unsqueeze(-1), max_logits_idx
 
 
@@ -165,7 +169,7 @@ class RESET_PENALITY_BEAM(torch.nn.Module):
 
     def forward(self, save_id, repeat_penality, penality_reset_count):
         token_indices = save_id.gather(1, penality_reset_count).long()
-        repeat_penality.scatter_(1, token_indices, 1.0)
+        repeat_penality = repeat_penality.scatter(1, token_indices, 1.0)
         penality_reset_count += 1
         return repeat_penality, penality_reset_count
 
@@ -176,7 +180,7 @@ class RESET_PENALITY_GREEDY(torch.nn.Module):
         pass
 
     def forward(self, repeat_penality, target_id):
-        repeat_penality.scatter_(1, target_id, 1.0)
+        repeat_penality = repeat_penality.scatter(1, target_id, 1.0)
         return repeat_penality
 
 
