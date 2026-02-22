@@ -343,13 +343,14 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             fsmn_in = torch.cat([self.pad_zeros, v_fsmn, self.pad_zeros], dim=-1)
             fsmn_out = encoder_layer.self_attn.fsmn_block(fsmn_in)
             fsmn_memory = (fsmn_out + v_fsmn).transpose(1, 2).reshape(1, -1, encoder_layer.size)
-            attn = torch.softmax(torch.matmul(q_h, k_h.transpose(-1, -2)), dim=-1, dtype=torch.float32)
+            attn = torch.matmul(q_h, k_h.transpose(-1, -2))
+            attn = torch.nn.functional.softmax(attn, dim=-1)
             attn = torch.matmul(attn, v_h).transpose(1, 2).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
-            attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
+            attn_out = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
             if encoder_layer.in_size == encoder_layer.size:
-                x += attn
+                x = x + attn_out
             else:
-                x = attn
+                x = attn_out
             x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(encoder_layer.norm2(x))))
         x = self.funasr_nano.audio_encoder.after_norm(x)
         for encoder_layer in self.funasr_nano.audio_encoder.tp_encoders:
@@ -361,10 +362,11 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             fsmn_in = torch.cat([self.pad_zeros, v_fsmn, self.pad_zeros], dim=-1)
             fsmn_out = encoder_layer.self_attn.fsmn_block(fsmn_in)
             fsmn_memory = (fsmn_out + v_fsmn).transpose(1, 2).reshape(1, -1, encoder_layer.size)
-            attn = torch.softmax(torch.matmul(q_h, k_h.transpose(-1, -2)), dim=-1, dtype=torch.float32)
+            attn = torch.matmul(q_h, k_h.transpose(-1, -2))
+            attn = torch.nn.functional.softmax(attn, dim=-1)
             attn = torch.matmul(attn, v_h).transpose(1, 2).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
-            attn = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
-            x += attn
+            attn_out = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
+            x = x + attn_out
             x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(encoder_layer.norm2(x))))
         x = self.funasr_nano.audio_encoder.tp_norm(x)
         x = self.funasr_nano.audio_adaptor.linear1(x)
@@ -375,10 +377,11 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             qkv = block.self_attn.linear_q_k_v(x1)
             qkv = qkv.view(-1, 3, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0, 3)
             q, k, v = qkv.split([1, 1, 1], dim=0)
-            attn = torch.softmax(torch.matmul(q, k.transpose(-1, -2)), dim=-1)
+            attn = torch.matmul(q, k.transpose(-1, -2))
+            attn = torch.nn.functional.softmax(attn, dim=-1)
             attn = torch.matmul(attn, v).transpose(1, 2).reshape(1, -1, block.self_attn.linear_out.in_features)
-            attn = block.self_attn.linear_out(attn)
-            x += attn
+            attn_out = block.self_attn.linear_out(attn)
+            x = x + attn_out
             x = x + block.feed_forward.w_2(block.feed_forward.activation(block.feed_forward.w_1(block.norm2(x))))
         x = x[:, :self.fake_token[features_len].to(torch.int64)]
         concat_embed = torch.cat([self.head_embed, query_embed, x, self.tail_embed], dim=1)
@@ -540,7 +543,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             self.save_key[i] = k
             self.save_value[i] = v
             attn = torch.matmul(q, k.float())
-            attn = torch.nn.functional.softmax(attn + attention_mask, dim=-1, dtype=torch.float32)
+            attn = torch.nn.functional.softmax(attn + attention_mask, dim=-1)
             attn = torch.matmul(attn, v.float())
             attn = attn.permute(0, 3, 1, 2, 4).reshape(batch_size, -1, layer.self_attn.o_proj.in_features)
             attn_out = layer.self_attn.o_proj(attn)
@@ -1202,3 +1205,4 @@ for prompt_embed, test in zip(init_all_outputs_B, test_audio):
     print(asr_result, end="", flush=True)
     print(f"\n\nRTF: {((time.time() - rtf_time) / (audio_full_len / SAMPLE_RATE)):.3f}")
     print("----------------------------------------------------------------------------------------------------------")
+    
