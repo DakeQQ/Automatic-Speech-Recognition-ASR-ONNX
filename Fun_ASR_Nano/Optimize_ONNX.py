@@ -24,11 +24,12 @@ model_names = [
     "FunASR_Nano_Encoder",
     "FunASR_Nano_Decoder_Embed",
     "FunASR_Nano_Decoder_Main",
+    "Rotary_Mask_Text_Prefill",
+    "Rotary_Mask_Text_Decode",
     "Greedy_Search",
     "First_Beam_Search",
     "Second_Beam_Search",
-    "Reset_Penality_Beam",
-    "Reset_Penality_Greedy",
+    "Apply_Penalty",
     "Argmax"
 ]
 
