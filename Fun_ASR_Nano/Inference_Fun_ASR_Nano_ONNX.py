@@ -5,16 +5,18 @@ from onnxruntime.capi import _pybind_state as C
 from pydub import AudioSegment
 from transformers import AutoTokenizer
 
-tokenizer_path = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                                  # Set the tokenizer path.
-onnx_model_A = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Encoder.onnx'                 # The exported onnx model path.
-onnx_model_B = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Embed.onnx'
-onnx_model_C = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Main.onnx'
-onnx_model_D = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Greedy_Search.onnx'
-onnx_model_E = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/First_Beam_Search.onnx'
-onnx_model_F = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Second_Beam_Search.onnx'
-onnx_model_G = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Reset_Penality_Beam.onnx'
-onnx_model_H = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Reset_Penality_Greedy.onnx'
-onnx_model_I = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Argmax.onnx'
+
+tokenizer_path                  = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                          # Set the tokenizer path.
+onnx_model_Encoder              = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Encoder.onnx'       # The exported onnx model path.
+onnx_model_Embed                = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Embed.onnx'
+onnx_model_Main                 = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/FunASR_Nano_Decoder_Main.onnx'
+onnx_model_Rotary_Mask_Prefill  = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Rotary_Mask_Text_Prefill.onnx'
+onnx_model_Rotary_Mask_Decode   = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Rotary_Mask_Text_Decode.onnx'
+onnx_model_Greedy               = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Greedy_Search.onnx'
+onnx_model_First_Beam           = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/First_Beam_Search.onnx'
+onnx_model_Second_Beam          = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Second_Beam_Search.onnx'
+onnx_model_Penalty              = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Apply_Penalty.onnx'
+onnx_model_Argmax               = r'/home/DakeQQ/Downloads/Fun_ASR_Nano_Optimized/Argmax.onnx'
 
 
 # The exported onnx model path.
@@ -48,72 +50,20 @@ SLIDING_WINDOW = 0                   # Set the sliding window step for test audi
 USE_BEAM_SEARCH = False              # It recommended to use greedy search for Fun-ASR-Nano.
 TOP_K = 3                            # The top k candidate in decoding.
 BEAM_SIZE = 3                        # Number of beams in searching.
-MAX_BEAM_SIZE = 10                   # Max beams for exported model.
-REPEAT_PENALITY = 1.0                # Range from 0.0 to 1.0; "1.0" means no penality.
 PENALTY_RANGE = 10                   # Penalizes the most recent output. "10" means the last 10 tokens.
+REPEAT_PENALTY = 1.0                 # Range from 0.0 to 1.0; "1.0" means no penality.
 
 # Runtime & Export Settings
-MAX_THREADS = 0                      # Parllel CPU threads. Set 0 for auto.
-DEVICE_ID = 0                        # Default to zero.
-ORT_Accelerate_Providers = []        # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
-                                     # else keep empty.
-
-# ONNX Runtime settings
-if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
-    provider_options = [
-        {
-            'device_type': 'CPU',                         # [CPU, NPU, GPU, GPU.0, GPU.1]]
-            'precision': 'ACCURACY',                      # [FP32, FP16, ACCURACY]
-            'num_of_threads': MAX_THREADS if MAX_THREADS != 0 else 8,  # The default value is 8. Edit freely.
-            'num_streams': 1,
-            'enable_opencl_throttling': False,
-            'enable_qdq_optimizer': False,                # Enable it carefully
-            'disable_dynamic_shapes': False
-        }
-    ]
-    device_type = 'cpu'
-    _ort_device_type = C.OrtDevice.cpu()
-elif "CUDAExecutionProvider" in ORT_Accelerate_Providers:
-    provider_options = [
-        {
-            'device_id': DEVICE_ID,
-            'gpu_mem_limit': 24 * 1024 * 1024 * 1024,     # 24 GB
-            'arena_extend_strategy': 'kNextPowerOfTwo',   # ["kNextPowerOfTwo", "kSameAsRequested"]
-            'cudnn_conv_algo_search': 'EXHAUSTIVE',       # ["DEFAULT", "HEURISTIC", "EXHAUSTIVE"]
-            'sdpa_kernel': '2',                           # ["0", "1", "2"]
-            'use_tf32': '1',
-            'fuse_conv_bias': '0',                        # Set to '0' to avoid potential errors when enabled.
-            'cudnn_conv_use_max_workspace': '1',
-            'cudnn_conv1d_pad_to_nc1d': '0',
-            'tunable_op_enable': '0',
-            'tunable_op_tuning_enable': '0',
-            'tunable_op_max_tuning_duration_ms': 10,
-            'do_copy_in_default_stream': '0',
-            'enable_cuda_graph': '0',                     # Set to '0' to avoid potential errors when enabled.
-            'prefer_nhwc': '0',
-            'enable_skip_layer_norm_strict_mode': '0',
-            'use_ep_level_unified_stream': '0',
-        }
-    ]
-    device_type = 'cuda'
-    _ort_device_type = C.OrtDevice.cuda()
-elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
-    provider_options = [
-        {
-            'device_id': DEVICE_ID,
-            'performance_preference': 'high_performance',  # [high_performance, default, minimum_power]
-            'device_filter': 'npu'                         # [any, npu, gpu]
-        }
-    ]
-    device_type = 'dml'
-    _ort_device_type = C.OrtDevice.dml()
-else:
-    # Please config by yourself for others providers.
-    device_type = 'cpu'
-    _ort_device_type = C.OrtDevice.cpu()
-    provider_options = None
+ORT_Accelerate_Providers = []       # ORT execution providers; ['CUDAExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider']
+ORT_LOG = False                     # Enable ONNX Runtime logging for debugging. Set to False for best performance.
+ORT_FP16 = False                    # Set to True for FP16 ONNX Runtime settings. For CPUs, this requires ARM64-v8.2a or newer.
+MAX_THREADS = 0                     # Parllel CPU threads. Set 0 for auto.
+DEVICE_ID = 0                       # Default to zero.
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════════════
 def normalizer(_audio, target_value=8192.0):
     _audio = _audio.astype(np.float32)
     rms = np.sqrt(np.mean((_audio * _audio), dtype=np.float32), dtype=np.float32)
@@ -122,315 +72,552 @@ def normalizer(_audio, target_value=8192.0):
     return _audio.astype(np.int16)
 
 
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+def bind_ort_in(binding, names, values):
+    for name, val in zip(names, values):
+        binding.bind_ortvalue_input(name, val)
 
-# ONNX Runtime settings
+
+def bind_ort_out(binding, names, device):
+    for name in names:
+        binding._iobinding.bind_output(name, device)
+
+
+def create_ort_with_data(data, dtype, device, device_id):
+    return onnxruntime.OrtValue.ortvalue_from_numpy(np.array(data, dtype=dtype), device, device_id)
+
+
+def create_ort_with_shape(shape, dtype, device, device_id):
+    return onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(shape, dtype=dtype), device, device_id)
+
+
+def create_session(model_path, _session_opts, _providers, _provider_options, _disabled_optimizers):
+    return onnxruntime.InferenceSession(
+        model_path,
+        sess_options=_session_opts,
+        providers=_providers,
+        provider_options=_provider_options,
+        disabled_optimizers=_disabled_optimizers)
+
+
+def get_in_names(session):
+    return [x.name for x in session.get_inputs()]
+
+
+def get_out_names(session):
+    return [x.name for x in session.get_outputs()]
+
+
+def run(session, binding):
+    session.run_with_iobinding(binding, run_options=run_options)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ORT SESSION & RUNTIME OPTIONS
+# ══════════════════════════════════════════════════════════════════════════════
 session_opts = onnxruntime.SessionOptions()
-run_options = onnxruntime.RunOptions()
-session_opts.log_severity_level = 4                 # Fatal level, it an adjustable value.
-session_opts.log_verbosity_level = 4                # Fatal level, it an adjustable value.
-run_options.log_severity_level = 4                  # Fatal level, it an adjustable value.
-run_options.log_verbosity_level = 4                 # Fatal level, it an adjustable value.
-session_opts.inter_op_num_threads = MAX_THREADS     # Run different nodes with num_threads. Set 0 for auto.
-session_opts.intra_op_num_threads = MAX_THREADS     # Under the node, execute the operators with num_threads. Set 0 for auto.
-session_opts.enable_cpu_mem_arena = True            # True for execute speed; False for less memory usage.
-session_opts.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+run_options  = onnxruntime.RunOptions()
+
+for opt in (session_opts, run_options):
+    opt.log_severity_level  = 0 if ORT_LOG else 4
+    opt.log_verbosity_level = 4
+
+session_opts.inter_op_num_threads     = MAX_THREADS
+session_opts.intra_op_num_threads     = MAX_THREADS
+session_opts.execution_mode           = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
 session_opts.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
-session_opts.add_session_config_entry('session.set_denormal_as_zero', '1')
-session_opts.add_session_config_entry('session.intra_op.allow_spinning', '1')
-session_opts.add_session_config_entry('session.inter_op.allow_spinning', '1')
-session_opts.add_session_config_entry('session.enable_quant_qdq_cleanup', '1')
-session_opts.add_session_config_entry('session.qdq_matmulnbits_accuracy_level', '4')
-session_opts.add_session_config_entry('optimization.enable_gelu_approximation', '1')
-session_opts.add_session_config_entry('optimization.minimal_build_optimizations', '')
-session_opts.add_session_config_entry('session.use_device_allocator_for_initializers', '1')
-session_opts.add_session_config_entry('optimization.enable_cast_chain_elimination', '1')
-session_opts.add_session_config_entry('session.graph_optimizations_loop_level', '2')
+
+_session_configs = {
+    'session.set_denormal_as_zero':                  '1',
+    'session.intra_op.allow_spinning':               '1',
+    'session.inter_op.allow_spinning':               '1',
+    'session.enable_quant_qdq_cleanup':              '1',
+    'session.qdq_matmulnbits_accuracy_level':        '2' if ORT_FP16 else '4',
+    'session.use_device_allocator_for_initializers': '1',
+    'session.graph_optimizations_loop_level':        '2',
+    'optimization.enable_gelu_approximation':        '1',
+    'optimization.minimal_build_optimizations':      '',
+    'optimization.enable_cast_chain_elimination':    '1',
+    'optimization.disable_specified_optimizers':
+        'CastFloat16Transformer;FuseFp16InitializerToFp32NodeTransformer' if ORT_FP16 else ''
+}
+for k, v in _session_configs.items():
+    session_opts.add_session_config_entry(k, v)
+
 run_options.add_run_config_entry('disable_synchronize_execution_providers', '0')
 
-
-def bind_ort_in(binding, names, values, num=0):
-    if num != 0:
-        for i in range(num):
-            binding.bind_ortvalue_input(names[i], values[i])
-    else:
-        for name, val in zip(names, values):
-            binding.bind_ortvalue_input(name, val)
+disabled_optimizers = ['CastFloat16Transformer', 'FuseFp16InitializerToFp32NodeTransformer'] if ORT_FP16 else None
 
 
-def bind_ort_out(binding, output_names, device_type):
-    for name in output_names:
-        binding._iobinding.bind_output(name, device_type)
+# ══════════════════════════════════════════════════════════════════════════════
+# EXECUTION PROVIDER CONFIGURATION
+# ══════════════════════════════════════════════════════════════════════════════
+if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
+    provider_options = [{
+        'device_type':              'CPU',                 # [CPU, GPU, NPU, GPU.0, GPU.1]
+        'precision':                'ACCURACY',            # [FP32, FP16, ACCURACY]
+        'num_of_threads':           MAX_THREADS if MAX_THREADS != 0 else 8,
+        'num_streams':              1,
+        'enable_opencl_throttling': False,
+        'enable_qdq_optimizer':     False,                 # Disable to avoid loading error with some models; can be re-enabled if not an issue
+        'disable_dynamic_shapes':   False
+    }]
+    device_type      = 'cpu'
+    _ort_device_type = C.OrtDevice.cpu()
 
+elif "CUDAExecutionProvider" in ORT_Accelerate_Providers:
+    provider_options = [{
+        'device_id':                          DEVICE_ID,
+        'gpu_mem_limit':                      24 * (1024 **3),    # 24GB
+        'arena_extend_strategy':              'kNextPowerOfTwo',  # ["DEFAULT", "HEURISTIC", "EXHAUSTIVE"]
+        'cudnn_conv_algo_search':             'EXHAUSTIVE',       # ["kNextPowerOfTwo", "kSameAsRequested"]
+        'sdpa_kernel':                        '2',                # ["0", "1", "2"]
+        'use_tf32':                           '1',
+        'fuse_conv_bias':                     '0',          # Disable to avoid loading error with some models; can be re-enabled if not an issue
+        'cudnn_conv_use_max_workspace':       '1',
+        'cudnn_conv1d_pad_to_nc1d':           '0',
+        'tunable_op_enable':                  '0',
+        'tunable_op_tuning_enable':           '0',
+        'tunable_op_max_tuning_duration_ms':  10,
+        'do_copy_in_default_stream':          '0',
+        'enable_cuda_graph':                  '0',          # Disable to avoid loading error with some models; can be re-enabled if not an issue
+        'prefer_nhwc':                        '0',
+        'enable_skip_layer_norm_strict_mode': '0',
+        'use_ep_level_unified_stream':        '0'
+    }]
+    device_type      = 'cuda'
+    _ort_device_type = C.OrtDevice.cuda()
 
-def create_ortvalue(data, dtype, device_type, device_id):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(np.array(data, dtype=dtype), device_type, device_id)
+elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
+    provider_options = [{
+        'device_id':                  DEVICE_ID,
+        'performance_preference':     'high_performance',   # ["default", "high_performance", "minimum_power"] ; Default (Gpus first), HighPerformance (GPUs first), LowPower (NPUs first)
+        'device_filter':              'gpu',                # [gpu, npu, any],
+        'disable_metacommands':       'false',              # Disable to avoid loading error with some models; can be re-enabled if not an issue
+        'enable_graph_capture':       'false',              # Disable to avoid loading error with some models; can be re-enabled if not an issue
+        'enable_graph_serialization': 'false'               # Disable to avoid loading error with some models; can be re-enabled if not an issue
+    }]
+    device_type      = 'dml'
+    _ort_device_type = C.OrtDevice.dml()
 
+else:
+    provider_options = None
+    device_type      = 'cpu'
+    _ort_device_type = C.OrtDevice.cpu()
+
+packed_settings = {
+    "_session_opts":        session_opts,
+    "_providers":           ORT_Accelerate_Providers,
+    "_provider_options":    provider_options,
+    "_disabled_optimizers": disabled_optimizers
+}
 
 _ort_device_type = C.OrtDevice(_ort_device_type, C.OrtDevice.default_memory(), DEVICE_ID)
+kv_device = 'cpu' if 'dml' in device_type else device_type
 
-ort_session_A = onnxruntime.InferenceSession(onnx_model_A, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-binding_A = ort_session_A.io_binding()
-shape_value_in_A = ort_session_A._inputs_meta[0].shape[-1]
-in_name_A = [x.name for x in ort_session_A.get_inputs()]
-out_name_A = [x.name for x in ort_session_A.get_outputs()]
 
-ort_session_B = onnxruntime.InferenceSession(onnx_model_B, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-binding_B = ort_session_B.io_binding()
-in_name_B = ort_session_B.get_inputs()[0].name
-out_name_B = [ort_session_B.get_outputs()[0].name]
+# ══════════════════════════════════════════════════════════════════════════════
+# LOAD ONNX SESSIONS
+# ══════════════════════════════════════════════════════════════════════════════
+# --- Encoder ---
+ort_session_Encoder = create_session(onnx_model_Encoder, **packed_settings)
+binding_Encoder     = ort_session_Encoder.io_binding()
+shape_value_in_Encoder = ort_session_Encoder._inputs_meta[0].shape[-1]
+in_name_Encoder     = get_in_names(ort_session_Encoder)
+out_name_Encoder    = get_out_names(ort_session_Encoder)
 
-ort_session_C = onnxruntime.InferenceSession(onnx_model_C, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-binding_C = ort_session_C.io_binding()
-print(f"\nUsable Providers: {ort_session_C.get_providers()}")
+# --- Embed ---
+ort_session_Embed = create_session(onnx_model_Embed, **packed_settings)
+binding_Embed     = ort_session_Embed.io_binding()
+in_name_Embed     = get_in_names(ort_session_Embed)[0]
+out_name_Embed    = get_out_names(ort_session_Embed)[0]
 
-in_meta_C = ort_session_C.get_inputs()
-out_meta_C = ort_session_C.get_outputs()
-in_name_C = [x.name for x in in_meta_C]
-out_name_C = [x.name for x in out_meta_C]
-amount_of_outputs_C = len(out_name_C)
-in_name_C_parts = in_name_C[:-2]
+# --- Rotary + Mask (Prefill) ---
+ort_session_Rotary_Mask_Prefill = create_session(onnx_model_Rotary_Mask_Prefill, **packed_settings)
+binding_Rotary_Mask_Prefill     = ort_session_Rotary_Mask_Prefill.io_binding()
+in_name_Rotary_Mask_Prefill     = get_in_names(ort_session_Rotary_Mask_Prefill)
+out_name_Rotary_Mask_Prefill    = get_out_names(ort_session_Rotary_Mask_Prefill)
 
-num_layers = (amount_of_outputs_C - 2) // 2
-num_keys_values = num_layers + num_layers
+# --- Rotary + Mask (Decode) ---
+ort_session_Rotary_Mask_Decode = create_session(onnx_model_Rotary_Mask_Decode, **packed_settings)
+binding_Rotary_Mask_Decode     = ort_session_Rotary_Mask_Decode.io_binding()
+in_name_Rotary_Mask_Decode     = get_in_names(ort_session_Rotary_Mask_Decode)[0]
+out_name_Rotary_Mask_Decode    = get_out_names(ort_session_Rotary_Mask_Decode)
+
+# --- Main ---
+ort_session_Main = create_session(onnx_model_Main, **packed_settings)
+binding_Main     = ort_session_Main.io_binding()
+print(f"\nUsable Providers: {ort_session_Main.get_providers()}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN MODEL METADATA & INDEX OFFSETS
+# ══════════════════════════════════════════════════════════════════════════════
+in_name_Main           = get_in_names(ort_session_Main)
+out_name_Main          = get_out_names(ort_session_Main)
+amount_of_outputs_Main = len(out_name_Main)
+num_keys_values        = amount_of_outputs_Main - 1
+
 num_keys_values_plus_1 = num_keys_values + 1
 num_keys_values_plus_2 = num_keys_values + 2
 num_keys_values_plus_3 = num_keys_values + 3
 num_keys_values_plus_4 = num_keys_values + 4
-num_keys_values_plus_5 = num_keys_values + 5
-num_keys_values_plus_6 = num_keys_values + 6
-vocab_size = ort_session_C._outputs_meta[num_keys_values].shape[1]
 
-generate_limit = MAX_SEQ_LEN - 10
-topK = create_ortvalue([TOP_K], np.int64, device_type, DEVICE_ID)
-beam_size = create_ortvalue([BEAM_SIZE], np.int64, device_type, DEVICE_ID)
-init_ids_len_1 = create_ortvalue([1], np.int64, device_type, DEVICE_ID)
-init_history_len = create_ortvalue([0], np.int64, device_type, DEVICE_ID)
-init_attention_mask_0 = create_ortvalue([0], np.int8, device_type, DEVICE_ID)
-init_attention_mask_1 = create_ortvalue([1], np.int8, device_type, DEVICE_ID)
+in_name_Main_parts   = in_name_Main[:num_keys_values]
+out_name_Main_kv     = out_name_Main[:num_keys_values]
+out_name_Main_logits = out_name_Main[num_keys_values]
 
-if USE_BEAM_SEARCH and (TOP_K < BEAM_SIZE):
+# Dtype introspection
+kv_dtype_str             = ort_session_Main._inputs_meta[0].type
+hidden_states_dtype_Main = np.float16 if 'float16' in ort_session_Main._inputs_meta[num_keys_values].type else np.float32
+vocab_size               = ort_session_Main._outputs_meta[num_keys_values].shape[1]
+
+_logits_out_meta  = ort_session_Main._outputs_meta[num_keys_values]
+_logits_out_dtype = np.float16 if 'float16' in _logits_out_meta.type else np.float32
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# KV CACHE SETUP (float16 for FunASR-Nano)
+# ══════════════════════════════════════════════════════════════════════════════
+_meta = ort_session_Main._inputs_meta
+
+kv_dtype_Main = np.float16 if 'float16' in kv_dtype_str else np.float32
+num_layers    = num_keys_values // 2
+
+past_keys_Main   = create_ort_with_shape((1, _meta[0].shape[1],          1, _meta[0].shape[3],          0), kv_dtype_Main, kv_device, DEVICE_ID)
+past_values_Main = create_ort_with_shape((1, _meta[num_layers].shape[1], 1, 0, _meta[num_layers].shape[4]), kv_dtype_Main, kv_device, DEVICE_ID)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DECODING STRATEGY VALIDATION
+# ══════════════════════════════════════════════════════════════════════════════
+if USE_BEAM_SEARCH and TOP_K < BEAM_SIZE:
     TOP_K = BEAM_SIZE
 
-if (TOP_K < 2) or (BEAM_SIZE < 2):
+if TOP_K < 2 or BEAM_SIZE < 2:
     USE_BEAM_SEARCH = False
     print("\nInappropriate Beam Search setting detected. Falling back to Greedy Search.")
+
+if not USE_BEAM_SEARCH:
     BEAM_SIZE = 1
 
-USE_PENALTY = (REPEAT_PENALITY != 1.0)
+USE_PENALTY = (REPEAT_PENALTY != 1.0)
 
+STOP_TOKEN_SET = set(STOP_TOKEN)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TOKENIZER & SHARED ORTVALUE BUFFERS
+# ══════════════════════════════════════════════════════════════════════════════
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+
+_rotary_meta = ort_session_Rotary_Mask_Decode._outputs_meta
+
+# --- Scalar OrtValues ---
+init_history_len = create_ort_with_data([0], np.int64, device_type, DEVICE_ID)
+topK             = create_ort_with_data([TOP_K],     np.int64, device_type, DEVICE_ID)
+beam_size        = create_ort_with_data([BEAM_SIZE], np.int64, device_type, DEVICE_ID)
+
+# --- Decode-phase static buffers (bind once, reused every step) ---
+attention_mask_buf = create_ort_with_shape((1, 1, 1, 1, 1),                                  hidden_states_dtype_Main, device_type, DEVICE_ID)
+rotary_cos_buf     = create_ort_with_shape((1, 1, 1, 1, _rotary_meta[0].shape[4]),           hidden_states_dtype_Main, device_type, DEVICE_ID)
+rotary_sin_buf     = create_ort_with_shape((1, 1, 1, 1, _rotary_meta[1].shape[4]),           hidden_states_dtype_Main, device_type, DEVICE_ID)
+hidden_states_buf  = create_ort_with_shape((BEAM_SIZE, 1, _meta[num_keys_values].shape[2]),  hidden_states_dtype_Main, device_type, DEVICE_ID)
+save_id_buf        = create_ort_with_shape((BEAM_SIZE, 0),                                   np.int32,                 device_type, DEVICE_ID)
+
+# --- Logits & token-index buffers ---
+prefill_logits_buf = create_ort_with_shape((1, vocab_size),         _logits_out_dtype, device_type, DEVICE_ID)
+decode_logits_buf  = create_ort_with_shape((BEAM_SIZE, vocab_size), _logits_out_dtype, device_type, DEVICE_ID)
+max_idx_buf        = create_ort_with_shape((1, 1),                  np.int32,          device_type, DEVICE_ID)
+
+generate_limit_base = MAX_SEQ_LEN - 10
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DECODE HEAD SESSIONS (Beam Search OR Greedy/Argmax)
+# ══════════════════════════════════════════════════════════════════════════════
 if USE_BEAM_SEARCH:
-    print("\nBeam Search does not display the immediate decoding results; the best result is shown only after the entire decoding process is complete.\n")
-    ort_session_E = onnxruntime.InferenceSession(onnx_model_E, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-    binding_E = ort_session_E.io_binding()
-    in_name_E = [x.name for x in ort_session_E.get_inputs()]
-    out_name_E = [x.name for x in ort_session_E.get_outputs()]
-    in_name_E_parts = in_name_E[:num_keys_values_plus_1]
-    ort_session_F = onnxruntime.InferenceSession(onnx_model_F, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-    binding_F = ort_session_F.io_binding()
-    in_name_F = [x.name for x in ort_session_F.get_inputs()]
-    out_name_F = [x.name for x in ort_session_F.get_outputs()]
-    in_name_F_parts = in_name_F[:num_keys_values_plus_1]
-    ort_session_G = onnxruntime.InferenceSession(onnx_model_G, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-    binding_G = ort_session_G.io_binding()
-    in_name_G = [x.name for x in ort_session_G.get_inputs()]
-    out_name_G = [x.name for x in ort_session_G.get_outputs()]
-    penality_dtype = np.float16 if 'float16' in ort_session_E._inputs_meta[num_keys_values_plus_4].type else np.float32
-    penality_value = create_ortvalue([REPEAT_PENALITY], penality_dtype, device_type, DEVICE_ID)
-    repeat_penality = np.ones((BEAM_SIZE, vocab_size), dtype=penality_dtype)
-    penality_reset_count = np.zeros([BEAM_SIZE, 1], dtype=np.int32)
-    init_save_id_beam = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 0), dtype=np.int32), device_type, DEVICE_ID)
-    init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
-    init_penality_reset_count = onnxruntime.OrtValue.ortvalue_from_numpy(penality_reset_count, device_type, DEVICE_ID)
-    binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_1], init_save_id_beam)
-    binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_2], init_repeat_penality)
-    binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_3], penality_value)
-    binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_4], beam_size)
-    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_4], penality_value)
-    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_5], beam_size)
-    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_6], topK)
-    binding_G.bind_ortvalue_input(in_name_G[2], init_penality_reset_count)
+    print("\nBeam Search does not display immediate decoding results; the best result is shown only after the entire decoding process is complete.\n")
+
+    # --- First Beam ---
+    ort_session_First_Beam    = create_session(onnx_model_First_Beam, **packed_settings)
+    binding_First_Beam        = ort_session_First_Beam.io_binding()
+    in_name_First_Beam        = get_in_names(ort_session_First_Beam)
+    out_name_First_Beam       = get_out_names(ort_session_First_Beam)
+    in_name_First_Beam_parts  = in_name_First_Beam[:num_keys_values_plus_1]
+    out_name_First_Beam_parts = out_name_First_Beam[:num_keys_values_plus_1]
+
+    # --- Second Beam ---
+    ort_session_Second_Beam    = create_session(onnx_model_Second_Beam, **packed_settings)
+    binding_Second_Beam        = ort_session_Second_Beam.io_binding()
+    in_name_Second_Beam        = get_in_names(ort_session_Second_Beam)
+    out_name_Second_Beam       = get_out_names(ort_session_Second_Beam)
+    in_name_Second_Beam_parts  = in_name_Second_Beam[:num_keys_values_plus_1]
+    out_name_Second_Beam_parts = out_name_Second_Beam[:num_keys_values_plus_1]
+
+    # --- Beam-specific buffers ---
+    beam_ids_buf   = create_ort_with_shape((BEAM_SIZE, 1), np.int32,                 device_type, DEVICE_ID)
+    beam_score_buf = create_ort_with_shape((BEAM_SIZE, 1), hidden_states_dtype_Main, device_type, DEVICE_ID)
+
+    # --- Static beam bindings ---
+    binding_First_Beam.bind_ortvalue_input(in_name_First_Beam[num_keys_values_plus_1], save_id_buf)
+    binding_First_Beam.bind_ortvalue_input(in_name_First_Beam[num_keys_values_plus_2], beam_size)
+    binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam[num_keys_values_plus_3], beam_size)
+    binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam[num_keys_values_plus_4], topK)
+
 else:
-    BEAM_SIZE = 1
-    save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
-    ort_idx = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((BEAM_SIZE, 1), dtype=np.int32), device_type, DEVICE_ID)
-    if USE_PENALTY:
-        ort_session_D = onnxruntime.InferenceSession(onnx_model_D, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-        binding_D = ort_session_D.io_binding()
-        in_name_D = [x.name for x in ort_session_D.get_inputs()]
-        out_name_D = [x.name for x in ort_session_D.get_outputs()]
-        ort_session_H = onnxruntime.InferenceSession(onnx_model_H, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-        binding_H = ort_session_H.io_binding()
-        in_name_H = [x.name for x in ort_session_H.get_inputs()]
-        out_name_H = ort_session_H.get_outputs()[0].name  # Only one output for Greedy Penalty Reset
-        penality_dtype = np.float16 if 'float16' in ort_session_D._inputs_meta[2].type else np.float32
-        penality_value = create_ortvalue([REPEAT_PENALITY], penality_dtype, device_type, DEVICE_ID)
-        repeat_penality = np.ones((BEAM_SIZE, vocab_size), dtype=penality_dtype)
-        current_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
-        binding_D.bind_ortvalue_input(in_name_D[1], current_penalty)
-        binding_D.bind_ortvalue_output(out_name_D[1], current_penalty)
-        binding_D.bind_ortvalue_input(in_name_D[2], penality_value)
-        binding_D.bind_ortvalue_output(out_name_D[0], ort_idx)
-        binding_H.bind_ortvalue_input(in_name_H[0], current_penalty)
-        binding_H.bind_ortvalue_output(out_name_H, current_penalty)
-        init_penality_reset_count = 0
-    else:
-        ort_session_I = onnxruntime.InferenceSession(onnx_model_I, sess_options=session_opts, providers=ORT_Accelerate_Providers, provider_options=provider_options, run_options=run_options)
-        binding_I = ort_session_I.io_binding()
-        in_name_I = ort_session_I.get_inputs()[0].name
-        out_name_I = ort_session_I.get_outputs()[0].name
-        binding_I.bind_ortvalue_output(out_name_I, ort_idx)
+    # --- Greedy ---
+    ort_session_Greedy = create_session(onnx_model_Greedy, **packed_settings)
+    binding_Greedy     = ort_session_Greedy.io_binding()
+    in_name_Greedy     = get_in_names(ort_session_Greedy)
+    out_name_Greedy    = get_out_names(ort_session_Greedy)
+    binding_Greedy.bind_ortvalue_input(in_name_Greedy[1], save_id_buf)
 
-if 'dml' in device_type:
-    kv_device = 'cpu'
-    kv_device_id = 0
-else:
-    kv_device = device_type
-    kv_device_id = DEVICE_ID
+    # --- Argmax ---
+    ort_session_Argmax = create_session(onnx_model_Argmax, **packed_settings)
+    binding_Argmax     = ort_session_Argmax.io_binding()
+    in_name_Argmax     = get_in_names(ort_session_Argmax)[0]
+    out_name_Argmax    = get_out_names(ort_session_Argmax)[0]
+    save_id_numpy      = np.zeros(MAX_SEQ_LEN, dtype=np.int32)
 
-init_past_keys_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[0].shape[1], 1, ort_session_C._inputs_meta[0].shape[3], 0), dtype=np.float16), kv_device, kv_device_id)
-init_past_values_C = onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros((1, ort_session_C._inputs_meta[num_layers].shape[1], 1, 0, ort_session_C._inputs_meta[num_layers].shape[4]), dtype=np.float16), kv_device, kv_device_id)
 
-init_all_outputs_B = []
+# ══════════════════════════════════════════════════════════════════════════════
+# PENALTY SESSION (optional — replaces Reset_Penalty_Beam/Greedy)
+# ══════════════════════════════════════════════════════════════════════════════
+if USE_PENALTY:
+    ort_session_Penalty = create_session(onnx_model_Penalty, **packed_settings)
+    binding_Penalty     = ort_session_Penalty.io_binding()
+    in_name_Penalty     = get_in_names(ort_session_Penalty)
+    out_name_Penalty    = get_out_names(ort_session_Penalty)[0]
+
+    penalty_dtype = np.float16 if 'float16' in ort_session_Penalty._inputs_meta[2].type else np.float32
+    penalty_value = create_ort_with_data([REPEAT_PENALTY], penalty_dtype, device_type, DEVICE_ID)
+    penalty_range = create_ort_with_data([PENALTY_RANGE],  np.int64,      device_type, DEVICE_ID)
+
+    binding_Penalty.bind_ortvalue_input(in_name_Penalty[2], penalty_value)
+    binding_Penalty.bind_ortvalue_input(in_name_Penalty[3], penalty_range)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PRE-EMBED TASK PROMPTS
+# ══════════════════════════════════════════════════════════════════════════════
+init_all_outputs_Embed = []
 for i in task_prompt:
     tokens = tokenizer(i, return_tensors='np')['input_ids'].astype(np.int32)
     input_ids = onnxruntime.OrtValue.ortvalue_from_numpy(tokens, device_type, DEVICE_ID)
-    binding_B.bind_ortvalue_input(in_name_B, input_ids)
-    bind_ort_out(binding_B, out_name_B, _ort_device_type)
-    ort_session_B.run_with_iobinding(binding_B, run_options=run_options)
-    init_all_outputs_B.append(onnxruntime.OrtValue.ortvalue_from_numpy(binding_B.get_outputs()[0].numpy(), device_type, DEVICE_ID))
+    binding_Embed.bind_ortvalue_input(in_name_Embed, input_ids)
+    bind_ort_out(binding_Embed, [out_name_Embed], _ort_device_type)
+    run(ort_session_Embed, binding_Embed)
+    init_all_outputs_Embed.append(onnxruntime.OrtValue.ortvalue_from_numpy(binding_Embed.get_outputs()[0].numpy(), device_type, DEVICE_ID))
 
-for prompt_embed, test in zip(init_all_outputs_B, test_audio):
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUDIO PROCESSING LOOP
+# ══════════════════════════════════════════════════════════════════════════════
+for prompt_embed, test in zip(init_all_outputs_Embed, test_audio):
     print("----------------------------------------------------------------------------------------------------------")
     print(f"\nTest Input Audio: {test}")
     audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
-    if USE_NORMALIZER: 
+    if USE_NORMALIZER:
         audio = normalizer(audio, 8192.0)
     audio_full_len = len(audio)
-    INPUT_AUDIO_LENGTH = min(MAX_INPUT_AUDIO_LENGTH, audio_full_len) if isinstance(shape_value_in_A, str) else shape_value_in_A
+    INPUT_AUDIO_LENGTH = min(MAX_INPUT_AUDIO_LENGTH, audio_full_len) if isinstance(shape_value_in_Encoder, str) else shape_value_in_Encoder
     stride_step = INPUT_AUDIO_LENGTH if SLIDING_WINDOW <= 0 else SLIDING_WINDOW
     audio = audio.reshape(1, 1, -1)
     if audio_full_len > INPUT_AUDIO_LENGTH:
         num_windows = int(np.ceil((audio_full_len - INPUT_AUDIO_LENGTH) / stride_step)) + 1
         pad_amount = ((num_windows - 1) * stride_step + INPUT_AUDIO_LENGTH) - audio_full_len
-        zeros = np.zeros([1, 1, pad_amount], dtype=audio.dtype)
-        audio = np.concatenate((audio, zeros), axis=-1)
+        audio = np.concatenate((audio, np.zeros([1, 1, pad_amount], dtype=audio.dtype)), axis=-1)
     elif audio_full_len < INPUT_AUDIO_LENGTH:
-        zeros = np.zeros([1, 1, INPUT_AUDIO_LENGTH - audio_full_len], dtype=audio.dtype)
-        audio = np.concatenate((audio, zeros), axis=-1)
+        audio = np.concatenate((audio, np.zeros([1, 1, INPUT_AUDIO_LENGTH - audio_full_len], dtype=audio.dtype)), axis=-1)
     aligned_len = audio.shape[-1]
     asr_result = ""
     slice_start = 0
     slice_end = INPUT_AUDIO_LENGTH
     rtf_time = time.time()
-    while slice_end <= aligned_len:
-        audio_slice = audio[..., slice_start: slice_end]
-        ort_audio = onnxruntime.OrtValue.ortvalue_from_numpy(audio_slice, device_type, DEVICE_ID)
-        binding_A.bind_ortvalue_input(in_name_A[0], ort_audio)
-        binding_A.bind_ortvalue_input(in_name_A[1], prompt_embed)
-        bind_ort_out(binding_A, out_name_A, _ort_device_type)
-        ort_session_A.run_with_iobinding(binding_A, run_options=run_options)
-        all_outputs_A = binding_A.get_outputs()
-        i = 0
-        j = num_layers
-        while i < j:
-            binding_C.bind_ortvalue_input(in_name_C[i], init_past_keys_C)
-            i += 1
-        j = i + num_layers
-        while i < j:
-            binding_C.bind_ortvalue_input(in_name_C[i], init_past_values_C)
-            i += 1
-        binding_C.bind_ortvalue_input(in_name_C[num_keys_values], all_outputs_A[0])
-        binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_1], init_history_len)
-        binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_2], all_outputs_A[1])
-        binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_3], init_attention_mask_1)
-        if USE_PENALTY:
-            if USE_BEAM_SEARCH:
-                init_repeat_penality = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
-                init_penality_reset_count = onnxruntime.OrtValue.ortvalue_from_numpy(penality_reset_count, device_type, DEVICE_ID)
-                binding_E.bind_ortvalue_input(in_name_E[num_keys_values_plus_2], init_repeat_penality)
-                binding_G.bind_ortvalue_input(in_name_G[2], init_penality_reset_count)
-            else:
-                current_penalty = onnxruntime.OrtValue.ortvalue_from_numpy(repeat_penality, device_type, DEVICE_ID)
-                binding_D.bind_ortvalue_input(in_name_D[1], current_penalty)
-                binding_D.bind_ortvalue_output(out_name_D[1], current_penalty)
-                binding_H.bind_ortvalue_input(in_name_H[0], current_penalty)
-                binding_H.bind_ortvalue_output(out_name_H, current_penalty)
-                init_penality_reset_count = 0
 
+    while slice_end <= aligned_len:
+        ort_audio = onnxruntime.OrtValue.ortvalue_from_numpy(audio[..., slice_start:slice_end], device_type, DEVICE_ID)
+
+        # ══════════════════════════════════════════════════════════════
+        # ENCODER
+        # ══════════════════════════════════════════════════════════════
+        binding_Encoder.bind_ortvalue_input(in_name_Encoder[0], ort_audio)
+        binding_Encoder.bind_ortvalue_input(in_name_Encoder[1], prompt_embed)
+        bind_ort_out(binding_Encoder, out_name_Encoder, _ort_device_type)
+        run(ort_session_Encoder, binding_Encoder)
+        all_outputs_Encoder = binding_Encoder.get_outputs()
+        hidden_states = all_outputs_Encoder[0]   # concat_embed
+        ids_len       = all_outputs_Encoder[1]   # ids_len
+
+        # ══════════════════════════════════════════════════════════════
+        # PREFILL SETUP
+        # ══════════════════════════════════════════════════════════════
+
+        # --- Rotary + Mask (Prefill) ---
+        binding_Rotary_Mask_Prefill.bind_ortvalue_input(in_name_Rotary_Mask_Prefill[0], ids_len)
+        binding_Rotary_Mask_Prefill.bind_ortvalue_input(in_name_Rotary_Mask_Prefill[1], init_history_len)
+        bind_ort_out(binding_Rotary_Mask_Prefill, out_name_Rotary_Mask_Prefill, _ort_device_type)
+        run(ort_session_Rotary_Mask_Prefill, binding_Rotary_Mask_Prefill)
+        rotary_cos, rotary_sin, attention_mask, kv_seq_len = binding_Rotary_Mask_Prefill.get_outputs()
+
+        # --- Pre-bind Decode Rotary (static output buffers) ---
+        binding_Rotary_Mask_Decode.bind_ortvalue_input(in_name_Rotary_Mask_Decode, kv_seq_len)
+        binding_Rotary_Mask_Decode.bind_ortvalue_output(out_name_Rotary_Mask_Decode[0], rotary_cos_buf)
+        binding_Rotary_Mask_Decode.bind_ortvalue_output(out_name_Rotary_Mask_Decode[1], rotary_sin_buf)
+        binding_Rotary_Mask_Decode.bind_ortvalue_output(out_name_Rotary_Mask_Decode[2], kv_seq_len)
+
+        # --- Bind Main: non-KV inputs (prefill) ---
+        binding_Main.bind_ortvalue_input(in_name_Main[num_keys_values],        hidden_states)
+        binding_Main.bind_ortvalue_input(in_name_Main[num_keys_values_plus_1], rotary_cos)
+        binding_Main.bind_ortvalue_input(in_name_Main[num_keys_values_plus_2], rotary_sin)
+        binding_Main.bind_ortvalue_input(in_name_Main[num_keys_values_plus_3], attention_mask)
+
+        # --- Bind Main: empty KV cache ---
+        i = 0
+        for _ in range(num_layers):
+            binding_Main.bind_ortvalue_input(in_name_Main[i], past_keys_Main)
+            i += 1
+        for _ in range(num_layers):
+            binding_Main.bind_ortvalue_input(in_name_Main[i], past_values_Main)
+            i += 1
+
+        # --- Bind Main: outputs (prefill) ---
+        bind_ort_out(binding_Main, out_name_Main_kv, _ort_device_type)
+        binding_Main.bind_ortvalue_output(out_name_Main_logits, prefill_logits_buf)
+
+        # --- Bind Penalty to prefill logits ---
+        if USE_PENALTY:
+            binding_Penalty.bind_ortvalue_input(in_name_Penalty[0], prefill_logits_buf)
+            binding_Penalty.bind_ortvalue_output(out_name_Penalty,  prefill_logits_buf)
+
+        # --- Bind decode head to prefill logits ---
+        if USE_BEAM_SEARCH:
+            binding_First_Beam.bind_ortvalue_input(in_name_First_Beam[num_keys_values], prefill_logits_buf)
+        elif USE_PENALTY:
+            binding_Greedy.bind_ortvalue_input(in_name_Greedy[0],   prefill_logits_buf)
+            binding_Greedy.bind_ortvalue_output(out_name_Greedy[0], max_idx_buf)
+        else:
+            binding_Argmax.bind_ortvalue_input(in_name_Argmax,   prefill_logits_buf)
+            binding_Argmax.bind_ortvalue_output(out_name_Argmax, max_idx_buf)
+
+        # --- Pre-bind Embed for decode phase ---
+        binding_Embed.bind_ortvalue_input(in_name_Embed, max_idx_buf)
+
+        # --- Reset greedy save_id for new window ---
+        if not USE_BEAM_SEARCH and USE_PENALTY:
+            binding_Greedy.bind_ortvalue_input(in_name_Greedy[1], save_id_buf)
+
+        is_prefill_step = True
         num_decode = 0
-        limit = generate_limit - all_outputs_A[1].numpy()
+        generate_limit = generate_limit_base - ids_len.numpy().flat[0]
         start_time = time.time()
-        while num_decode < limit:
-            bind_ort_out(binding_C, out_name_C, _ort_device_type)
-            ort_session_C.run_with_iobinding(binding_C, run_options=run_options)
-            all_outputs_C = binding_C.get_outputs()
+
+        # ══════════════════════════════════════════════════════════════
+        # DECODE LOOP
+        # ══════════════════════════════════════════════════════════════
+        while num_decode < generate_limit:
+
+            # ── 1. Run Main Model ────────────────────────────────────
+            run(ort_session_Main, binding_Main)
+            outputs_Main = binding_Main.get_outputs()
+
+            # ── 2. Apply Repetition Penalty ──────────────────────────
+            if USE_PENALTY and num_decode >= PENALTY_RANGE:
+                binding_Penalty.bind_ortvalue_input(in_name_Penalty[1], save_id)
+                run(ort_session_Penalty, binding_Penalty)
+
+            # ── 3. Token Selection ───────────────────────────────────
             if USE_BEAM_SEARCH:
-                if num_decode < 1:
-                    bind_ort_in(binding_E, in_name_E_parts, all_outputs_C)
-                    bind_ort_out(binding_E, out_name_E, _ort_device_type)
-                    ort_session_E.run_with_iobinding(binding_E, run_options=run_options)
-                    all_outputs = binding_E.get_outputs()
+                # ── 3a. Beam Search ──────────────────────────────────
+                if is_prefill_step:
+                    bind_ort_in(binding_First_Beam, in_name_First_Beam_parts, outputs_Main)
+                    bind_ort_out(binding_First_Beam, out_name_First_Beam_parts, _ort_device_type)
+                    binding_First_Beam.bind_ortvalue_output(out_name_First_Beam[num_keys_values_plus_1], beam_score_buf)
+                    binding_First_Beam.bind_ortvalue_output(out_name_First_Beam[num_keys_values_plus_2], beam_ids_buf)
+                    binding_First_Beam.bind_ortvalue_output(out_name_First_Beam[num_keys_values_plus_3], max_idx_buf)
+                    run(ort_session_First_Beam, binding_First_Beam)
+                    outputs_Beam = binding_First_Beam.get_outputs()
                 else:
-                    bind_ort_in(binding_F, in_name_F_parts, all_outputs_C)
-                    bind_ort_out(binding_F, out_name_F, _ort_device_type)
-                    ort_session_F.run_with_iobinding(binding_F, run_options=run_options)
-                    all_outputs = binding_F.get_outputs()
-                max_logits_idx = all_outputs[num_keys_values_plus_4].numpy()
-                if max_logits_idx in STOP_TOKEN:
+                    bind_ort_in(binding_Second_Beam, in_name_Second_Beam_parts, outputs_Main)
+                    bind_ort_out(binding_Second_Beam, out_name_Second_Beam_parts, _ort_device_type)
+                    if num_decode < 2:
+                        binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam[num_keys_values_plus_2], beam_score_buf)
+                        binding_Second_Beam.bind_ortvalue_output(out_name_Second_Beam[num_keys_values_plus_1], beam_score_buf)
+                        binding_Second_Beam.bind_ortvalue_output(out_name_Second_Beam[num_keys_values_plus_2], beam_ids_buf)
+                        binding_Second_Beam.bind_ortvalue_output(out_name_Second_Beam[num_keys_values_plus_3], max_idx_buf)
+                    run(ort_session_Second_Beam, binding_Second_Beam)
+                    outputs_Beam = binding_Second_Beam.get_outputs()
+
+                max_logits_idx = max_idx_buf.numpy().flat[0]
+                if max_logits_idx in STOP_TOKEN_SET:
                     break
-                if USE_PENALTY and (num_decode >= PENALTY_RANGE):
-                    binding_G.bind_ortvalue_input(in_name_G[0], all_outputs[num_keys_values_plus_1])
-                    binding_G.bind_ortvalue_input(in_name_G[1], all_outputs[num_keys_values_plus_2])
-                    bind_ort_out(binding_G, out_name_G, _ort_device_type)
-                    ort_session_G.run_with_iobinding(binding_G, run_options=run_options)
-                    all_outputs_G = binding_G.get_outputs()
-                    binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs_G[0])
-                    binding_G.bind_ortvalue_input(in_name_G[2], all_outputs_G[1])
-                bind_ort_in(binding_C, in_name_C_parts, all_outputs)
-                binding_B.bind_ortvalue_input(in_name_B, all_outputs[num_keys_values])
-                binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_1], all_outputs[num_keys_values_plus_1])
-                binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_2], all_outputs[num_keys_values_plus_2])
-                binding_F.bind_ortvalue_input(in_name_F[num_keys_values_plus_3], all_outputs[num_keys_values_plus_3])
+
+                save_id = outputs_Beam[num_keys_values]
+                bind_ort_in(binding_Main, in_name_Main_parts, outputs_Beam)
+                binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam[num_keys_values_plus_1], save_id)
+
             else:
+                # ── 3b. Greedy / Argmax ──────────────────────────────
                 if USE_PENALTY:
-                    binding_D.bind_ortvalue_input(in_name_D[0], all_outputs_C[num_keys_values])
-                    ort_session_D.run_with_iobinding(binding_D, run_options=run_options)
-                    max_logits_idx = ort_idx.numpy().flat[0]
-                    if max_logits_idx in STOP_TOKEN:
-                        break
-                    if num_decode >= PENALTY_RANGE:
-                        reset_ids = save_id_greedy[init_penality_reset_count]
-                        if reset_ids != max_logits_idx:
-                            reset_ids = create_ortvalue([[reset_ids]], np.int64, device_type, DEVICE_ID)
-                            binding_H.bind_ortvalue_input(in_name_H[1], reset_ids)
-                            ort_session_H.run_with_iobinding(binding_H, run_options=run_options)
-                        init_penality_reset_count += 1
+                    binding_Greedy._iobinding.bind_output(out_name_Greedy[1], _ort_device_type)
+                    run(ort_session_Greedy, binding_Greedy)
+                    save_id = binding_Greedy.get_outputs()[1]
                 else:
-                    binding_I.bind_ortvalue_input(in_name_I, all_outputs_C[num_keys_values])
-                    ort_session_I.run_with_iobinding(binding_I, run_options=run_options)
-                    max_logits_idx = ort_idx.numpy().flat[0]
-                    if max_logits_idx in STOP_TOKEN:
-                        break
-                binding_B.bind_ortvalue_input(in_name_B, ort_idx)
-                bind_ort_in(binding_C, in_name_C_parts, all_outputs_C)
-                save_id_greedy[num_decode] = max_logits_idx
-            bind_ort_out(binding_B, out_name_B, _ort_device_type)
-            ort_session_B.run_with_iobinding(binding_B, run_options=run_options)
-            binding_C.bind_ortvalue_input(in_name_C[num_keys_values], binding_B.get_outputs()[0])
-            binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_1], all_outputs_C[num_keys_values_plus_1])
-            if num_decode < 1:
-                binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_2], init_ids_len_1)
-                binding_C.bind_ortvalue_input(in_name_C[num_keys_values_plus_3], init_attention_mask_0)
+                    run(ort_session_Argmax, binding_Argmax)
+
+                max_logits_idx = max_idx_buf.numpy().flat[0]
+                if max_logits_idx in STOP_TOKEN_SET:
+                    break
+
+                if USE_PENALTY:
+                    binding_Greedy.bind_ortvalue_input(in_name_Greedy[1], save_id)
+                else:
+                    save_id_numpy[num_decode] = max_logits_idx
+
+                bind_ort_in(binding_Main, in_name_Main_parts, outputs_Main)
+
+            # ── 4. Re-bind Main KV outputs (fresh alloc each step) ───
+            bind_ort_out(binding_Main, out_name_Main_kv, _ort_device_type)
+
+            # ── 5. Transition: prefill → decode (once per window) ────
+            if is_prefill_step:
+                binding_Main.bind_ortvalue_input(in_name_Main[num_keys_values],        hidden_states_buf)
+                binding_Main.bind_ortvalue_input(in_name_Main[num_keys_values_plus_1], rotary_cos_buf)
+                binding_Main.bind_ortvalue_input(in_name_Main[num_keys_values_plus_2], rotary_sin_buf)
+                binding_Main.bind_ortvalue_input(in_name_Main[num_keys_values_plus_3], attention_mask_buf)
+                binding_Main.bind_ortvalue_output(out_name_Main_logits,                decode_logits_buf)
+
+                binding_Embed.bind_ortvalue_output(out_name_Embed, hidden_states_buf)
+
+                if USE_PENALTY:
+                    binding_Penalty.bind_ortvalue_input(in_name_Penalty[0], decode_logits_buf)
+                    binding_Penalty.bind_ortvalue_output(out_name_Penalty,  decode_logits_buf)
+
+                if USE_BEAM_SEARCH:
+                    binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam[num_keys_values], decode_logits_buf)
+                    binding_Embed.bind_ortvalue_input(in_name_Embed, beam_ids_buf)
+                elif USE_PENALTY:
+                    binding_Greedy.bind_ortvalue_input(in_name_Greedy[0], decode_logits_buf)
+                else:
+                    binding_Argmax.bind_ortvalue_input(in_name_Argmax, decode_logits_buf)
+
+                is_prefill_step = False
+
+            # ── 6. Prepare next step: Embed + Rotary ─────────────────
+            run(ort_session_Embed, binding_Embed)
+            run(ort_session_Rotary_Mask_Decode, binding_Rotary_Mask_Decode)
             num_decode += 1
+
+        # ── End of window ────────────────────────────────────────────
         slice_start += stride_step
         slice_end = slice_start + INPUT_AUDIO_LENGTH
         if num_decode > 0:
-            if USE_BEAM_SEARCH:
-                asr_result += tokenizer.decode(all_outputs[num_keys_values_plus_1].numpy()[0, :num_decode], skip_special_tokens=True)
+            if USE_BEAM_SEARCH or USE_PENALTY:
+                asr_result += tokenizer.decode(save_id.numpy()[0, :num_decode], skip_special_tokens=True)
             else:
-                asr_result += tokenizer.decode(save_id_greedy[:num_decode], skip_special_tokens=True)
+                asr_result += tokenizer.decode(save_id_numpy[:num_decode], skip_special_tokens=True)
         print(f"\nDecode: {((num_decode + 1) / (time.time() - start_time)):.3f} token/s\n")
+
     print(asr_result, end="", flush=True)
     print(f"\n\nRTF: {((time.time() - rtf_time) / (audio_full_len / SAMPLE_RATE)):.3f}")
     print("----------------------------------------------------------------------------------------------------------")
