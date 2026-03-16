@@ -42,7 +42,7 @@ MAX_SIGNAL_LENGTH  = 2048    # Upper-bound hint for frame-axis dim
 
 # -- Model variants to export ----------------------------------------------
 #    stft_A  / istft_A  →  real-only STFT  /  magnitude+phase ISTFT
-#    stft_B  / istft_B  →  real+imag STFT  /  real+imag      ISTFT
+#    stft_B  / istft_B  →  real+imag STFT  /  real+imag       ISTFT
 STFT_TYPE  = "stft_B"
 ISTFT_TYPE = "istft_B"
 
@@ -157,10 +157,13 @@ class STFT_Process(torch.nn.Module):
         expected_len = torch.zeros(max_frames, dtype=torch.long)
         for i in range(max_frames):
             expected_len[i] = self.n_fft + self.hop_len * (i - 1)
+        if center_pad:
+            expected_len = expected_len - self.half_n_fft
         self.register_buffer('expected_len', expected_len)
 
         # Pre-allocated zero buffer for constant-pad centre mode.
-        self.register_buffer('padding_zero', torch.zeros(1, 1, self.half_n_fft, dtype=torch.float32))
+        if self.center_pad and self.pad_mode != 'reflect':
+            self.register_buffer('padding_zero', torch.zeros(1, 1, self.half_n_fft, dtype=torch.float32))
 
         # ── Build STFT convolution kernels ────────────────────────────────
         if model_type in ('stft_A', 'stft_B'):
@@ -305,11 +308,9 @@ class STFT_Process(torch.nn.Module):
         if self.center_pad:
             # Strip the center padding that was added during the forward STFT.
             slice_start = self.half_n_fft
-            slice_end = expected_len - self.half_n_fft
         else:
             slice_start = 0
-            slice_end = expected_len
-        inv = inv[..., slice_start: slice_end] * self.inv_win_sum[..., slice_start: slice_end]
+        inv = inv[..., slice_start: expected_len] * self.inv_win_sum[..., slice_start: expected_len]
 
         return inv
 
