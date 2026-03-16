@@ -230,7 +230,7 @@ class STFT_Process(torch.nn.Module):
         win_sq_kernel = window[..., :self.max_frames].square().reshape(1, 1, -1)
 
         inv_win_sum = 1.0 / torch.nn.functional.conv_transpose1d(self.ones, win_sq_kernel, stride=self.hop_len)
-        self.register_buffer('inv_win_sum', inv_win_sum.clamp(max=32767.0).half())
+        self.register_buffer('inv_win_sum', inv_win_sum.clamp(max=65504.0).half())
 
     # --------------------------------------------------------------------- #
     #  Forward dispatcher                                                   #
