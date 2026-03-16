@@ -148,13 +148,14 @@ class STFT_Process(torch.nn.Module):
         self.half_n_fft = n_fft // 2
         self.center_pad = center_pad
         self.pad_mode   = pad_mode
+        self.max_frames = max_frames
 
         F_bins = self.half_n_fft + 1          # Number of one-sided frequency bins
         window = create_padded_window(win_length, n_fft, window_type)
 
         self.register_buffer('ones', torch.ones(1, 1, max_frames, dtype=torch.float32))
 
-        expected_len = torch.zeros(max_frames, dtype=torch.long)
+        expected_len = torch.zeros(max_frames, dtype=torch.int32)
         for i in range(max_frames):
             expected_len[i] = self.n_fft + self.hop_len * (i - 1)
         if center_pad:
@@ -226,11 +227,10 @@ class STFT_Process(torch.nn.Module):
         self.register_buffer('inverse_kernel', torch.cat([ifft_real, ifft_imag], dim=0).unsqueeze(1))
 
         # Window² kernel for overlap-add COLA normalisation.
-        win_sq_kernel = window.square().reshape(1, 1, -1)
-        self.register_buffer('win_sq_kernel', win_sq_kernel)
+        win_sq_kernel = window[..., :self.max_frames].square().reshape(1, 1, -1)
 
-        inv_win_sum = 1.0 / torch.nn.functional.conv_transpose1d(self.ones, win_sq_kernel, stride=self.hop_len).clamp(1e-7)
-        self.register_buffer('inv_win_sum', inv_win_sum)
+        inv_win_sum = 1.0 / torch.nn.functional.conv_transpose1d(self.ones, win_sq_kernel, stride=self.hop_len)
+        self.register_buffer('inv_win_sum', inv_win_sum.clamp(max=32767.0).half())
 
     # --------------------------------------------------------------------- #
     #  Forward dispatcher                                                   #
@@ -304,13 +304,13 @@ class STFT_Process(torch.nn.Module):
 
         # Overlap-add normalization: divide by sum of squared windows.
         n_frames     = real.shape[-1]
-        expected_len = self.expected_len[n_frames]
+        expected_len = self.expected_len[n_frames].long()
         if self.center_pad:
             # Strip the center padding that was added during the forward STFT.
             slice_start = self.half_n_fft
         else:
             slice_start = 0
-        inv = inv[..., slice_start: expected_len] * self.inv_win_sum[..., slice_start: expected_len]
+        inv = inv[..., slice_start: expected_len] * self.inv_win_sum[..., slice_start: expected_len].float()
 
         return inv
 
