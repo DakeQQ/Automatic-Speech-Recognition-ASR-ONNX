@@ -388,7 +388,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         audio = audio - torch.mean(audio)  # Remove DC Offset
         if self.pre_emphasis > 0:
             audio = torch.cat([audio[..., :1], audio[..., 1:] - self.pre_emphasis * audio[..., :-1]], dim=-1)
-        real_part, imag_part = self.stft_model(audio, 'constant')
+        real_part, imag_part = self.stft_model(audio)
         mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + self.variance_epsilon).log() * self.output_size_factor
         features_len = mel_features.shape[1].unsqueeze(0)
         left_padding = mel_features[:, [0]]
@@ -677,7 +677,7 @@ with torch.inference_mode():
     # ══════════════════════════════════════════════════════════════════
     # Load Model & Extract Config
     # ══════════════════════════════════════════════════════════════════
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE).eval()
+    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE, pad_mode='constant').eval()
     model = AutoModel(
         model=model_path,
         trust_remote_code=True,
