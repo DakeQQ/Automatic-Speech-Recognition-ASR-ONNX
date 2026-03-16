@@ -227,10 +227,11 @@ class STFT_Process(torch.nn.Module):
         self.register_buffer('inverse_kernel', torch.cat([ifft_real, ifft_imag], dim=0).unsqueeze(1))
 
         # Window² kernel for overlap-add COLA normalisation.
-        win_sq_kernel = window[..., :self.max_frames].square().reshape(1, 1, -1)
+        win_sq_kernel = window.square().reshape(1, 1, -1)
 
         inv_win_sum = 1.0 / torch.nn.functional.conv_transpose1d(self.ones, win_sq_kernel, stride=self.hop_len)
-        self.register_buffer('inv_win_sum', inv_win_sum.clamp(max=65504.0).half())
+        max_n_frames = self.expected_len[-1].long()
+        self.register_buffer('inv_win_sum', inv_win_sum[..., :max_n_frames].clamp(max=65504.0).half())
 
     # --------------------------------------------------------------------- #
     #  Forward dispatcher                                                   #
