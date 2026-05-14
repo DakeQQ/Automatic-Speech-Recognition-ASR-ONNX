@@ -108,7 +108,7 @@ class FIRST_BEAM_SEARCH(torch.nn.Module):
         beam_size = all_inputs[-1]
 
         row_logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
-        top_beam_logits, top_beam_indices = torch.topk(logits, dim=-1, k=beam_size, sorted=False, largest=True)
+        top_beam_logits, top_beam_indices = torch.topk(logits, dim=-1, k=beam_size, sorted=True, largest=True)
         top_beam_prob = top_beam_logits - row_logsumexp
 
         for i in range(self.total_layers):
@@ -144,11 +144,11 @@ class SECOND_BEAM_SEARCH(torch.nn.Module):
         top_k = all_inputs[-1]
 
         row_logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
-        top_k_logits, top_k_indices = torch.topk(logits, k=top_k, dim=-1, largest=True, sorted=False)
+        top_k_logits, top_k_indices = torch.topk(logits, k=top_k, dim=-1, largest=True, sorted=True)
         top_k_prob = top_k_logits - row_logsumexp
         current_prob = (top_k_prob + previous_prob).view(-1)
 
-        top_beam_prob, flat_beam_indices = torch.topk(current_prob, k=beam_size, dim=-1, largest=True, sorted=False)
+        top_beam_prob, flat_beam_indices = torch.topk(current_prob, k=beam_size, dim=-1, largest=True, sorted=True)
         beam_index = flat_beam_indices // top_k
         top_beam_indices = top_k_indices.view(-1)[flat_beam_indices]
 
