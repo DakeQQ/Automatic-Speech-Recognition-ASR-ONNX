@@ -507,7 +507,7 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
             residual = hidden_states
             hidden_states = self._rms_norm(hidden_states)
             qkv = layer.self_attn.qkv(hidden_states)
-            qkv = qkv.reshape( batch_size, -1, 1, self.qk_heads + self.num_kv_heads, self.head_dim)
+            qkv = qkv.reshape(batch_size, -1, 1, self.qk_heads + self.num_kv_heads, self.head_dim)
             qk, v = torch.split(qkv, [self.qk_heads, self.num_kv_heads], dim=-2)
             qk = self._rms_norm(qk) * layer.self_attn.qk_norm_weight
             qk_rot = qk * rotary_cos + self._rotate_half(qk, batch_size) * rotary_sin
@@ -692,7 +692,7 @@ with torch.inference_mode():
     kv_seq_len  = ids_len + history_len
     beam_size   = torch.tensor([BEAM_SIZE], dtype=torch.int64)
     top_k_t     = torch.tensor([TOP_K], dtype=torch.int64)
-    logits      = torch.randn((MAX_BEAM_SIZE, vocab_size), dtype=torch.float32)
+    logits      = torch.ones((MAX_BEAM_SIZE, vocab_size), dtype=torch.float32)
     save_id     = torch.zeros((MAX_BEAM_SIZE, 0), dtype=torch.int32)
 
     kv_tensors  = {
@@ -791,10 +791,10 @@ with torch.inference_mode():
     # ── Decoder Main ──────────────────────────────────────────────────────────
     kv_inputs, kv_input_names, kv_output_names, kv_axes = get_kv_io(kv_tensors, kv_specs, num_layers)
 
-    hidden_states  = torch.randn((MAX_BEAM_SIZE, ids_len.item(), hidden_size), dtype=torch.float32)
-    rotary_cos     = torch.ones( (1, ids_len.item(), 1, 1, head_dim),         dtype=torch.float32)
+    hidden_states  = torch.ones((MAX_BEAM_SIZE, ids_len.item(), hidden_size), dtype=torch.float32)
+    rotary_cos     = torch.ones((1, ids_len.item(), 1, 1, head_dim),          dtype=torch.float32)
     rotary_sin     = torch.zeros((1, ids_len.item(), 1, 1, head_dim),         dtype=torch.float32)
-    attention_mask = torch.zeros((1, 1, 1, ids_len.item(), ids_len.item()),    dtype=torch.float32)
+    attention_mask = torch.zeros((1, 1, 1, ids_len.item(), ids_len.item()),   dtype=torch.float32)
 
     all_inputs   = kv_inputs + [hidden_states, rotary_cos, rotary_sin, attention_mask]
     input_names  = kv_input_names + ["hidden_states", "rotary_cos", "rotary_sin", "attention_mask"]
@@ -810,8 +810,8 @@ with torch.inference_mode():
 
     # ── Concat Embed ──────────────────────────────────────────────────────────
     concat_embed = CONCAT_EMBED(model.thinker.model.embed_tokens, tokenizer).eval()
-    dummy_embed_0 = torch.randn((1, 5, hidden_size), dtype=torch.float32)
-    dummy_embed_1 = torch.randn((1, 3, hidden_size), dtype=torch.float32)
+    dummy_embed_0 = torch.ones((1, 5, hidden_size), dtype=torch.float32)
+    dummy_embed_1 = torch.ones((1, 3, hidden_size), dtype=torch.float32)
     torch.onnx.export(
         concat_embed,
         (dummy_embed_0, dummy_embed_1),
@@ -1497,3 +1497,4 @@ for prompt_embed, lang_embed, system_prompt, lang_prompt, test_path in zip(
     print(f"\nTranscription:\n  {asr_result}")
     print(f"\nRTF : {rtf:.3f}   total {t_total:.2f}s")
     print("─" * 70)
+    
