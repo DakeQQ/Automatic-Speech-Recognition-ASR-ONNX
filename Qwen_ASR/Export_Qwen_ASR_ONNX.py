@@ -41,7 +41,7 @@ onnx_model_Concat_Embed        = r'/home/DakeQQ/Downloads/Qwen_ASR_ONNX/Concat_E
 # Test audio for post-export validation.
 test_audio       = ["./example/zh.mp3", "./example/en.mp3", "./example/yue.mp3", "./example/ja.mp3", "./example/ko.mp3"]
 LANGUAGE_PROMPTS = ["Chinese", "English", "Cantonese", "", ""]      # Use English words for the language. Set "" for auto-detection mode.
-TASK_PROMPTS     = ["", "tribal chieftain", "", "", ""]             # Put the Hot Words here (optional).
+TASK_PROMPTS     = ["", "tribal chieftain", "", "", ""]             # Put the Hot Words or task hint here (optional).
 
 
 # ═══════════ㄢ═══════════════════════════════════════════════════════════════════
