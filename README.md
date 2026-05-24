@@ -15,6 +15,7 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
    - [FireRedASR-AED](https://github.com/FireRedTeam/FireRedASR)
    - [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
    - [Fun-ASR-Nano-2512](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512)
+   - [Qwen3-ASR](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B)
    
 2. **Combined Models (ASR + Speaker Identify)**:  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
@@ -51,6 +52,8 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
 | Ubuntu 24.04     | Laptop     | CPU<br>i3-12300      | FireRedASR-AED-L-Chinese<br>q8f32                | 0.17                                               |
 | Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Dolphin-Small<br>q8f32                           | 0.14                                               |
 | Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Fun-ASR-Nano<br>q4f32                            | 0.11                                               |
+| Ubuntu 24.04     | Laptop     | CPU<br>i7-12300      | Qwen3-ASR-0.6B<br>q4f32                          | 0.12                                               |
+
 
 ---
 
@@ -74,6 +77,7 @@ Harness the power of ONNX Runtime to transcribe audio into text effortlessly.
    - [FireRedASR-AED](https://github.com/FireRedTeam/FireRedASR)
    - [Dolphin](https://github.com/DataoceanAI/Dolphin/tree/main)
    - [Fun-ASR-Nano-2512](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512)
+   - [Qwen3-ASR](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B)
    
 2. **组合模型 (ASR + 讲话者识别)**：  
    - [SenseVoiceSmall](https://github.com/FunAudioLLM/SenseVoice) + [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/summary)  
