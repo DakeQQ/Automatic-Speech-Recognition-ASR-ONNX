@@ -52,13 +52,8 @@ DEVICE_ID              = 0          # Default to zero.
 
 
 # ============================================================================
-# Audio Special-Token IDs
+# Special-Token IDs
 # ============================================================================
-AUDIO_START_TOKEN_ID = 151669     # Audio start token ID.
-IM_START_TOKEN_ID    = 151644     # <|im_start|> token ID.
-IM_END_TOKEN_ID      = 151645     # <|im_end|> token ID.
-USER_TOKEN_ID        = 872        # "user" token ID.
-NEWLINE_TOKEN_ID     = 198        # Newline "\n" token ID.
 _ASR_TEXT_TAG        = "<asr_text>"
 _LANG_PREFIX         = "language "
 
