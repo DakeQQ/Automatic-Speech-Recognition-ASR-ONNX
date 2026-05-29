@@ -88,7 +88,7 @@ def build_query_prompt_ids(tokenizer: AutoTokenizer, system_prompt: str) -> List
 	return query_ids
 
 
-def normalise_audio(audio: np.ndarray, target_rms: float = 0.07) -> np.ndarray:
+def normalise_audio(audio: np.ndarray, target_rms: float = 8192.0) -> np.ndarray:
 	audio = audio.astype(np.float32)
 	rms = np.sqrt(np.mean(audio * audio))
 	if rms > 0:
