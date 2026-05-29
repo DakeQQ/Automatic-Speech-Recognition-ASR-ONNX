@@ -439,6 +439,12 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
         self.qk_heads       = num_heads + num_kv_heads   # total heads before split
         self.num_layers     = num_layers
         self.overflow_scale = torch.tensor([0.01], dtype=torch.float32)
+
+        # Pre-computed RMS norm eps (scaled by dimension since size is absorbed into weights)
+        rms_norm_eps = model.thinker.config.rms_norm_eps
+        self.register_buffer("rms_eps_hidden", torch.tensor([rms_norm_eps * hidden_size], dtype=torch.float32))
+        self.register_buffer("rms_eps_head", torch.tensor([rms_norm_eps * head_dim], dtype=torch.float32))
+
         self.save_key   = [None] * num_layers
         self.save_value = [None] * num_layers
 
@@ -487,10 +493,10 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
             self.lm_head.weight.mul_(final_norm_weight)
             del self.llm.norm
 
-    def _rms_norm(self, x: Tensor) -> Tensor:
+    def _rms_norm(self, x: Tensor, eps: Tensor) -> Tensor:
         if PREVENT_F16_OVERFLOW:
             x = x * self.overflow_scale
-        return x * torch.rsqrt(x.square().sum(-1, keepdim=True))
+        return x * torch.rsqrt(x.square().sum(-1, keepdim=True) + eps)
 
     def _rotate_half(self, x: Tensor, batch_size: int) -> Tensor:
         x = x.view(batch_size, -1, 1, self.qk_heads, 2, self.head_dim_half)
@@ -505,11 +511,11 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
         batch_size     = hidden_states.shape[0]
         for i, layer in enumerate(self.llm.layers):
             residual = hidden_states
-            hidden_states = self._rms_norm(hidden_states)
+            hidden_states = self._rms_norm(hidden_states, self.rms_eps_hidden)
             qkv = layer.self_attn.qkv(hidden_states)
             qkv = qkv.reshape(batch_size, -1, 1, self.qk_heads + self.num_kv_heads, self.head_dim)
             qk, v = torch.split(qkv, [self.qk_heads, self.num_kv_heads], dim=-2)
-            qk = self._rms_norm(qk) * layer.self_attn.qk_norm_weight
+            qk = self._rms_norm(qk, self.rms_eps_head) * layer.self_attn.qk_norm_weight
             qk_rot = qk * rotary_cos + self._rotate_half(qk, batch_size) * rotary_sin
             q, k = torch.split(qk_rot, [self.num_heads, self.num_kv_heads], dim=-2)
             q = q.reshape(batch_size, -1, self.num_kv_heads, self.num_kv_groups, self.head_dim).permute(0, 2, 3, 1, 4)
@@ -525,11 +531,11 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
             attn = attn.permute(0, 3, 1, 2, 4).reshape(batch_size, -1, layer.self_attn.o_proj.in_features)
             hidden_states = residual + layer.self_attn.o_proj(attn)
             residual = hidden_states
-            hidden_states = self._rms_norm(hidden_states)
+            hidden_states = self._rms_norm(hidden_states, self.rms_eps_hidden)
             gate_up = layer.mlp.gate_up_proj(hidden_states)
             gate, up = torch.split(gate_up, [layer.mlp.down_proj.in_features] * 2, dim=-1)
             hidden_states = residual + layer.mlp.down_proj(layer.mlp.act_fn(gate) * up)
-        hidden_states = self._rms_norm(hidden_states[:, -1])
+        hidden_states = self._rms_norm(hidden_states[:, -1], self.rms_eps_hidden)
         logits = self.lm_head(hidden_states)
         return *self.save_key, *self.save_value, logits
 
