@@ -498,6 +498,11 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         # ── Overflow guard ───────────────────────────────────────────────
         self.overflow_scale = torch.tensor([0.01], dtype=torch.float32)
 
+        # ── Pre-computed RMS norm eps (scaled by dimension since size is absorbed into weights) ──
+        rms_norm_eps = funasr_nano.llm.config.rms_norm_eps
+        self.register_buffer("rms_eps_hidden", torch.tensor([rms_norm_eps * hidden_size], dtype=torch.float32))
+        self.register_buffer("rms_eps_head", torch.tensor([rms_norm_eps * head_dim], dtype=torch.float32))
+
         # ── Per-layer output buffers ─────────────────────────────────────
         self.save_key = [None] * num_layers
         self.save_value = [None] * num_layers
@@ -597,11 +602,11 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             else:
                 FUNASR_NANO_DECODER_MAIN._replace_gelu_with_tanh_approximation(child)
 
-    def _rms_norm(self, x):
+    def _rms_norm(self, x, eps):
         """Apply modified RMS normalization (with optional overflow scaling)."""
         if PREVENT_F16_OVERFLOW:
             x = x * self.overflow_scale
-        return x * torch.rsqrt(x.square().sum(-1, keepdim=True))
+        return x * torch.rsqrt(x.square().sum(-1, keepdim=True) + eps)
 
     def _rotate_half(self, x, batch_size):
         """Rotate the last dimension by swapping and negating halves (for RoPE).
@@ -622,7 +627,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
 
             # ── Self-Attention ───────────────────────────────────────
             residual = hidden_states
-            hidden_states = self._rms_norm(hidden_states)
+            hidden_states = self._rms_norm(hidden_states, self.rms_eps_hidden)
 
             # Fused QKV projection & reshape
             qkv = layer.self_attn.qkv(hidden_states)
@@ -630,7 +635,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             qk, v = torch.split(qkv, [self.qk_heads, self.num_key_value_heads], dim=-2)
 
             # QK normalization & rotary embedding
-            qk = self._rms_norm(qk) * layer.self_attn.qk_norm_weight
+            qk = self._rms_norm(qk, self.rms_eps_head) * layer.self_attn.qk_norm_weight
             qk_rot = qk * rotary_pos_emb_cos + self._rotate_half(qk, batch_size) * rotary_pos_emb_sin
 
             # Split into query and key, reshape query for GQA
@@ -658,14 +663,14 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
 
             # ── Feed-Forward Network ─────────────────────────────────
             residual = hidden_states
-            hidden_states = self._rms_norm(hidden_states)
+            hidden_states = self._rms_norm(hidden_states, self.rms_eps_hidden)
 
             gate_up = layer.mlp.gate_up_proj(hidden_states)
             gate, up = torch.split(gate_up, [layer.mlp.down_proj.in_features, layer.mlp.down_proj.in_features], dim=-1)
             hidden_states = residual + layer.mlp.down_proj(layer.mlp.act_fn(gate) * up)
 
         # ── Final Projection ─────────────────────────────────────────
-        hidden_states = self._rms_norm(hidden_states[:, -1])
+        hidden_states = self._rms_norm(hidden_states[:, -1], self.rms_eps_hidden)
         logits = self.funasr_nano.lm_head(hidden_states)
 
         return *self.save_key, *self.save_value, logits
