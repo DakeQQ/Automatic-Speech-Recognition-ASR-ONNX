@@ -1257,7 +1257,7 @@ if USE_PENALTY:
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Audio Normaliser ─────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
-def normalise_audio(audio: np.ndarray, target_rms: float = 0.07) -> np.ndarray:
+def normalise_audio(audio: np.ndarray, target_rms: float = 8192.0) -> np.ndarray:
     audio = audio.astype(np.float32)
     rms = np.sqrt(np.mean(audio * audio))
     if rms > 0:
