@@ -1258,12 +1258,15 @@ if USE_PENALTY:
 # ── Audio Normaliser ─────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 def normalise_audio(audio: np.ndarray, target_rms: float = 8192.0) -> np.ndarray:
-    audio = audio.astype(np.float32)
-    rms = np.sqrt(np.mean(audio * audio))
+    _audio = audio.astype(np.float32)
+    rms = np.sqrt(np.mean(_audio * _audio, dtype=np.float32), dtype=np.float32)
     if rms > 0:
-        audio *= target_rms * 32768.0 / (rms + 1e-7)
-    return np.clip(audio, -32768.0, 32767.0).astype(np.int16)
-
+        _audio *= (target_rms / (rms + 1e-7))
+        np.clip(_audio, -32768.0, 32767.0, out=_audio)
+        return _audio.astype(np.int16)
+    else:
+        return audio
+        
 
 binding_Rotary_Prefill.bind_ortvalue_input(in_name_RP[1], init_history_len_ort)
 binding_Rotary_Decode.bind_ortvalue_output(out_name_RD[0], rotary_cos_buf)
