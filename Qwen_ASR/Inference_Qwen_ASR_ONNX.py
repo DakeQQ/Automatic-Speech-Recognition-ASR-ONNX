@@ -88,12 +88,12 @@ def build_query_prompt_ids(tokenizer: AutoTokenizer, system_prompt: str) -> List
 	return query_ids
 
 
-def normalise_audio(audio: np.ndarray, target_rms: float = 8192.0) -> np.ndarray:
-	audio = audio.astype(np.float32)
-	rms = np.sqrt(np.mean(audio * audio))
-	if rms > 0:
-		audio *= target_rms * 32768.0 / (rms + 1e-7)
-	return np.clip(audio, -32768.0, 32767.0).astype(np.int16)
+def normalise_audio(_audio: np.ndarray, target_rms: float = 8192.0) -> np.ndarray:
+	_audio = _audio.astype(np.float32)
+    rms = np.sqrt(np.mean((_audio * _audio), dtype=np.float32), dtype=np.float32)
+    _audio *= (target_rms / (rms + 1e-7))
+    np.clip(_audio, -32768.0, 32767.0, out=_audio)
+    return _audio.astype(np.int16)
 
 
 def _build_run_options(silent: bool) -> onnxruntime.RunOptions:
