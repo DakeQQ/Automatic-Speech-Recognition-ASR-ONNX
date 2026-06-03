@@ -338,12 +338,12 @@ class QWEN3_ASR_ENCODER(torch.nn.Module):
             normed = layer.self_attn_layer_norm(hidden_states)
             qkv = layer.self_attn.qkv(normed).view(num_windows, -1, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.split(1, dim=0)
-            attn  = torch.matmul(q, k.transpose(-1, -2))
-            attn  = torch.softmax(attn + key_mask, dim=-1)
-            attn  = torch.matmul(attn, v).transpose(2, 3).reshape(num_windows, -1, layer.self_attn.out_proj.in_features)
+            attn = torch.matmul(q, k.transpose(-1, -2))
+            attn = torch.softmax(attn + key_mask, dim=-1)
+            attn = torch.matmul(attn, v).transpose(2, 3).reshape(num_windows, -1, layer.self_attn.out_proj.in_features)
             hidden_states = residual + layer.self_attn.out_proj(attn)
             residual = hidden_states
-            normed   = layer.final_layer_norm(hidden_states)
+            normed = layer.final_layer_norm(hidden_states)
             hidden_states = residual + layer.fc2(layer.activation_fn(layer.fc1(normed)))
         hidden_states = self.audio_tower.ln_post(hidden_states)
         hidden_states = self.audio_tower.proj2(self.audio_tower.act(self.audio_tower.proj1(hidden_states)))
@@ -442,8 +442,13 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
 
         # Pre-computed RMS norm eps (scaled by dimension since size is absorbed into weights)
         rms_norm_eps = model.thinker.config.rms_norm_eps
-        self.register_buffer("rms_eps_hidden", torch.tensor([rms_norm_eps * hidden_size], dtype=torch.float32))
-        self.register_buffer("rms_eps_head", torch.tensor([rms_norm_eps * head_dim], dtype=torch.float32))
+        rms_eps_hidden = rms_norm_eps * hidden_size
+        rms_eps_head = rms_norm_eps * head_dim
+        if PREVENT_F16_OVERFLOW:
+            rms_eps_hidden *= self.overflow_scale.square()
+            rms_eps_head *= self.overflow_scale.square()
+        self.register_buffer("rms_eps_hidden", torch.tensor([rms_eps_hidden], dtype=torch.float32))
+        self.register_buffer("rms_eps_head", torch.tensor([rms_eps_head], dtype=torch.float32))
 
         self.save_key   = [None] * num_layers
         self.save_value = [None] * num_layers
