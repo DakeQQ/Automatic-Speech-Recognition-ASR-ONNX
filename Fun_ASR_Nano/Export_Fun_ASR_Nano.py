@@ -387,7 +387,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         audio = audio.float()
         audio = audio - torch.mean(audio)  # Remove DC Offset
         if self.pre_emphasis > 0:
-            audio = torch.cat([audio[..., :1], audio[..., 1:] - self.pre_emphasis * audio[..., :-1]], dim=-1)
+            audio = torch.cat([audio[..., [0]], audio[..., 1:] - self.pre_emphasis * audio[..., :-1]], dim=-1)
         real_part, imag_part = self.stft_model(audio)
         mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + self.variance_epsilon).log() * self.output_size_factor
         features_len = mel_features.shape[1].unsqueeze(0)
@@ -500,8 +500,13 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
 
         # ── Pre-computed RMS norm eps (scaled by dimension since size is absorbed into weights) ──
         rms_norm_eps = funasr_nano.llm.config.rms_norm_eps
-        self.register_buffer("rms_eps_hidden", torch.tensor([rms_norm_eps * hidden_size], dtype=torch.float32))
-        self.register_buffer("rms_eps_head", torch.tensor([rms_norm_eps * head_dim], dtype=torch.float32))
+        rms_eps_hidden = rms_norm_eps * hidden_size
+        rms_eps_head = rms_norm_eps * head_dim
+        if PREVENT_F16_OVERFLOW:
+            rms_eps_hidden *= self.overflow_scale.square()
+            rms_eps_head *= self.overflow_scale.square()
+        self.register_buffer("rms_eps_hidden", torch.tensor([rms_eps_hidden], dtype=torch.float32))
+        self.register_buffer("rms_eps_head", torch.tensor([rms_eps_head], dtype=torch.float32))
 
         # ── Per-layer output buffers ─────────────────────────────────────
         self.save_key = [None] * num_layers
