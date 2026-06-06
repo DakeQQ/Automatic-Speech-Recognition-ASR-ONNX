@@ -148,7 +148,7 @@ class STFT_Process(torch.nn.Module):
         n_fft: int       = NFFT,
         win_length: int  = WIN_LENGTH,
         hop_len: int     = HOP_LENGTH,
-        n_frames: int    = STFT_SIGNAL_LENGTH,
+        max_frames: int  = STFT_SIGNAL_LENGTH,
         window_type: str = WINDOW_TYPE,
         center_pad: bool = CENTER_PAD,
         pad_mode: str    = PAD_MODE
@@ -159,13 +159,13 @@ class STFT_Process(torch.nn.Module):
         self.n_fft      = n_fft
         self.hop_len    = hop_len
         self.half_n_fft = n_fft // 2
-        self.n_frames   = n_frames
+        self.n_frames   = max_frames
 
         f_bins = self.half_n_fft + 1
         window = create_padded_window(win_length, n_fft, window_type)
 
         # ── Precompute static output slice bounds for ISTFT ───────────────
-        raw_len = n_fft + hop_len * (n_frames - 1)
+        raw_len = n_fft + hop_len * (max_frames - 1)
         if center_pad:
             self._out_start = self.half_n_fft
             self._out_end   = raw_len - self.half_n_fft
@@ -198,7 +198,7 @@ class STFT_Process(torch.nn.Module):
 
         # ── ISTFT: inverse kernel + pre-sliced normalization ──────────────
         if model_type in ('istft_A', 'istft_B'):
-            self._build_istft_kernels(n_fft, f_bins, window, hop_len, n_frames)
+            self._build_istft_kernels(n_fft, f_bins, window, hop_len, max_frames)
 
     def _build_stft_kernels(self, n_fft, f_bins, window, model_type):
         """Precompute windowed DFT basis as Conv1d kernel weights."""
@@ -596,3 +596,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+  
