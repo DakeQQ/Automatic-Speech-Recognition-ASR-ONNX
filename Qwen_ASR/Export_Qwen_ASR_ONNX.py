@@ -441,7 +441,7 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
         self.overflow_scale = torch.tensor([0.01], dtype=torch.float32)
 
         # Pre-computed RMS norm eps (scaled by dimension since size is absorbed into weights)
-        rms_norm_eps = model.thinker.config.rms_norm_eps
+        rms_norm_eps = torch.tensor([1e-6], dtype=torch.float32)
         rms_eps_hidden = rms_norm_eps * hidden_size
         rms_eps_head = rms_norm_eps * head_dim
         if PREVENT_F16_OVERFLOW:
