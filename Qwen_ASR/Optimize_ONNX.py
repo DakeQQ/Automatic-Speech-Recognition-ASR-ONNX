@@ -13,8 +13,9 @@ from onnxruntime.quantization import (
 )
 
 # Path Setting
-original_folder_path = r"/home/DakeQQ/Downloads/Qwen_ASR_ONNX"                         # The original folder.
-quanted_folder_path = r"/home/DakeQQ/Downloads/Qwen_ASR_Optimized"                     # The optimized folder.
+model_size = "0.6B"                                                   # Qwen3-ASR series: [0.6B, 1.7B]
+original_folder_path = r"/home/DakeQQ/Downloads/Qwen_ASR_ONNX"        # The original folder.
+quanted_folder_path = r"/home/DakeQQ/Downloads/Qwen_ASR_Optimized"    # The optimized folder.
 
 # Create the output directory if it doesn't exist
 os.makedirs(quanted_folder_path, exist_ok=True)
@@ -35,11 +36,12 @@ model_names = [
 ]
 
 # Settings
-use_int4 = True                          # Quant the model to int4 format.
-use_int8 = False                         # Quant the model to int8 format.
+use_int4 = False                          # Quant the model to int4 format.
+use_int8 = True                         # Quant the model to int8 format.
+use_int8_nbits = True                    # True: use matmul_nbits_quantizer (bits=8); False: use quantize_dynamic.
 use_f16 = False                          # Quant the model to float16 format. block_size <= 32.  Set def convert_float_to_float16(check_fp16_ready=False), @ ~/anaconda3/envs/python_313/lib/python3.13/site-packages/onnxconverter_common/float16.py
 use_openvino = False                     # Set true for OpenVINO optimization.
-two_parts_save = False                   # If True, save the model into 2 parts.
+two_parts_save = True                    # If True, save the model into 2 parts.
 upgrade_opset = 0                        # Optional process. Set 0 for close.
 
 # Int4 matmul_nbits_quantizer Settings
@@ -127,22 +129,86 @@ for model_name in model_names:
         )
 
     elif use_int8:
-        print("Applying UINT8 quantization...")
-        quantize_dynamic(
-            model_input=quant_utils.load_model_with_shape_infer(Path(model_path)),
-            model_output=quanted_model_path,
-            per_channel=True,
-            reduce_range=False,
-            weight_type=QuantType.QUInt8,
-            extra_options={'ActivationSymmetric': False,
-                           'WeightSymmetric': False,
-                           'EnableSubgraph': True,
-                           'ForceQuantizeNoInputCheck': False,
-                           'MatMulConstBOnly': True
-                           },
-            nodes_to_exclude=None,
-            use_external_data_format=True
-        )
+        if use_int8_nbits:
+            print("Applying INT8 quantization via matmul_nbits_quantizer...")
+            if "Embed" in model_path:
+                op_types = ["Gather"]
+                quant_axes = [1]
+                nbits_bits = 4
+                nbits_block_size = 16
+                algorithm = "DEFAULT"  # Fallback to DEFAULT
+            else:
+                op_types = ["MatMul"]
+                quant_axes = [0]
+                nbits_bits = 8
+                nbits_block_size = block_size
+                algorithm = algorithm_copy
+
+            # Start Weight-Only Quantize
+            model = quant_utils.load_model_with_shape_infer(Path(model_path))
+
+            if algorithm == "RTN":
+                quant_config = matmul_nbits_quantizer.RTNWeightOnlyQuantConfig(
+                    quant_format=quant_utils.QuantFormat.QOperator,
+                    op_types_to_quantize=tuple(op_types)
+                )
+            elif algorithm == "HQQ":
+                quant_config = matmul_nbits_quantizer.HQQWeightOnlyQuantConfig(
+                    bits=nbits_bits,
+                    block_size=nbits_block_size,
+                    axis=quant_axes[0],
+                    quant_format=quant_utils.QuantFormat.QOperator,
+                    op_types_to_quantize=tuple(op_types),
+                    quant_axes=tuple((op_types[i], quant_axes[i]) for i in range(len(op_types)))
+                )
+            elif algorithm == "k_quant":
+                quant_config = matmul_nbits_quantizer.KQuantWeightOnlyQuantConfig(
+                    quant_format=quant_utils.QuantFormat.QOperator,
+                    op_types_to_quantize=tuple(op_types)
+                )
+            else:
+                quant_config = matmul_nbits_quantizer.DefaultWeightOnlyQuantConfig(
+                    block_size=nbits_block_size,
+                    is_symmetric=quant_symmetric,
+                    accuracy_level=accuracy_level,
+                    quant_format=quant_utils.QuantFormat.QOperator,
+                    op_types_to_quantize=tuple(op_types),
+                    quant_axes=tuple((op_types[i], quant_axes[i]) for i in range(len(op_types)))
+                )
+            quant_config.bits = nbits_bits
+            quant = matmul_nbits_quantizer.MatMulNBitsQuantizer(
+                model,
+                block_size=nbits_block_size,
+                is_symmetric=quant_symmetric,
+                accuracy_level=accuracy_level,
+                quant_format=quant_utils.QuantFormat.QOperator,
+                op_types_to_quantize=tuple(op_types),
+                quant_axes=tuple((op_types[i], quant_axes[i]) for i in range(len(op_types))),
+                algo_config=quant_config,
+                nodes_to_exclude=nodes_to_exclude
+            )
+            quant.process()
+            quant.model.save_model_to_file(
+                quanted_model_path,
+                True
+            )
+        else:
+            print("Applying UINT8 quantization via quantize_dynamic...")
+            quantize_dynamic(
+                model_input=quant_utils.load_model_with_shape_infer(Path(model_path)),
+                model_output=quanted_model_path,
+                per_channel=True,
+                reduce_range=False,
+                weight_type=QuantType.QUInt8,
+                extra_options={'ActivationSymmetric': False,
+                               'WeightSymmetric': False,
+                               'EnableSubgraph': True,
+                               'ForceQuantizeNoInputCheck': False,
+                               'MatMulConstBOnly': True
+                               },
+                nodes_to_exclude=None,
+                use_external_data_format=True
+            )
         # ONNX Model Optimizer
         print("Slimming the quantized model...")
         slim(
@@ -178,7 +244,7 @@ for model_name in model_names:
                            use_gpu=False,
                            opt_level=opt_level,
                            num_heads=16,
-                           hidden_size=1024 if "0.6B" in model_path else 2048,
+                           hidden_size=1024 if "0.6B" in model_size else 2048,
                            verbose=False,
                            model_type='bert',
                            only_onnxruntime=use_openvino)
