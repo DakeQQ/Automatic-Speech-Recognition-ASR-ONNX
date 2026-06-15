@@ -36,9 +36,9 @@ model_names = [
 ]
 
 # Settings
-use_int4 = False                          # Quant the model to int4 format.
-use_int8 = True                         # Quant the model to int8 format.
-use_int8_nbits = True                    # True: use matmul_nbits_quantizer (bits=8); False: use quantize_dynamic.
+use_int4 = True                          # Quant the model to int4 format.
+use_int8 = False                         # Quant the model to int8 format.
+use_int8_nbits = False                   # True: use matmul_nbits_quantizer (bits=8); False: use quantize_dynamic.
 use_f16 = False                          # Quant the model to float16 format. block_size <= 32.  Set def convert_float_to_float16(check_fp16_ready=False), @ ~/anaconda3/envs/python_313/lib/python3.13/site-packages/onnxconverter_common/float16.py
 use_openvino = False                     # Set true for OpenVINO optimization.
 two_parts_save = True                    # If True, save the model into 2 parts.
@@ -131,50 +131,30 @@ for model_name in model_names:
     elif use_int8:
         if use_int8_nbits:
             print("Applying INT8 quantization via matmul_nbits_quantizer...")
+            print("Note: algorithm forced to 'DEFAULT' for matmul_nbits_quantizer with bits=8.")
             if "Embed" in model_path:
                 op_types = ["Gather"]
                 quant_axes = [1]
                 nbits_bits = 4
                 nbits_block_size = 16
-                algorithm = "DEFAULT"  # Fallback to DEFAULT
             else:
                 op_types = ["MatMul"]
                 quant_axes = [0]
                 nbits_bits = 8
                 nbits_block_size = block_size
-                algorithm = algorithm_copy
+            algorithm = "DEFAULT"
 
             # Start Weight-Only Quantize
             model = quant_utils.load_model_with_shape_infer(Path(model_path))
 
-            if algorithm == "RTN":
-                quant_config = matmul_nbits_quantizer.RTNWeightOnlyQuantConfig(
-                    quant_format=quant_utils.QuantFormat.QOperator,
-                    op_types_to_quantize=tuple(op_types)
-                )
-            elif algorithm == "HQQ":
-                quant_config = matmul_nbits_quantizer.HQQWeightOnlyQuantConfig(
-                    bits=nbits_bits,
-                    block_size=nbits_block_size,
-                    axis=quant_axes[0],
-                    quant_format=quant_utils.QuantFormat.QOperator,
-                    op_types_to_quantize=tuple(op_types),
-                    quant_axes=tuple((op_types[i], quant_axes[i]) for i in range(len(op_types)))
-                )
-            elif algorithm == "k_quant":
-                quant_config = matmul_nbits_quantizer.KQuantWeightOnlyQuantConfig(
-                    quant_format=quant_utils.QuantFormat.QOperator,
-                    op_types_to_quantize=tuple(op_types)
-                )
-            else:
-                quant_config = matmul_nbits_quantizer.DefaultWeightOnlyQuantConfig(
-                    block_size=nbits_block_size,
-                    is_symmetric=quant_symmetric,
-                    accuracy_level=accuracy_level,
-                    quant_format=quant_utils.QuantFormat.QOperator,
-                    op_types_to_quantize=tuple(op_types),
-                    quant_axes=tuple((op_types[i], quant_axes[i]) for i in range(len(op_types)))
-                )
+            quant_config = matmul_nbits_quantizer.DefaultWeightOnlyQuantConfig(
+                block_size=nbits_block_size,
+                is_symmetric=quant_symmetric,
+                accuracy_level=accuracy_level,
+                quant_format=quant_utils.QuantFormat.QOperator,
+                op_types_to_quantize=tuple(op_types),
+                quant_axes=tuple((op_types[i], quant_axes[i]) for i in range(len(op_types)))
+            )
             quant_config.bits = nbits_bits
             quant = matmul_nbits_quantizer.MatMulNBitsQuantizer(
                 model,
