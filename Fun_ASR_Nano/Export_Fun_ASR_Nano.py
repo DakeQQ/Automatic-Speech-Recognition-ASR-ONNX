@@ -1,3 +1,7 @@
+import os
+os.environ["HF_HUB_OFFLINE"] = "1"          # Load all HuggingFace assets from local disk; never contact huggingface.co
+os.environ["TRANSFORMERS_OFFLINE"] = "1"    # Disable transformers' network HEAD/update checks
+
 import gc
 import time
 import torch
@@ -36,12 +40,12 @@ if "MLT" in model_path:
 
 # Audio & STFT Configuration
 SAMPLE_RATE = 16000                 # The model parameter, do not edit the value.
-WINDOW_TYPE = 'hamming'             # Type of window function used in the STFT
+WINDOW_TYPE = 'hamming'             # Type of window function used in the STFT. Kaldi WavFrontend uses a symmetric Hamming window.
 N_MELS = 80                         # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT_STFT = 400                     # Number of FFT components for the STFT process, edit it carefully.
-WINDOW_LENGTH = 400                 # Length of windowing, edit it carefully.
+NFFT_STFT = 512                     # FFT size. Kaldi rounds the 400-sample window up to the next power of two (round_to_power_of_two).
+WINDOW_LENGTH = 400                 # Kaldi frame length (25 ms = 400 samples). Zero-padded to NFFT_STFT before the DFT.
 HOP_LENGTH = 160                    # Number of samples between successive frames in the STFT, edit it carefully.
-PRE_EMPHASIZE = 0.97                # For audio preprocessing.
+PRE_EMPHASIZE = 0.97                # Kaldi per-frame pre-emphasis coefficient (baked into the STFT kernel).
 USE_NORMALIZER = True               # If true, use the audio normalizer to make the loudness consistent.
 
 # Model Parameters
@@ -73,7 +77,7 @@ DEVICE_ID = 0                       # Default to zero.
 OPSET = 17                          # ONNX Runtime opset version.
 
 
-MAX_STFT_SIGNAL_LENGTH = MAX_INPUT_AUDIO_LENGTH // HOP_LENGTH + 1   # The length after STFT processed
+MAX_STFT_SIGNAL_LENGTH = (MAX_INPUT_AUDIO_LENGTH - WINDOW_LENGTH) // HOP_LENGTH + 1   # Kaldi snip_edges frame count (no centering)
 LFR_LENGTH = (MAX_STFT_SIGNAL_LENGTH + LFR_N - 1) // LFR_N
 if HOP_LENGTH > MAX_INPUT_AUDIO_LENGTH:
     HOP_LENGTH = MAX_INPUT_AUDIO_LENGTH
@@ -254,14 +258,21 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         self.stft_model = stft_model
         self.T_lfr = lfr_len
         self.lfr_n = lfr_n
-        self.pre_emphasis = torch.tensor(pre_emphasis, dtype=torch.float32).view(1, 1, -1)
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None,'htk')).transpose(0, 1).unsqueeze(0)
+        # Mel filterbank matching Kaldi's get_mel_banks (exactly what WavFrontend uses
+        # through kaldi.fbank); falls back to torchaudio.melscale_fbanks if unavailable.
+        try:
+            from torchaudio.compliance.kaldi import get_mel_banks
+            mel_banks = get_mel_banks(n_mels, nfft_stft, sample_rate, 20.0, 0.0, 100.0, -500.0, 1.0)[0]  # (n_mels, nfft_stft // 2)
+            mel_banks = torch.nn.functional.pad(mel_banks, (0, 1))                                        # zero Nyquist -> (n_mels, nfft_stft // 2 + 1)
+            self.fbank = mel_banks.unsqueeze(0).to(torch.float32)
+        except Exception:
+            self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None, 'htk')).transpose(0, 1).unsqueeze(0)
         self.nfft_stft = nfft_stft
         self.lfr_m_factor = (lfr_m - 1) // 2
         indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
         self.indices_mel = indices.clamp(max=max_stft_len + self.lfr_m_factor - 1).to(torch.int16)
         self.output_size_factor = self.funasr_nano.audio_encoder.output_size() ** 0.5
-        self.variance_epsilon = torch.tensor([1e-7], dtype=torch.float32)
+        self.variance_epsilon = torch.tensor([1.1920928955078125e-07], dtype=torch.float32)  # torch.finfo(float32).eps == Kaldi's fbank log floor
         self.position_encoding = self.funasr_nano.audio_encoder.embed(torch.zeros([1, max_stft_len, 560], dtype=torch.float32))
         num_head = self.funasr_nano.audio_encoder.encoders._modules["0"].self_attn.h
         head_dim = self.funasr_nano.audio_encoder.encoders._modules["0"].self_attn.d_k
@@ -385,15 +396,19 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
 
     def forward(self, audio, query_embed):
         audio = audio.float()
-        audio = audio - torch.mean(audio)  # Remove DC Offset
-        if self.pre_emphasis > 0:
-            audio = torch.cat([audio[..., [0]], audio[..., 1:] - self.pre_emphasis * audio[..., :-1]], dim=-1)
+        # Per-frame DC removal + pre-emphasis + symmetric Hamming window + zero-pad to
+        # NFFT_STFT are all baked into the Kaldi-compatible STFT kernel (see STFT_Process).
         real_part, imag_part = self.stft_model(audio)
-        mel_features = (torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2) + self.variance_epsilon).log() * self.output_size_factor
+        mel_features = torch.maximum(torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2), self.variance_epsilon).log() * self.output_size_factor
         features_len = mel_features.shape[1].unsqueeze(0)
         left_padding = mel_features[:, [0]]
         padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
         _len = features_len // self.lfr_n - 1
+        # Number of speech tokens given to the LLM must equal FunASR's fake_token_len,
+        # which is computed from the LFR frame count T_lfr = ceil(mel_frames / lfr_n)
+        # (WavFrontend.apply_lfr), NOT the raw mel-frame count. Indexing fake_token by
+        # features_len (mel frames) over-feeds ~lfr_n x too many speech tokens.
+        lfr_len = (features_len + self.lfr_n - 1) // self.lfr_n
         mel_features = padded_inputs[:, self.indices_mel[:_len].int()].reshape(1, _len, -1)
         x = mel_features + self.position_encoding[:, :_len].float()
         for encoder_layer in self.funasr_nano.audio_encoder.encoders0 + self.funasr_nano.audio_encoder.encoders:
@@ -445,7 +460,7 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             attn_out = block.self_attn.linear_out(attn)
             x = x + attn_out
             x = x + block.feed_forward.w_2(block.feed_forward.activation(block.feed_forward.w_1(block.norm2(x))))
-        x = x[:, :self.fake_token[features_len].to(torch.int64)]
+        x = x[:, :self.fake_token[lfr_len].to(torch.int64)]
         concat_embed = torch.cat([self.head_embed, query_embed, x, self.tail_embed], dim=1)
         return concat_embed, concat_embed.shape[1].unsqueeze(0)
 
@@ -687,7 +702,16 @@ with torch.inference_mode():
     # ══════════════════════════════════════════════════════════════════
     # Load Model & Extract Config
     # ══════════════════════════════════════════════════════════════════
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE, pad_mode='constant').eval()
+    custom_stft = STFT_Process(
+        model_type='stft_B',
+        win_length=WINDOW_LENGTH,      # Kaldi 400-sample frame (conv width)
+        hop_len=HOP_LENGTH,
+        dft_size=NFFT_STFT,            # zero-pad 400 -> 512 before the DFT (Kaldi round_to_power_of_two)
+        pre_emphasis=PRE_EMPHASIZE,    # per-frame pre-emphasis, baked into the kernel
+        remove_dc=True,                # per-frame DC-offset removal, baked into the kernel
+        window_type=WINDOW_TYPE,
+        window_periodic=False          # symmetric Hamming window (Kaldi convention)
+    ).eval()
     model = AutoModel(
         model=model_path,
         trust_remote_code=True,

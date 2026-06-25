@@ -151,7 +151,11 @@ class STFT_Process(torch.nn.Module):
         max_frames: int  = STFT_SIGNAL_LENGTH,
         window_type: str = WINDOW_TYPE,
         center_pad: bool = CENTER_PAD,
-        pad_mode: str    = PAD_MODE
+        pad_mode: str    = PAD_MODE,
+        dft_size: int        = 0,     # >0 -> Kaldi fbank mode: zero-pad win_length -> dft_size before the DFT
+        pre_emphasis: float  = 0.0,   # Kaldi per-frame pre-emphasis coefficient (replicate-padded)
+        remove_dc: bool      = False, # Kaldi per-frame DC-offset removal
+        window_periodic: bool = True  # False -> symmetric window (Kaldi's 2*pi/(N-1) convention)
     ):
         super().__init__()
 
@@ -160,6 +164,18 @@ class STFT_Process(torch.nn.Module):
         self.hop_len    = hop_len
         self.half_n_fft = n_fft // 2
         self.n_frames   = max_frames
+
+        # ── Kaldi-compatible fbank STFT ───────────────────────────────────
+        # Reproduces torchaudio.compliance.kaldi.fbank framing: snip_edges (no
+        # centering), per-frame DC removal + pre-emphasis, symmetric window, and
+        # zero-padding win_length -> dft_size before the DFT. Every step is linear,
+        # so they all fold into a single Conv1d kernel built once here.
+        if dft_size > 0:
+            self.half_n_fft  = dft_size // 2          # channel split -> dft_size // 2 + 1 bins
+            self._center_pad = False                  # Kaldi snip_edges=True -> no centering
+            self.forward     = self._stft_B_forward
+            self._build_kaldi_fbank_kernel(win_length, dft_size, window_type, window_periodic, pre_emphasis, remove_dc)
+            return
 
         f_bins = self.half_n_fft + 1
         window = create_padded_window(win_length, n_fft, window_type)
@@ -214,6 +230,59 @@ class STFT_Process(torch.nn.Module):
             self.register_buffer('stft_kernel', windowed_cos)
         else:
             self.register_buffer('stft_kernel', torch.cat([windowed_cos, windowed_sin], dim=0))
+
+    def _build_kaldi_fbank_kernel(self, win_length, dft_size, window_type, window_periodic, pre_emphasis, remove_dc):
+        """
+        Build one Conv1d kernel that reproduces torchaudio.compliance.kaldi.fbank
+        framing for a single ``win_length``-sample frame:
+
+            per-frame DC removal -> pre-emphasis (replicate pad) -> window
+            -> zero-pad to ``dft_size`` -> real DFT (dft_size // 2 + 1 bins)
+
+        All operations are linear, so they collapse into one
+        (2 * f_bins, 1, win_length) kernel applied with stride ``hop_len`` and no
+        centering (Kaldi snip_edges=True). Built in float64, stored as float32.
+        """
+        L      = win_length
+        f_bins = dft_size // 2 + 1
+
+        # Symmetric (periodic=False) window matches Kaldi's a = 2*pi/(N-1) form.
+        window_builders = {
+            'bartlett': torch.bartlett_window,
+            'blackman': torch.blackman_window,
+            'hamming':  torch.hamming_window,
+            'hann':     torch.hann_window,
+        }
+        if window_type in window_builders:
+            window = window_builders[window_type](L, periodic=window_periodic, dtype=torch.float64)
+        elif window_type == 'kaiser':
+            window = torch.kaiser_window(L, periodic=window_periodic, beta=12.0, dtype=torch.float64)
+        else:
+            window = WINDOW_FUNCTIONS.get(window_type, DEFAULT_WINDOW_FN)(L).to(torch.float64)
+
+        # DFT basis over the first L samples (samples L..dft_size-1 are zero -> omitted).
+        n = torch.arange(L,      dtype=torch.float64).unsqueeze(0)   # (1, L)
+        k = torch.arange(f_bins, dtype=torch.float64).unsqueeze(1)   # (f_bins, 1)
+        omega     =  (2.0 * torch.pi / dft_size) * k * n            # (f_bins, L)
+        cos_basis =  torch.cos(omega)                              # (f_bins, L)
+        sin_basis = -torch.sin(omega)                              # (f_bins, L)  (matches stft_B imag sign)
+
+        # Per-frame pre-processing matrix M (L, L): M = diag(window) @ Preemph @ DCremove.
+        eye = torch.eye(L, dtype=torch.float64)
+        dc  = eye - (1.0 / L) if remove_dc else eye                # x - mean(x) = (I - J/L) x
+
+        preemph = eye.clone()
+        if pre_emphasis and pre_emphasis > 0.0:
+            rows = torch.arange(1, L)
+            preemph[rows, rows - 1] = -pre_emphasis                # f[i] -= a * f[i-1]
+            preemph[0, 0]           = 1.0 - pre_emphasis           # replicate pad on f[0]
+
+        M = torch.diag(window) @ preemph @ dc                      # (L, L)
+
+        real_kernel = cos_basis @ M                                # (f_bins, L)
+        imag_kernel = sin_basis @ M                                # (f_bins, L)
+        kernel = torch.cat([real_kernel, imag_kernel], dim=0).unsqueeze(1).to(torch.float32)  # (2*f_bins, 1, L)
+        self.register_buffer('stft_kernel', kernel)
 
     def _build_istft_kernels(self, n_fft, f_bins, window, hop_len, n_frames):
         """Precompute inverse-DFT kernel and window² kernel for COLA normalization."""
