@@ -53,7 +53,6 @@ N_MELS                 = 128        # Number of Mel bands to generate in the Mel
 NFFT_STFT              = 400        # Number of FFT components for the STFT process, edit it carefully.
 WINDOW_LENGTH          = 400        # Length of windowing, edit it carefully.
 HOP_LENGTH             = 160        # Number of samples between successive frames in the STFT, edit it carefully.
-PRE_EMPHASIZE          = 0.97       # For audio preprocessing.
 
 # Model Parameters
 STOP_TOKEN             = [151643, 151645]  # The stop_id in Qwen is "151643" & "151645".
@@ -213,7 +212,7 @@ class QWEN3_ASR_ENCODER(torch.nn.Module):
             max_frames=0,
             window_type=WINDOW_TYPE,
             center_pad=True,
-            pad_mode="constant",
+            pad_mode="reflect",
         ).eval()
 
         mel_filters = torchaudio.functional.melscale_fbanks(
@@ -262,8 +261,6 @@ class QWEN3_ASR_ENCODER(torch.nn.Module):
         self.register_buffer("key_mask_lookup", key_mask_lookup, persistent=False)
         self.register_buffer("valid_mask_float_lookup", valid_mask_float_lookup, persistent=False)
         self.register_buffer("mel_pad_zeros", torch.zeros((1, N_MELS, chunk_size), dtype=torch.int8), persistent=False)
-        self.register_buffer("pre_emph", torch.tensor([PRE_EMPHASIZE], dtype=torch.float32), persistent=False)
-        self.register_buffer("pre_emph_minus", torch.tensor([1.0 - PRE_EMPHASIZE], dtype=torch.float32), persistent=False)
         self.register_buffer("inv_int16", torch.tensor([1.0 / 32768.0], dtype=torch.float32), persistent=False)
 
         with torch.no_grad():
@@ -300,14 +297,13 @@ class QWEN3_ASR_ENCODER(torch.nn.Module):
             absorb_layer_norm_affine(self.audio_tower.ln_post, self.audio_tower.proj1)
 
     def forward(self, audio: Tensor, query_embed: Tensor) -> Tuple[Tensor, Tensor]:
+        # Matches WhisperFeatureExtractor exactly: no pre-emphasis, no mean/DC removal,
+        # reflect-padded STFT, drop the trailing frame (stft[..., :-1]), then slaney log-mel.
         audio = audio.float() * self.inv_int16
-        audio = audio - torch.mean(audio)
-        if self.pre_emph < 1.0:
-            emphasized = audio[..., 1:] - self.pre_emph * audio[..., :-1]
-            first_sample = audio[..., [0]] * self.pre_emph_minus
-            audio = torch.cat([first_sample, emphasized], dim=-1)
         real, imag = self.stft(audio)
-        mel = torch.matmul(self.mel_filters, real * real + imag * imag)
+        real, imag = real[..., :-1], imag[..., :-1]
+        power = real * real + imag * imag
+        mel = torch.matmul(self.mel_filters, power)
         mel = torch.clamp(mel, min=1e-10).log10()
         mel = torch.maximum(mel, mel.amax(dim=(-2, -1), keepdim=True) - 8.0)
         input_features = mel * 0.25 + 1.0
@@ -1262,15 +1258,18 @@ if USE_PENALTY:
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Audio Normaliser ─────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
-def normalise_audio(audio: np.ndarray, target_rms: float = 8192.0) -> np.ndarray:
+def normalise_audio(audio: np.ndarray) -> np.ndarray:
+    # Match the original Qwen3-ASR `float_range_normalize`: peak-normalise only when the
+    # signal exceeds full scale, otherwise leave the samples unchanged (no RMS/loudness
+    # change). For in-range int16 PCM this is a no-op, matching the float [-1, 1] waveform
+    # the reference pipeline feeds to WhisperFeatureExtractor.
     _audio = audio.astype(np.float32)
-    rms = np.sqrt(np.mean(_audio * _audio, dtype=np.float32), dtype=np.float32)
-    if rms > 0:
-        _audio *= (target_rms / (rms + 1e-7))
+    peak = float(np.max(np.abs(_audio)))
+    if peak > 32768.0:
+        _audio *= (32768.0 / peak)
         np.clip(_audio, -32768.0, 32767.0, out=_audio)
         return _audio.astype(np.int16)
-    else:
-        return audio
+    return audio
         
 
 binding_Rotary_Prefill.bind_ortvalue_input(in_name_RP[1], init_history_len_ort)
