@@ -1258,18 +1258,15 @@ if USE_PENALTY:
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Audio Normaliser ─────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
-def normalise_audio(audio: np.ndarray) -> np.ndarray:
-    # Match the original Qwen3-ASR `float_range_normalize`: peak-normalise only when the
-    # signal exceeds full scale, otherwise leave the samples unchanged (no RMS/loudness
-    # change). For in-range int16 PCM this is a no-op, matching the float [-1, 1] waveform
-    # the reference pipeline feeds to WhisperFeatureExtractor.
+def normalise_audio(audio: np.ndarray, target_rms: float = 8192.0) -> np.ndarray:
     _audio = audio.astype(np.float32)
-    peak = float(np.max(np.abs(_audio)))
-    if peak > 32768.0:
-        _audio *= (32768.0 / peak)
+    rms = np.sqrt(np.mean(_audio * _audio, dtype=np.float32), dtype=np.float32)
+    if rms > 0:
+        _audio *= (target_rms / (rms + 1e-7))
         np.clip(_audio, -32768.0, 32767.0, out=_audio)
         return _audio.astype(np.int16)
-    return audio
+    else:
+        return audio
         
 
 binding_Rotary_Prefill.bind_ortvalue_input(in_name_RP[1], init_history_len_ort)
