@@ -74,10 +74,12 @@ for model_name in model_names:
             op_types = ["Gather"]
             quant_axes = [1]
             algorithm = "DEFAULT"  # Fallback to DEFAULT
+            nbits_block_size = 16
         else:
             op_types = ["MatMul"]
             quant_axes = [0]
             algorithm = algorithm_copy
+            nbits_block_size = block_size
 
         # Start Weight-Only Quantize
         model = quant_utils.load_model_with_shape_infer(Path(model_path))
@@ -90,7 +92,7 @@ for model_name in model_names:
         elif algorithm == "HQQ":
             quant_config = matmul_nbits_quantizer.HQQWeightOnlyQuantConfig(
                 bits=bits,
-                block_size=block_size,
+                block_size=nbits_block_size,
                 axis=quant_axes[0],
                 quant_format=quant_utils.QuantFormat.QOperator,
                 op_types_to_quantize=tuple(op_types),
@@ -103,7 +105,7 @@ for model_name in model_names:
             )
         else:
             quant_config = matmul_nbits_quantizer.DefaultWeightOnlyQuantConfig(
-                block_size=block_size,
+                block_size=nbits_block_size,
                 is_symmetric=quant_symmetric,
                 accuracy_level=accuracy_level,
                 quant_format=quant_utils.QuantFormat.QOperator,
@@ -113,7 +115,7 @@ for model_name in model_names:
         quant_config.bits = bits
         quant = matmul_nbits_quantizer.MatMulNBitsQuantizer(
             model,
-            block_size=block_size,
+            block_size=nbits_block_size,
             is_symmetric=quant_symmetric,
             accuracy_level=accuracy_level,
             quant_format=quant_utils.QuantFormat.QOperator,
