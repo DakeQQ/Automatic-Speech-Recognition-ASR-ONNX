@@ -78,7 +78,7 @@ ORT_LOG                = False      # Enable ONNX Runtime logging for debugging.
 ORT_FP16               = False      # Set to True for FP16 ONNX Runtime settings. For CPUs, this requires ARM64-v8.2a or newer.
 MAX_THREADS            = 0          # Parallel CPU threads. Set 0 for auto.
 DEVICE_ID              = 0          # Default to zero.
-OPSET                  = 17         # ONNX Runtime opset version.
+OPSET                  = 23         # ONNX Runtime opset version.
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -644,13 +644,13 @@ class CONCAT_EMBED(torch.nn.Module):
     def __init__(self, embed_tokens: torch.nn.Embedding, tokenizer):
         super().__init__()
         with torch.no_grad():
-            prefix_ids = torch.tensor([tokenizer.encode("language ", add_special_tokens=False)], dtype=torch.int32)
             suffix_ids = torch.tensor([tokenizer.encode("<asr_text>", add_special_tokens=False)], dtype=torch.int32)
-            self.register_buffer("prefix_embed", embed_tokens(prefix_ids).float(), persistent=False)
             self.register_buffer("suffix_embed", embed_tokens(suffix_ids).float(), persistent=False)
 
     def forward(self, codec_embed_0: Tensor, codec_embed_1: Tensor) -> Tensor:
-        concat_embed = torch.cat([codec_embed_0, self.prefix_embed, codec_embed_1, self.suffix_embed], dim=1)
+        # The encoder tail already ends with the "language " prefix, so here we only
+        # append the forced language name followed by the "<asr_text>" tag.
+        concat_embed = torch.cat([codec_embed_0, codec_embed_1, self.suffix_embed], dim=1)
         return concat_embed, concat_embed.shape[1].unsqueeze(0)
 
 
@@ -683,6 +683,10 @@ with torch.inference_mode():
     print(f"  KV dtype: {'float16' if USE_FP16_KV else 'float32'}")
 
     head_ids = [IM_START_TOKEN_ID, SYSTEM_TOKEN_ID, NEWLINE_TOKEN_ID]
+    # The assistant turn is trained to always begin with the "language " prefix.
+    # Baking it into the encoder tail primes the decoder so that even in auto-detect
+    # mode it reliably emits the detected language; a bare "assistant\n" context makes
+    # the quantized decoder degenerate into garbage on the very first token.
     tail_ids = [
         AUDIO_END_TOKEN_ID,
         IM_END_TOKEN_ID,
@@ -690,7 +694,7 @@ with torch.inference_mode():
         IM_START_TOKEN_ID,
         ASSISTANT_TOKEN_ID,
         NEWLINE_TOKEN_ID,
-    ]
+    ] + tokenizer.encode(_LANG_PREFIX, add_special_tokens=False)
     dummy_query_ids = torch.tensor([build_query_prompt_ids(tokenizer, TASK_PROMPTS[0])], dtype=torch.int32)
     dummy_query_embed = model.thinker.model.embed_tokens(dummy_query_ids).float()
 
@@ -1306,7 +1310,8 @@ for prompt in task_prompt_list:
     init_all_outputs_Embed.append(prompt_embed)
 
 # Pre-embed language name prompts (just the name, e.g. "Chinese")
-# The CONCAT_EMBED ONNX model already contains "language " and "<asr_text>" embeddings.
+# The encoder tail already ends with the "language " prefix; CONCAT_EMBED only adds
+# the forced language name and the "<asr_text>" tag.
 init_all_outputs_Lang_Embed: List[Optional[onnxruntime.OrtValue]] = []
 for lang_name in language_prompt_list:
     if lang_name:
@@ -1498,6 +1503,8 @@ for prompt_embed, lang_embed, system_prompt, lang_prompt, test_path in zip(
         decoded_ids = save_id_numpy[:num_decode]
 
     raw_result = tokenizer.decode(decoded_ids, skip_special_tokens=True).strip()
+    if not lang_embed and raw_result:
+        raw_result = _LANG_PREFIX + raw_result  # encoder primed "language "; restore it for parsing
     detected_language, asr_result = parse_asr_output(raw_result)
     t_total = time.time() - t0
     rtf     = t_total / max(audio_len / SAMPLE_RATE, 1e-6)

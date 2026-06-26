@@ -633,6 +633,8 @@ def main() -> None:
 			decoded_ids = save_id_numpy[:num_decode]
 
 		raw_result = tokenizer.decode(decoded_ids, skip_special_tokens=True).strip()
+		if lang_embed is None and raw_result:
+			raw_result = _LANG_PREFIX + raw_result  # restore the primed prefix so the language is parsed
 		detected_language, asr_result = parse_asr_output(raw_result)
 		t_total = time.time() - t0
 		rtf = t_total / max(audio_len / SAMPLE_RATE, 1e-6)
