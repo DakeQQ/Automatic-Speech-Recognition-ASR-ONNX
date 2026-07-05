@@ -26,8 +26,8 @@
 
 | **Model · 模型** | **Variants & Links · 变体与链接** | **Highlights · 亮点** |
 |:---|:---|:---|
-| **SenseVoiceSmall** | [repo](https://github.com/FunAudioLLM/SenseVoice) | - Multilingual, punctuation & emotion <br> - 多语种、标点与情感 |
-| **Whisper Large** | [V3](https://huggingface.co/openai/whisper-large-v3) · [V2](https://huggingface.co/openai/whisper-large-v2) · - Turbo / fine-tunes | Set a target language <br> - 需指定目标语言 |
+| **SenseVoice** | [repo](https://github.com/FunAudioLLM/SenseVoice) | - Multilingual, punctuation & emotion <br> - 多语种、标点与情感 |
+| **Whisper** | [V3](https://huggingface.co/openai/whisper-large-v3) · [V2](https://huggingface.co/openai/whisper-large-v2) · - Turbo / fine-tunes | Set a target language <br> - 需指定目标语言 |
 | **Paraformer** | [Small-ZH](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1) · [Large-ZH](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch) · [Large-EN](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch) · [Streaming-ZH 流式](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online) | - Chinese & English, streaming option <br> - 中英文，支持流式 |
 | **FireRedASR** | [repo](https://github.com/FireRedTeam/FireRedASR) · [repo-2S](https://github.com/FireRedTeam/FireRedASR2S) | - Attention encoder–decoder <br> - 注意力编码器-解码器 |
 | **Dolphin** | [repo](https://github.com/DataoceanAI/Dolphin/tree/main) | - V1 · CN-Dialect 方言 · Streaming 流式 |
