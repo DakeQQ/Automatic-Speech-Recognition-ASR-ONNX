@@ -7,8 +7,6 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX%20Runtime-powered-005CED?logo=onnx&logoColor=white)](https://onnxruntime.ai/)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-![Backends](https://img.shields.io/badge/Backends-CPU_%7C_CUDA_%7C_DirectML_%7C_OpenVINO-success)
 [![Stars](https://img.shields.io/github/stars/DakeQQ/Automatic-Speech-Recognition-ASR-ONNX?style=social)](https://github.com/DakeQQ/Automatic-Speech-Recognition-ASR-ONNX)
 
 </div>
