@@ -28,15 +28,15 @@
 
 | **Model · 模型** | **Variants & Links · 变体与链接** | **Highlights · 亮点** |
 |:---|:---|:---|
-| **SenseVoiceSmall** | [repo](https://github.com/FunAudioLLM/SenseVoice) | Multilingual, punctuation & emotion / 多语种、标点与情感 |
-| **Whisper Large** | [V3](https://huggingface.co/openai/whisper-large-v3) · [V2](https://huggingface.co/openai/whisper-large-v2) · Turbo / fine-tunes | Set a target language / 需指定目标语言 |
-| **Paraformer** | [Small-ZH](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1) · [Large-ZH](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch) · [Large-EN](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch) · [Streaming-ZH 流式](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online) | Chinese & English, streaming option / 中英文，支持流式 |
-| **FireRedASR** | [repo](https://github.com/FireRedTeam/FireRedASR) · [repo-2S](https://github.com/FireRedTeam/FireRedASR2S) | Attention encoder–decoder / 注意力编码器-解码器 |
-| **Dolphin** | [repo](https://github.com/DataoceanAI/Dolphin/tree/main) | V1 · CN-Dialect 方言 · Streaming 流式 |
-| **Fun-ASR-Nano-2512** | [model](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512) | CTC fast head + AR decoder / CTC 快速头 + 自回归解码 |
-| **Qwen3-ASR-0.6B** | [model](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B) | Hot-words + language prompt, greedy / beam search / 热词 + 语言提示，贪心/束搜索 |
-| 🆕 **Qwen3 ForcedAligner-0.6B** | [model](https://www.modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B) | Non-autoregressive word-level timestamps / 非自回归词级时间戳 |
-| 🆕 **X-ASR** | [repo](https://github.com/Gilgamesh-J/X-ASR) | Streaming Zipformer transducer (ZH-EN) / 流式 Zipformer 转录器（中英） |
+| **SenseVoiceSmall** | [repo](https://github.com/FunAudioLLM/SenseVoice) | - Multilingual, punctuation & emotion <br> - 多语种、标点与情感 |
+| **Whisper Large** | [V3](https://huggingface.co/openai/whisper-large-v3) · [V2](https://huggingface.co/openai/whisper-large-v2) · - Turbo / fine-tunes | Set a target language <br> - 需指定目标语言 |
+| **Paraformer** | [Small-ZH](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1) · [Large-ZH](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch) · [Large-EN](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch) · [Streaming-ZH 流式](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online) | - Chinese & English, streaming option <br> - 中英文，支持流式 |
+| **FireRedASR** | [repo](https://github.com/FireRedTeam/FireRedASR) · [repo-2S](https://github.com/FireRedTeam/FireRedASR2S) | - Attention encoder–decoder <br> - 注意力编码器-解码器 |
+| **Dolphin** | [repo](https://github.com/DataoceanAI/Dolphin/tree/main) | - V1 · CN-Dialect 方言 · Streaming 流式 |
+| **Fun-ASR-Nano-2512** | [model](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512) | - CTC fast head + AR decoder <br> - CTC 快速头 + 自回归解码 |
+| **Qwen3-ASR-0.6B** | [model](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B) | - Hot-words + language prompt, greedy / beam search <br> - 热词 + 语言提示，贪心/束搜索 |
+| 🆕 **Qwen3 ForcedAligner-0.6B** | [model](https://www.modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B) | - Non-autoregressive word-level timestamps <br> - 非自回归词级时间戳 |
+| 🆕 **X-ASR** | [repo](https://github.com/Gilgamesh-J/X-ASR) | - Streaming Zipformer transducer (ZH-EN) <br> - 流式 Zipformer 转录器（中英） |
 
 
 ---
