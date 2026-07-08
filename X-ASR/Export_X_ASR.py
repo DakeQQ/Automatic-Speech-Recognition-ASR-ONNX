@@ -1,12 +1,11 @@
 import gc
 import subprocess
+import shutil
 import sys
-import time
 import types
 from contextlib import contextmanager
 from pathlib import Path
 
-import numpy as np
 import onnx
 import torch
 import torch.nn as nn
@@ -759,4 +758,14 @@ def run_exported_inference():
 if __name__ == "__main__":
     print("\n===== X-ASR ONNX export =====")
     export_all()
+    # ── Copy the tokenizer vocab (tokens.txt) into the ONNX folder so the exported folder runs ──
+    # inference stand-alone (no external zipformer data path needed at inference time).
+    for _asset in ("tokens.txt",):
+        _src = Path(TOKENS_TXT)
+        _dst = onnx_folder / _asset
+        try:
+            shutil.copy2(_src, _dst)
+            print(f"[Tokenizer] Copied {_asset} -> {onnx_folder}")
+        except Exception as _exc:  # noqa: BLE001 - a failed copy must not abort the auto demo
+            print(f"[Tokenizer] Skipped {_asset} ({_exc})")
     run_exported_inference()

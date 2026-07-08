@@ -19,9 +19,8 @@ from Example_Audio import model_audio_paths
 # ============================================================================================
 #                                       User configuration
 # ============================================================================================
-# Tokens table that pairs with the exported checkpoint (5000-id lang_5000_with_punctuation).
-# Must match the checkpoint used by Export_X_ASR.py, otherwise the ids decode to garbage symbols.
-TOKENS_TXT    = "/home/DakeQQ/Downloads/X-ASR-main/X-ASR-zh-en/zipformer/data/lang_5000_with_punctuation/tokens.txt"
+# The tokens table (tokens.txt) is bundled inside the ONNX folder by the export / optimize step,
+# so inference is stand-alone (no external zipformer data path needed).
 
 TEST_AUDIO    = model_audio_paths("x_asr")
 PRINT_STREAMING_PARTIALS = True     # Demo mode: print one partial line after every encoded chunk.
@@ -407,7 +406,8 @@ if __name__ == "__main__":
     print("\n===== X-ASR ONNX inference =====")
     print("Loading exported models with IOBinding runtime ...")
     runner = XasrStreamingRunner()
-    token_table = load_tokens(TOKENS_TXT)
+    # The tokens table is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
+    token_table = load_tokens(str(onnx_folder / "tokens.txt"))
     print(f"Providers: {runner.enc.get_providers()}  |  audio_chunk={runner.audio_chunk}  T={runner.T}  states={runner.n_states}")
     print(f"Auto-detected from ONNX: audio_dtype={np.dtype(runner.audio_np_dtype).name}  frame_advance={runner.frame_advance}  "
           f"context_size={runner.context_size}  joiner_dim={runner.joiner_dim}  blank_id={runner.blank_id}")

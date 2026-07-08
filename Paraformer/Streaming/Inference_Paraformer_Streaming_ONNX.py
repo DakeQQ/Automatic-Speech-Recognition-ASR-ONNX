@@ -1,4 +1,3 @@
-import json
 import argparse
 import sys
 import time
@@ -14,9 +13,6 @@ _REPO_ROOT = _SCRIPT_DIR.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from Example_Audio import model_audio_paths
-
-
-tokens_path = "/home/DakeQQ/Downloads/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online/tokens.json"  # The Paraformer tokens download path.
 
 
 def _parse_args():
@@ -222,8 +218,9 @@ def _np_dtype(meta):
     return np.float16 if "float16" in meta.type else np.float32
 
 
-with open(tokens_path, 'r', encoding='UTF-8') as json_file:
-    tokenizer = np.array(json.load(json_file), dtype=np.str_)
+# The vocab list is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
+with open(onnx_folder / "Vocab_Paraformer.txt", 'r', encoding='UTF-8') as vocab_file:
+    tokenizer = np.array([_line.rstrip('\n') for _line in vocab_file], dtype=np.str_)
 
 
 ort_session_Metadata = _make_session(onnx_model_Metadata)

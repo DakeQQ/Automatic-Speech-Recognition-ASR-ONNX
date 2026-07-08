@@ -26,7 +26,6 @@ def _parse_args():
 _ARGS = _parse_args()
 
 
-model_path             = "/home/DakeQQ/Downloads/dolphin-small"                                    # The dolphin project download path. Currently, only support dolphin-small and dolphin-base.
 onnx_folder            = os.path.abspath(_ARGS.onnx_folder)                          # Selected ONNX graph folder.
 onnx_model_Metadata    = os.path.join(onnx_folder, "Dolphin_Metadata.onnx")                      # Tiny metadata carrier graph.
 onnx_model_Encoder     = os.path.join(onnx_folder, "Dolphin_Encoder.onnx")                       # The exported onnx encoder model path.
@@ -588,7 +587,7 @@ out_name_Decode_position = out_name_Decode[0]
 out_name_Decode_kv_seq_len = out_name_Decode[1]
 binding_Decode = ort_session_Decode.io_binding()
 
-tokenizer = Tokenizer(save_vocab, os.path.join(model_path, "bpe.model"))
+tokenizer = Tokenizer(save_vocab, os.path.join(onnx_folder, "bpe.model"))
 
 # ---- Decoding-strategy resolution ----
 if USE_BEAM_SEARCH and (TOP_K < BEAM_SIZE):

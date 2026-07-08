@@ -52,7 +52,6 @@ def _parse_args() -> argparse.Namespace:
 
 _ARGS = _parse_args()
 
-download_path          = r'/home/DakeQQ/Downloads/Qwen3-ForcedAligner-0.6B'  # Local Qwen3-ForcedAligner-0.6B directory (used for the tokenizer).
 onnx_folder            = _ARGS.onnx_folder.expanduser().resolve()          # Selected ONNX graph folder.
 onnx_model_Metadata    = str(onnx_folder / "ForcedAligner_Metadata.onnx")
 onnx_model_Embed       = str(onnx_folder / "ForcedAligner_Embed.onnx")
@@ -422,7 +421,8 @@ def _out_names(session):
 # ── Inference Demo (single NAR forward per sample) ────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 def run_inference() -> None:
-    tokenizer         = AutoTokenizer.from_pretrained(download_path, trust_remote_code=True)
+    # The tokenizer is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
+    tokenizer         = AutoTokenizer.from_pretrained(str(onnx_folder / "tokenizer"), trust_remote_code=True)
     aligner_processor = AlignerTextProcessor()
 
     print("Loading sessions …")

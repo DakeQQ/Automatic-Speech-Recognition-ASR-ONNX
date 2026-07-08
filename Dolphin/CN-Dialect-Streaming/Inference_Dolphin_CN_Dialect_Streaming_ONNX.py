@@ -22,9 +22,8 @@ def _parse_args():
 _ARGS = _parse_args()
 
 
-model_path             = "/home/DakeQQ/Downloads/dolphin-cn-dialect-small-streaming"                                # The Dolphin-CN-Dialect streaming project download path (small.cn.streaming).
-save_vocab             = os.path.join(_SCRIPT_DIR, "Dolphin_CN_Dialect_Streaming_ONNX", "vocab_Dolphin_CN_Dialect.txt")    # The exported Dolphin-CN-Dialect vocab path.
 onnx_folder            = os.path.abspath(_ARGS.onnx_folder)                          # Selected ONNX graph folder.
+save_vocab             = os.path.join(onnx_folder, "vocab_Dolphin_CN_Dialect.txt")    # The exported Dolphin-CN-Dialect vocab path.
 onnx_model_Metadata    = os.path.join(onnx_folder, "Dolphin_Metadata.onnx")                             # Tiny metadata carrier graph.
 onnx_model_Encoder     = os.path.join(onnx_folder, "Dolphin_Encoder.onnx")                              # The exported onnx encoder model path.
 onnx_model_Decoder     = os.path.join(onnx_folder, "Dolphin_Decoder.onnx")                              # The exported onnx decoder (main, pure-float) model path.
@@ -299,6 +298,8 @@ def _meta_int_list(key):
 SAMPLE_RATE = _meta_int("sample_rate")
 METADATA_INPUT_AUDIO_LENGTH = _meta_int("input_audio_length")
 STREAM_CHUNK_FRAMES = _meta_int("stream_chunk_frames")
+SUBSAMPLING_FACTOR = _meta_int("subsampling_factor")
+SUBSAMPLING_CONTEXT = _meta_int("subsampling_context")
 HOP_LENGTH = _meta_int("hop_length")
 WINDOW_LENGTH = _meta_int("window_length")
 SOS_TOKEN = _meta_int("sos_token_id")
@@ -324,8 +325,8 @@ num_cross = len(out_name_Encoder) - 3 * num_layer_en - 1           # cross K/V o
 num_cross_layers = num_cross // 2                                  # NUM_LAYER_DE
 en_att_shape = (ort_session_Encoder._outputs_meta[num_cross].shape[0], ort_session_Encoder._inputs_meta[1].shape[2])  # (heads, d_k)
 csgu_shape = (ort_session_Encoder._inputs_meta[1 + 2 * num_layer_en].shape[1], ort_session_Encoder._inputs_meta[1 + 2 * num_layer_en].shape[2])
-stream_window_samples = (((STREAM_CHUNK_FRAMES - 1) * 4 + 7) - 1) * HOP_LENGTH + WINDOW_LENGTH
-stream_stride_samples = STREAM_CHUNK_FRAMES * 4 * HOP_LENGTH
+stream_window_samples = (((STREAM_CHUNK_FRAMES - 1) * SUBSAMPLING_FACTOR + SUBSAMPLING_CONTEXT) - 1) * HOP_LENGTH + WINDOW_LENGTH
+stream_stride_samples = STREAM_CHUNK_FRAMES * SUBSAMPLING_FACTOR * HOP_LENGTH
 
 ort_session_Decoder = _make_session(onnx_model_Decoder)
 in_name_Decoder = _in_names(ort_session_Decoder)
@@ -385,7 +386,7 @@ binding_Argmax = ort_session_Argmax.io_binding()
 in_name_Argmax_logits = in_name_Argmax[0]
 out_name_Argmax_max = out_name_Argmax[0]
 
-# ---- Fixed shared buffers (sized from model meta; the audio window is a fresh OrtValue per window) ----
+# ---- Fixed shared buffers (sized from model meta; the audio window reuses a per-clip buffer, except the short tail) ----
 # Dolphin-CN-Dialect-Streaming is an auto-detect model: the decode prefix is just [sos] and the model
 # auto-generates [lang, region, asr, notimestamp, text..., eos]. No prompt hotwords / forced language passes.
 history_len_ort = _ort_from_data([0], np.int64)                    # history_len = 0 (each prefill starts fresh).
@@ -473,26 +474,36 @@ for test in test_audio:
     text = ""
     lang_str = region_str = "?"
     n_text = 0
-    # Encoder caches grow chunk by chunk (dolphin forward_chunk: per-layer K/V + csgu conv, decode once on the running enc out).
-    att_k = [np.zeros((en_att_shape[0], 0, en_att_shape[1]), dtype=en_cache_dtype) for _ in range(num_layer_en)]
-    att_v = [np.zeros((en_att_shape[0], 0, en_att_shape[1]), dtype=en_cache_dtype) for _ in range(num_layer_en)]
-    cnn_c = [np.zeros((1, csgu_shape[0], csgu_shape[1]), dtype=en_cache_dtype) for _ in range(num_layer_en)]
+    # Encoder self-caches (att K/V grow all-history; the csgu cnn state is a fixed lorder window) live ON-DEVICE
+    # and are chained output->input each chunk (Nemotron / Paraformer-Streaming IOBinding pattern), so they never
+    # round-trip through host. Only the per-chunk cross-attn K/V and CTC ids are copied to host (accumulated / collapsed).
+    att_k_ort = [_ort_zeros((en_att_shape[0], 0, en_att_shape[1]), en_cache_dtype) for _ in range(num_layer_en)]
+    att_v_ort = [_ort_zeros((en_att_shape[0], 0, en_att_shape[1]), en_cache_dtype) for _ in range(num_layer_en)]
+    cnn_ort = [_ort_zeros((1, csgu_shape[0], csgu_shape[1]), en_cache_dtype) for _ in range(num_layer_en)]
     cross_k = [None] * num_cross_layers                                  # accumulated cross-attn key  (h, d, T)
     cross_v = [None] * num_cross_layers                                  # accumulated cross-attn value (h, T, d)
     ctc_ids_all = []                                                      # all CTC frame ids so far (for stable partial text)
     chunk_ends = list(range(stream_window_samples, INPUT_AUDIO_LENGTH, stream_stride_samples)) + [INPUT_AUDIO_LENGTH]
     win_start = 0
+    # Reuse one pre-allocated buffer for every full-width streaming window (update_inplace keeps the bound
+    # encoder input zero-copy); only the short tail window (< stream_window_samples) needs a one-off OrtValue.
+    en_audio_buffer = _ort_zeros((1, 1, stream_window_samples), audio.dtype)
     # Start to run Dolphin-CN-Dialect-Streaming
     start_time = time.time()
     for chunk_no, slice_end in enumerate(chunk_ends):
         is_final_chunk = chunk_no == len(chunk_ends) - 1
         # ---- Encoder: ONE chunk; per-layer K/V + csgu caches carry history so this is O(N), not a full re-run ----
-        en_audio = _ort_from_numpy(np.ascontiguousarray(audio[:, :, win_start: slice_end]))
+        en_chunk = np.ascontiguousarray(audio[:, :, win_start: slice_end])
         win_start += stream_stride_samples
+        if en_chunk.shape[-1] == stream_window_samples:
+            en_audio_buffer.update_inplace(en_chunk)                        # full-width window: refresh the shared buffer in place.
+            en_audio = en_audio_buffer
+        else:
+            en_audio = _ort_from_numpy(en_chunk)                           # short tail window (variable length): one-off OrtValue.
         _bind_inputs(binding_Encoder, [in_name_Encoder0], [en_audio])
-        _bind_inputs(binding_Encoder, en_att_k_in, [_ort_from_numpy(c) for c in att_k])
-        _bind_inputs(binding_Encoder, en_att_v_in, [_ort_from_numpy(c) for c in att_v])
-        _bind_inputs(binding_Encoder, en_cnn_in, [_ort_from_numpy(c) for c in cnn_c])
+        _bind_inputs(binding_Encoder, en_att_k_in, att_k_ort)
+        _bind_inputs(binding_Encoder, en_att_v_in, att_v_ort)
+        _bind_inputs(binding_Encoder, en_cnn_in, cnn_ort)
         _bind_device_outputs(binding_Encoder, out_name_Encoder)
         _run(ort_session_Encoder, binding_Encoder)
         en_out = binding_Encoder.get_outputs()
@@ -501,9 +512,11 @@ for test in test_audio:
             cv = en_out[num_cross_layers + i].numpy()
             cross_k[i] = ck if cross_k[i] is None else np.concatenate((cross_k[i], ck), axis=2)
             cross_v[i] = cv if cross_v[i] is None else np.concatenate((cross_v[i], cv), axis=1)
-        att_k = [en_out[num_cross + j].numpy() for j in range(num_layer_en)]
-        att_v = [en_out[num_cross + num_layer_en + j].numpy() for j in range(num_layer_en)]
-        cnn_c = [en_out[num_cross + 2 * num_layer_en + j].numpy() for j in range(num_layer_en)]
+        # Chain the self-caches on-device: keep the fresh output OrtValues (the io_binding holds them alive) and feed
+        # them straight into the next chunk's inputs, replacing the old device->host (.numpy) -> device (_ort_from_numpy) hop.
+        att_k_ort = en_out[num_cross: num_cross + num_layer_en]
+        att_v_ort = en_out[num_cross + num_layer_en: num_cross + 2 * num_layer_en]
+        cnn_ort = en_out[num_cross + 2 * num_layer_en: num_cross + 3 * num_layer_en]
 
         # ---- Stable streaming partial: CTC greedy collapse over all frames so far (cheap, monotonic, no re-decode) ----
         ctc_ids_all.extend(en_out[-1].numpy()[0].tolist())

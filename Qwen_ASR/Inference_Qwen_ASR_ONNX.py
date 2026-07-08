@@ -28,7 +28,6 @@ def _parse_args() -> argparse.Namespace:
 
 _ARGS = _parse_args()
 
-download_path                  = r'/home/DakeQQ/Downloads/Qwen3-ASR-0.6B'                     # Set the path where the Qwen3-ASR-[0.6B, 1.7B] model downloaded.
 onnx_folder                    = _ARGS.onnx_folder.expanduser().resolve()                   # Selected ONNX graph folder.
 onnx_model_Metadata            = str(onnx_folder / "Qwen3_ASR_Metadata.onnx")               # Tiny metadata carrier graph.
 onnx_model_Encoder             = str(onnx_folder / "Qwen3_ASR_Encoder.onnx")                # The exported onnx model path.
@@ -287,7 +286,8 @@ def _out_names(session) -> List[str]:
 def main() -> None:
 	print("Starting ONNX Runtime inference ...\n")
 	print("Loading tokenizer ...")
-	tokenizer = AutoTokenizer.from_pretrained(download_path, trust_remote_code=True)
+	# The tokenizer is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
+	tokenizer = AutoTokenizer.from_pretrained(str(onnx_folder / "tokenizer"), trust_remote_code=True)
 
 	print("Loading sessions ...")
 	ort_session_Metadata = _make_session(onnx_model_Metadata)

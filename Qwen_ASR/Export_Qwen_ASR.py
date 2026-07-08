@@ -1,7 +1,6 @@
 import gc
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
@@ -25,7 +24,7 @@ from STFT_Process import STFT_Process
 # ══════════════════════════════════════════════════════════════════════════════
 # Paths
 # ══════════════════════════════════════════════════════════════════════════════
-download_path                  = r'/home/DakeQQ/Downloads/Qwen3-ASR-0.6B'                     # Set the path where the Qwen3-ASR-[0.6B, 1.7B] model downloaded.
+download_path                  = r'/home/DakeQQ/Downloads/Qwen3-ASR-0.6B'                   # Set the path where the Qwen3-ASR-[0.6B, 1.7B] model downloaded.
 onnx_folder                    = Path(__file__).resolve().parent / "Qwen_ASR_ONNX"          # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
 onnx_folder.mkdir(parents=True, exist_ok=True)
 onnx_model_Metadata            = str(onnx_folder / "Qwen3_ASR_Metadata.onnx")               # Tiny metadata carrier graph.
@@ -56,6 +55,7 @@ HOP_LENGTH                     = 160                           # Number of sampl
 STOP_TOKEN                     = [151643, 151645]              # The stop_id in Qwen is "151643" & "151645".
 MAX_SEQ_LEN                    = 1024                          # The max context length, including prompt + audio + decode tokens.
 USE_FP16_KV                    = True                          # Use fp16 KV cache for memory efficiency.
+COMPUTE_IN_F32                 = False                         # F16-KV compute precision. False = minimum-cast f16 attention (Q@K/mask/softmax/attn@V all run in f16 on the f16 KV cache; storage AND compute f16). True = keep the f16 KV *storage* (cache I/O dtype unchanged) but upcast K/V to f32 at the matmul use points and keep Q/mask/softmax in f32 (f16 storage, f32 compute). No effect when USE_FP16_KV=False.
 INPUT_AUDIO_DTYPE              = "INT16"                       # Model audio input dtype: "INT16", "F32", or "F16". "INT16" feeds raw PCM (÷32768 inside the graph). "F32"/"F16" feed audio already normalised to [-1, 1] (the in-graph ÷32768 is skipped); "F16" is cast up to f32 for compute.
 
 # Input & Processing Limits
@@ -808,8 +808,10 @@ class QWEN3_ASR_ENCODER(torch.nn.Module):
 class QWEN3_ASR_ROTARY_MASK_PREFILL(torch.nn.Module):
     def __init__(self, llm: torch.nn.Module, max_seq_len: int) -> None:
         super().__init__()
-        # Mask dtype tracks the attention-compute dtype: float16 for the minimum-cast f16 KV attention,
-        # float32 otherwise. It is added to the (f16 or f32) attention scores in QWEN3_ASR_DECODER_MAIN.
+        # Mask dtype = the KV-cache dtype, so the exported mask I/O dtype is stable: float16 with the f16 KV
+        # cache, float32 with a float32 KV cache. It is deliberately NOT gated on COMPUTE_IN_F32 -- in the
+        # f16-storage / f32-compute path the decoder upcasts this f16 mask to f32 INTERNALLY (the mask I/O
+        # dtype, and the inference runtime, stay unchanged). Added to the attention scores in QWEN3_ASR_DECODER_MAIN.
         self.mask_dtype = torch.float16 if USE_FP16_KV else torch.float32
         self.register_buffer("attention_mask", (1.0 - torch.tril(torch.ones(1, 1, 1, max_seq_len, max_seq_len, dtype=torch.int8))) * -128, persistent=False)
         cos, sin = self._build_rotary_table(llm, max_seq_len)
@@ -924,6 +926,7 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
         self.qk_heads       = num_heads + num_kv_heads   # total heads before split
         self.num_layers     = num_layers
         self.use_fp16_kv    = USE_FP16_KV
+        self.compute_in_f32 = COMPUTE_IN_F32
 
         # RMS norm is emitted as ORT's fused SimplifiedLayerNormalization (default ONNX domain): it computes
         # y = x * rsqrt(mean(x^2) + eps) * scale and reduces in float32 (stash_type=1). Feeding scale = 1/sqrt(N)
@@ -1067,6 +1070,10 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
         rotary_sin     = all_inputs[-2]
         attention_mask = all_inputs[-1]
         batch_size     = hidden_states.shape[0]
+        # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
+        # dtype unchanged) and upcast to f32 ONCE here, shared by every layer (principle: cast loop-invariant
+        # constants once). In every other mode it is used as-is (f16 minimum-cast, or f32 for a float32 cache).
+        attn_mask = attention_mask.float() if (self.use_fp16_kv and self.compute_in_f32) else attention_mask
         for i, layer in enumerate(self.llm.layers):
             residual = hidden_states
             hidden_states = self._rms_norm(hidden_states, self.hidden_norm_scale, self.hidden_rms_norm_eps)
@@ -1075,27 +1082,36 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
             qk, v = torch.split(qkv, [self.qk_heads, self.num_kv_heads], dim=-2)
             qk = self._rms_norm(qk, self.qk_norm_scale, self.qk_rms_norm_eps) * layer.self_attn.qk_norm_weight
             qk_rot = qk * rotary_cos + self._rotate_half(qk, batch_size) * rotary_sin
+            # Minimum-cast float16 KV attention: cast qk_rot (and V) DOWN to f16 before the split (the K/V
+            # cache is f16), so Q@K, the mask Add, Softmax and attn@V all run in float16; only the context is
+            # cast back to f32 for o_proj (after the dtype-agnostic Transpose/Reshape). A float32 KV cache
+            # keeps the plain float32 attention.
+            # COMPUTE_IN_F32: keep the f16 KV *storage* (K/V are still cast to f16 before the cache concat, so
+            # the exported cache I/O dtype is unchanged) but upcast the f16 K/V to f32 at the matmul use points
+            # and keep Q/mask/softmax in f32 -- i.e. f16 storage, f32 compute. Q is never downcast.
+            if self.use_fp16_kv and not self.compute_in_f32:
+                qk_rot = qk_rot.half()
             q, k = torch.split(qk_rot, [self.num_heads, self.num_kv_heads], dim=-2)
-            # Minimum-cast float16 KV attention: cast q DOWN to f16 (K/V already f16), run Q@K, the mask Add,
-            # Softmax and attn@V all in float16, then cast only the context back to f32 for o_proj (after the
-            # dtype-agnostic Transpose/Reshape). A float32 KV cache keeps the plain float32 attention.
             if self.use_fp16_kv:
-                q = q.half()
-                k = k.half().permute(0, 3, 2, 4, 1)
-                v = v.half().transpose(1, 3)
-            else:
-                k = k.permute(0, 3, 2, 4, 1)
-                v = v.transpose(1, 3)
+                k = k.half()   # f16 KV storage (no-op in the minimum-cast path: qk_rot is already f16)
+                v = v.half()
+            k = k.permute(0, 3, 2, 4, 1)
+            v = v.transpose(1, 3)
             q = q.reshape(batch_size, -1, self.num_kv_heads, self.num_kv_groups, self.head_dim).permute(0, 2, 3, 1, 4)
             k = torch.cat((all_inputs[i],                   k), dim=-1)
             v = torch.cat((all_inputs[i + self.num_layers], v), dim=-2)
             self.save_key[i]   = k
             self.save_value[i] = v
-            attn = torch.matmul(q, k) + attention_mask
-            attn = torch.softmax(attn, dim=-1)
-            attn = torch.matmul(attn, v)
+            if self.use_fp16_kv and self.compute_in_f32:
+                attn = torch.matmul(q, k.float()) + attn_mask
+                attn = torch.softmax(attn, dim=-1)
+                attn = torch.matmul(attn, v.float())
+            else:
+                attn = torch.matmul(q, k) + attn_mask
+                attn = torch.softmax(attn, dim=-1)
+                attn = torch.matmul(attn, v)
             attn = attn.permute(0, 3, 1, 2, 4).reshape(batch_size, -1, layer.self_attn.o_proj.in_features)
-            if self.use_fp16_kv:
+            if self.use_fp16_kv and not self.compute_in_f32:
                 attn = attn.float()
             hidden_states = residual + layer.self_attn.o_proj(attn)
             residual = hidden_states
@@ -1549,6 +1565,7 @@ with torch.inference_mode():
             "stop_token_ids": STOP_TOKEN,
             "activations_fp16": False,
             "use_fp16_kv": USE_FP16_KV,
+            "compute_in_f32": COMPUTE_IN_F32,
             "kv_dtype": "float16" if USE_FP16_KV else "float32",
             "kv_blocks_per_layer": len(kv_specs),
             "kv_num_tensors": num_layers * len(kv_specs),
@@ -1618,6 +1635,15 @@ with torch.inference_mode():
     print(f"\n[Metadata] Stamped {len(onnx_metadata)} keys into {len(written)} ONNX graph(s):")
     for key in sorted(onnx_metadata):
         print(f"    {key} = {onnx_metadata[key]}")
+
+    # ── Save the tokenizer into the ONNX folder so the exported folder runs inference ──
+    # stand-alone (no external Qwen3-ASR model path needed at inference time).
+    try:
+        _tokenizer_dir = onnx_folder / "tokenizer"
+        tokenizer.save_pretrained(str(_tokenizer_dir))
+        print(f"[Tokenizer] Saved tokenizer -> {_tokenizer_dir}")
+    except Exception as _exc:  # noqa: BLE001 - a failed save must not abort the auto demo
+        print(f"[Tokenizer] Skipped tokenizer bundle ({_exc})")
 
 print("\nExport complete.\n")
 print("─" * 70)

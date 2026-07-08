@@ -1,6 +1,7 @@
 """Optimize & quantize the exported FireRedASR-AED ONNX modules."""
 
 from pathlib import Path
+import shutil
 import sys
 
 
@@ -76,3 +77,18 @@ CONFIG = OptimizerConfig(
 
 if __name__ == "__main__":
     run_optimizer(CONFIG)
+
+    # ── Move the tokenizer assets (vocab + BPE model) from the export folder to the optimized folder
+    # so the optimized folder (the default inference target) runs inference stand-alone. ──
+    _optimized_dir = Path(OPTIMIZED_FOLDER_PATH)
+    for _asset in ("dict.txt", "train_bpe1000.model"):
+        _src = Path(ORIGINAL_FOLDER_PATH) / _asset
+        if not _src.exists():
+            print(f"[Tokenizer] Skipped {_asset} (not found in {ORIGINAL_FOLDER_PATH})")
+            continue
+        try:
+            _optimized_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(_src), str(_optimized_dir / _asset))
+            print(f"[Tokenizer] Moved {_asset} -> {OPTIMIZED_FOLDER_PATH}")
+        except Exception as _exc:  # noqa: BLE001
+            print(f"[Tokenizer] Skipped {_asset} ({_exc})")

@@ -70,7 +70,7 @@ CONFIG = OptimizerConfig(
     optimizer_level=2,
     optimizer_only_onnxruntime=USE_OPENVINO,
     f16_op_block_list=F16_OP_BLOCK_LIST,
-    copy_artifacts=("vocab_Dolphin.txt",),
+    copy_artifacts=("vocab_Dolphin.txt", "bpe.model"),
 )
 
 

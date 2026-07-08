@@ -1,10 +1,9 @@
 import gc
 import subprocess
+import shutil
 import sys
-import time
 from pathlib import Path
 
-import numpy as np
 import torch
 import torchaudio.compliance.kaldi as kaldi  # Used at export time to bake Kaldi's exact triangular mel filterbank as a constant.
 from funasr import AutoModel
@@ -322,6 +321,18 @@ with torch.inference_mode():
     del CMVN_VARS
     del CMVN_MEANS
     gc.collect()
+
+# ── Copy the SentencePiece tokenizer model into the ONNX folder so the exported folder runs ──
+# inference stand-alone (no external SenseVoice download path needed at inference time).
+for _asset in ("chn_jpn_yue_eng_ko_spectok.bpe.model",):
+    _src = Path(model_path) / _asset
+    _dst = onnx_folder / _asset
+    try:
+        shutil.copy2(_src, _dst)
+        print(f"[Tokenizer] Copied {_asset} -> {onnx_folder}")
+    except Exception as _exc:  # noqa: BLE001 - a failed copy must not abort the auto demo
+        print(f"[Tokenizer] Skipped {_asset} ({_exc})")
+
 print('\nExport done!\n')
 print('Running ONNX Runtime demo via Inference_SenseVoice_ONNX.py ...')
 subprocess.run(

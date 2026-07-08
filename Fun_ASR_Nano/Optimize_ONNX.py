@@ -1,6 +1,7 @@
 """Optimize & quantize the exported FunASR Nano ONNX modules."""
 
 from pathlib import Path
+import shutil
 import sys
 
 
@@ -83,3 +84,20 @@ CONFIG = OptimizerConfig(
 
 if __name__ == "__main__":
     run_optimizer(CONFIG)
+
+    # Mirror the bundled tokenizer assets from the exported folder into the optimized folder so
+    # the optimized model set also runs stand-alone (Inference_Fun_ASR_Nano_ONNX.py loads the
+    # tokenizer from its selected ONNX folder).
+    _src_folder = Path(ORIGINAL_FOLDER_PATH)
+    _dst_folder = Path(OPTIMIZED_FOLDER_PATH)
+    for _asset in ("Qwen3-0.6B", "multilingual.tiktoken"):
+        _asset_src = _src_folder / _asset
+        try:
+            if _asset_src.is_dir():
+                shutil.copytree(_asset_src, _dst_folder / _asset, dirs_exist_ok=True)
+                print(f"[Tokenizer] Copied {_asset} -> {_dst_folder / _asset}")
+            elif _asset_src.is_file():
+                shutil.copyfile(_asset_src, _dst_folder / _asset)
+                print(f"[Tokenizer] Copied {_asset} -> {_dst_folder / _asset}")
+        except Exception as _exc:  # noqa: BLE001 - a failed asset copy must not fail optimization
+            print(f"[Tokenizer] Skipped {_asset} ({_exc}).")

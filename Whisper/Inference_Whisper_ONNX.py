@@ -20,7 +20,6 @@ def _parse_args():
 
 _ARGS = _parse_args()
 
-model_path                = "/home/DakeQQ/Downloads/whisper-large-v3-turbo"                               # Whisper model folder (tokenizer + generation/feature config).
 onnx_folder               = os.path.abspath(_ARGS.onnx_folder)   # Selected ONNX graph folder.
 onnx_model_Metadata       = os.path.join(onnx_folder, "Whisper_Metadata.onnx")
 onnx_model_Encoder        = os.path.join(onnx_folder, "Whisper_Encoder.onnx")               # The exported onnx model paths.
@@ -110,16 +109,10 @@ def prepare_audio_input(audio_int16: np.ndarray, input_audio_dtype: str, target_
 # ============================================================================
 # Load tokenizer / generation config / feature extractor and derive constants
 # ============================================================================
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-generation_config = GenerationConfig.from_pretrained(model_path)
-
-model_path_lower = model_path.lower()
-if ("v3" in model_path_lower) or ("crisperwhisper" in model_path_lower) or ("anime" in model_path_lower) or ("belle" in model_path_lower) or ("turbo" in model_path_lower) or ("distil" in model_path_lower):
-    is_v3 = True
-    custom_vocab = 'v0.3' in model_path_lower
-else:
-    is_v3 = False
-    custom_vocab = False
+# The tokenizer + generation config are bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
+_tokenizer_dir = os.path.join(onnx_folder, "tokenizer")
+tokenizer = AutoTokenizer.from_pretrained(_tokenizer_dir)
+generation_config = GenerationConfig.from_pretrained(_tokenizer_dir)
 
 no_timestamps_id = int(getattr(generation_config, "no_timestamps_token_id", tokenizer.convert_tokens_to_ids("<|notimestamps|>")))    # 50364 (v3): selects non-timestamp transcription.
 begin_suppress_token_ids = tuple(int(token_id) for token_id in (getattr(generation_config, "begin_suppress_tokens", None) or ()))

@@ -3,16 +3,13 @@ import subprocess
 import sys
 import os
 import copy
-import time
 import torch
 import dolphin
-import torchaudio
 import torchaudio.compliance.kaldi as kaldi   # Used at export time to bake Kaldi's exact triangular mel filterbank as a constant.
-import numpy as np
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-model_path             = "/home/DakeQQ/Downloads/dolphin-cn-dialect-small-streaming"                                       # The Dolphin-CN-Dialect streaming project download path (small.cn.streaming).
+model_path             = "/home/DakeQQ/Downloads/dolphin-cn-dialect-small-streaming"                                     # The Dolphin-CN-Dialect streaming project download path (small.cn.streaming).
 onnx_folder            = os.path.join(_SCRIPT_DIR, "Dolphin_CN_Dialect_Streaming_ONNX")                                  # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
 os.makedirs(onnx_folder, exist_ok=True)
 onnx_model_Metadata    = os.path.join(onnx_folder, "Dolphin_Metadata.onnx")                                              # Tiny metadata carrier graph.
@@ -28,6 +25,8 @@ save_vocab             = os.path.join(onnx_folder, "vocab_Dolphin_CN_Dialect.txt
 
 INPUT_AUDIO_LENGTH = 480000     # The maximum input audio length. Must less than 480000 (30 seconds).
 STREAM_CHUNK_FRAMES = 16        # Encoder-frame chunk for streaming (16 frames * 4 subsample * 10ms = 640ms latency). Big -> non-streaming.
+SUBSAMPLING_FACTOR = 4          # Conv2dSubsampling4 time-subsampling ratio (mel frames per emitted encoder frame).
+SUBSAMPLING_CONTEXT = 7         # Conv2dSubsampling4 receptive field: mel frames needed to emit one encoder frame.
 MAX_SEQ_LEN        = 448        # It should less than 5000 (the decoder positional-encoding table length).
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # ---- Kaldi fbank front-end parameters (Dolphin-CN-Dialect has NO frontend_conf: dolphin.processor.extract_feats calls torchaudio.compliance.kaldi.fbank) ----
@@ -56,6 +55,7 @@ NOTIMESTAMP     = 109           # <notimestamp>
 LANG_SYM        = ""            # Force the language, e.g. "zh"/"en". Leave "" to auto-detect. Requires REGION_SYM too; otherwise auto-detect is used.
 REGION_SYM      = ""            # Force the region, e.g. "CN"/"TW"/"SHANGHAI". Leave "" to auto-detect. Both LANG_SYM and REGION_SYM must be set to skip detection.
 STOP_TOKEN      = [EOS_TOKEN]   # 3 is the end token for Dolphin-CN-Dialect.
+COMPUTE_IN_F32  = False         # F16 KV-cache compute precision. False = minimum-cast f16 attention (streaming-encoder self-attn + decoder self/cross Q@K/mask/softmax/attn@V run in f16 on the f16 caches; the context is cast back to f32). True = keep the f16 cache *storage* (cache I/O dtype unchanged) but upcast K/V (and the mask, internally) to f32 at the attention use points, keeping Q/softmax in f32 (f16 storage, f32 compute).
 OPSET           = 18            # ONNX opset version for the export.
 
 
@@ -192,6 +192,7 @@ class DOLPHIN_ENCODER(torch.nn.Module):
 
         # Encoder components
         self.num_layers_en = len(self.dolphin.encoder.encoders)
+        self.compute_in_f32 = COMPUTE_IN_F32
         self.csgu_channels = self.dolphin.encoder.encoders._modules['0'].cgmlp.csgu.conv.in_channels
         self.ctc_lo = self.dolphin.ctc.ctc_lo                        # CTC head for stable, frame-synchronous streaming partials
         self.embed = self.dolphin.encoder.embed.out[0]               # Conv2dSubsampling4 projection (Linear 14592 -> 768)
@@ -289,14 +290,24 @@ class DOLPHIN_ENCODER(torch.nn.Module):
             x1 = encoder_layer.norm_mha(x)
             qkv = encoder_layer.attn.qkv(x1).view(-1, 3 * self.num_heads, self.head_dim).transpose(0, 1)
             q, k, v = qkv.split(self.num_heads, dim=0)
-            k = torch.cat([att_k_cache[idx], k.half()], dim=1)                  # prepend history keys
-            v = torch.cat([att_v_cache[idx], v.half()], dim=1)                  # prepend history values
+            k = torch.cat([att_k_cache[idx], k.half()], dim=1)                  # prepend history keys (f16 cache)
+            v = torch.cat([att_v_cache[idx], v.half()], dim=1)                  # prepend history values (f16 cache)
             new_att_k.append(k)
             new_att_v.append(v)
             p = pos_p[idx]
-            matrix_ac = torch.matmul(q + encoder_layer.attn.pos_bias_u, k.transpose(1, 2).float())
-            matrix_bd = torch.matmul(q + encoder_layer.attn.pos_bias_v, p)       # rel_pos + use_sdpa: NO rel_shift
-            x1 = torch.matmul(torch.softmax(matrix_ac + matrix_bd, dim=-1), v.float())
+            # Streaming encoder self-attention over the f16 K/V history cache. COMPUTE_IN_F32 (ON): keep the f16
+            # cache *storage* (k/v are cast to f16 before the concat above, so the cache I/O dtype is unchanged)
+            # but upcast K/V to f32 at the matmul use points (Q/p/pos_bias stay f32). OFF (minimum-cast): downcast
+            # the small non-stored operands (q+pos_bias, p) to f16 and run the attention in f16 on the f16 cache;
+            # the context is cast back to f32 for linear_out.
+            if self.compute_in_f32:
+                matrix_ac = torch.matmul(q + encoder_layer.attn.pos_bias_u, k.transpose(1, 2).float())
+                matrix_bd = torch.matmul(q + encoder_layer.attn.pos_bias_v, p)       # rel_pos + use_sdpa: NO rel_shift
+                x1 = torch.matmul(torch.softmax(matrix_ac + matrix_bd, dim=-1), v.float())
+            else:
+                matrix_ac = torch.matmul((q + encoder_layer.attn.pos_bias_u).half(), k.transpose(1, 2))
+                matrix_bd = torch.matmul((q + encoder_layer.attn.pos_bias_v).half(), p.half())  # rel_pos + use_sdpa: NO rel_shift
+                x1 = torch.matmul(torch.softmax(matrix_ac + matrix_bd, dim=-1), v).float()
             x1 = encoder_layer.attn.linear_out(x1.transpose(0, 1).reshape(1, -1, self.hidden_size))
             x2 = encoder_layer.cgmlp.channel_proj1(encoder_layer.norm_mlp(x))
             x_r, x_g = x2.chunk(2, dim=-1)
@@ -314,10 +325,10 @@ class DOLPHIN_ENCODER(torch.nn.Module):
         enc_outputs = self.dolphin.encoder.after_norm(x)
         ctc_ids = self.ctc_lo(self.ctc_after_norm(x)).argmax(dim=-1).int()      # CTC top-1 ids for this chunk (stable streaming text)
         for idx, decoder_layer in enumerate(self.dolphin.decoder.decoders):
-            cross_kv = decoder_layer.src_attn.kv(enc_outputs).view(-1, 2 * self.cross_num_heads, self.cross_head_dim).transpose(0, 1)
+            cross_kv = decoder_layer.src_attn.kv(enc_outputs).half().view(-1, 2 * self.cross_num_heads, self.cross_head_dim).transpose(0, 1)
             k, v = cross_kv.split(self.cross_num_heads, dim=0)
-            save_k.append(k.half().transpose(1, 2))                             # this chunk's cross-attn key   (h, d, chunk)
-            save_v.append(v.half())                                             # this chunk's cross-attn value (h, chunk, d)
+            save_k.append(k.transpose(1, 2))                             # this chunk's cross-attn key   (h, d, chunk)
+            save_v.append(v)                                             # this chunk's cross-attn value (h, chunk, d)
         return *save_k, *save_v, *new_att_k, *new_att_v, *new_cnn, ctc_ids
 
 
@@ -373,6 +384,7 @@ class DOLPHIN_DECODER(torch.nn.Module):
         super(DOLPHIN_DECODER, self).__init__()
         self.dolphin = copy.deepcopy(dolphin)
         self.num_layers_de = num_layers_de
+        self.compute_in_f32 = COMPUTE_IN_F32
         self.idx_en_key = num_layers_de + num_layers_de         # en cross-attn keys start (2 * L)
         self.idx_en_value = self.idx_en_key + num_layers_de     # en cross-attn values start (3 * L)
         self.idx_hidden = self.idx_en_value + num_layers_de     # token-embedding input (4 * L)
@@ -418,20 +430,44 @@ class DOLPHIN_DECODER(torch.nn.Module):
         hidden_states = all_inputs[self.idx_hidden] + all_inputs[self.idx_position]
         attention_mask = all_inputs[-1]
         batch_size = hidden_states.shape[0].unsqueeze(0)
+        # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
+        # dtype unchanged) and upcast to f32 ONCE here, shared by every layer. Minimum-cast path uses it as-is (f16).
+        attn_mask = attention_mask.float() if self.compute_in_f32 else attention_mask
         for idx, decoder_layer in enumerate(self.dolphin.decoder.decoders):
             hidden_states_norm = decoder_layer.norm1(hidden_states)
-            qkv = decoder_layer.self_attn.qkv(hidden_states_norm).view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
+            # Self-attention. OFF (minimum-cast): cast the fused QKV DOWN to f16 before the split so
+            # Q@K/mask/softmax/attn@V run in f16 on the f16 K/V cache; the context is cast back to f32 for linear_out.
+            # ON (COMPUTE_IN_F32): keep the f16 K/V *storage* (K/V still cast to f16 before the cache concat, so
+            # the cache I/O dtype is unchanged) but upcast K/V to f32 at the matmul use points and keep
+            # Q/mask/softmax in f32 -- f16 storage, f32 compute. Q is never downcast.
+            qkv = decoder_layer.self_attn.qkv(hidden_states_norm)
+            if not self.compute_in_f32:
+                qkv = qkv.half()
+            qkv = qkv.view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
             q, k, v = qkv.split(self.num_heads, dim=1)
-            k = torch.cat((all_inputs[idx], k.half().transpose(-1, -2)), dim=-1)           # f16 key cache   (batch, num_heads, head_dim, kv_seq_len)
-            v = torch.cat((all_inputs[idx + self.num_layers_de], v.half()), dim=-2)       # f16 value cache (batch, num_heads, kv_seq_len, head_dim)
+            if self.compute_in_f32:
+                k = k.half()   # f16 K storage (no-op in the minimum-cast path: qkv is already f16)
+                v = v.half()   # f16 V storage
+            k = torch.cat((all_inputs[idx], k.transpose(-1, -2)), dim=-1)           # f16 key cache   (batch, num_heads, head_dim, kv_seq_len)
+            v = torch.cat((all_inputs[idx + self.num_layers_de], v), dim=-2)       # f16 value cache (batch, num_heads, kv_seq_len, head_dim)
             self.save_de_keys[idx] = k
             self.save_de_values[idx] = v
-            hidden_state_attn = torch.matmul(torch.softmax(torch.matmul(q.half(), k) + attention_mask, dim=-1), v).transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float()
+            if self.compute_in_f32:
+                hidden_state_attn = torch.matmul(torch.softmax(torch.matmul(q, k.float()) + attn_mask, dim=-1), v.float()).transpose(1, 2).reshape(batch_size, -1, self.hidden_size)
+            else:
+                hidden_state_attn = torch.matmul(torch.softmax(torch.matmul(q, k) + attn_mask, dim=-1), v).transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float()
             hidden_state_attn = decoder_layer.self_attn.linear_out(hidden_state_attn)
             hidden_state_attn += hidden_states
+            # Cross-attention against the f16 encoder cross-KV cache. OFF: downcast Q to f16 and run in f16 on the
+            # f16 cross cache, context back to f32. ON: keep Q in f32 and upcast the f16 cross K/V to f32 at the
+            # matmul use points (the cross cache is produced f16 by the encoder; its I/O dtype is unchanged).
             q = decoder_layer.src_attn.linear_q(decoder_layer.norm2(hidden_state_attn)).view(batch_size, -1, self.cross_num_heads, self.cross_head_dim).transpose(1, 2)
-            hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q.half(), all_inputs[idx + self.idx_en_key]), dim=-1), all_inputs[idx + self.idx_en_value])
-            hidden_state_cross = decoder_layer.src_attn.linear_out(hidden_state_cross.transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float())
+            if self.compute_in_f32:
+                hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q, all_inputs[idx + self.idx_en_key].float()), dim=-1), all_inputs[idx + self.idx_en_value].float())
+                hidden_state_cross = decoder_layer.src_attn.linear_out(hidden_state_cross.transpose(1, 2).reshape(batch_size, -1, self.hidden_size))
+            else:
+                hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q.half(), all_inputs[idx + self.idx_en_key]), dim=-1), all_inputs[idx + self.idx_en_value])
+                hidden_state_cross = decoder_layer.src_attn.linear_out(hidden_state_cross.transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float())
             hidden_state_cross += hidden_state_attn
             hidden_states = hidden_state_cross + decoder_layer.feed_forward(decoder_layer.norm3(hidden_state_cross))
         hidden_states = self.dolphin.decoder.after_norm(hidden_states[:, -1])
@@ -498,7 +534,7 @@ with torch.inference_mode():
     CSGU_LORDER = dolphin_encoder.csgu_lorder
     CSGU_CHANNELS = dolphin_encoder.csgu_channels
     # Streaming chunk window: emit STREAM_CHUNK_FRAMES encoder frames; overlap by right_context(6) mel frames (no subsample cache).
-    decoding_window = (STREAM_CHUNK_FRAMES - 1) * 4 + 7
+    decoding_window = (STREAM_CHUNK_FRAMES - 1) * SUBSAMPLING_FACTOR + SUBSAMPLING_CONTEXT
     STREAM_WINDOW_SAMPLES = (decoding_window - 1) * HOP_LENGTH + WINDOW_LENGTH
     _audio_export_dtype = {"INT16": torch.int16, "F32": torch.float32, "F16": torch.float16}[INPUT_AUDIO_DTYPE]
     audio = torch.ones((1, 1, STREAM_WINDOW_SAMPLES), dtype=_audio_export_dtype)
@@ -728,6 +764,7 @@ with torch.inference_mode():
             "dolphin_streaming_metadata_version": 1,
             "producer": "Export_Dolphin_CN_Dialect_Streaming.py",
             "model_variant": "small.cn.streaming",
+            "compute_in_f32": COMPUTE_IN_F32,
         },
         {
             "num_encoder_layers": NUM_LAYER_EN,
@@ -746,6 +783,8 @@ with torch.inference_mode():
             "sample_rate": SAMPLE_RATE,
             "input_audio_length": INPUT_AUDIO_LENGTH,
             "stream_chunk_frames": STREAM_CHUNK_FRAMES,
+            "subsampling_factor": SUBSAMPLING_FACTOR,
+            "subsampling_context": SUBSAMPLING_CONTEXT,
             "num_mels": N_MELS,
             "nfft_stft": NFFT_STFT,
             "window_length": WINDOW_LENGTH,

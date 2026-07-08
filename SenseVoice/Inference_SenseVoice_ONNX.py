@@ -16,7 +16,6 @@ if str(_REPO_ROOT) not in sys.path:
 from Example_Audio import model_audio_paths
 
 
-tokenizer_path = "/home/DakeQQ/Downloads/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model"   # The SenseVoice download path.
 def _parse_args():
     parser = argparse.ArgumentParser(description="Run SenseVoice ONNX inference.")
     parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", type=Path, default=_SCRIPT_DIR / "SenseVoice_Optimized", help="Folder containing ONNX graphs, for example SenseVoice_Optimized or SenseVoice_ONNX.")
@@ -39,8 +38,9 @@ TARGET_LANGUAGE = 2                     # Choose one of indices ['auto' = 0, 'zh
 SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
 
 
+# The SentencePiece tokenizer model is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
 tokenizer = SentencePieceProcessor()
-tokenizer.Load(tokenizer_path)
+tokenizer.Load(str(onnx_folder / "chn_jpn_yue_eng_ko_spectok.bpe.model"))
 
 
 def prepare_audio_input(audio_int16: np.ndarray, input_audio_dtype: str, target_rms: float = 8192.0) -> np.ndarray:

@@ -22,9 +22,8 @@ def _parse_args():
 _ARGS = _parse_args()
 
 
-model_path             = "/home/DakeQQ/Downloads/dolphin-cn-dialect-small-prompt"                         # The Dolphin-CN-Dialect project download path (small.cn.prompt).
-save_vocab             = os.path.join(_SCRIPT_DIR, "Dolphin_CN_Dialect_ONNX", "vocab_Dolphin_CN_Dialect.txt")    # The exported Dolphin-CN-Dialect vocab path.
 onnx_folder            = os.path.abspath(_ARGS.onnx_folder)                          # Selected ONNX graph folder.
+save_vocab             = os.path.join(onnx_folder, "vocab_Dolphin_CN_Dialect.txt")    # The exported Dolphin-CN-Dialect vocab path.
 onnx_model_Metadata    = os.path.join(onnx_folder, "Dolphin_Metadata.onnx")                             # Tiny metadata carrier graph.
 onnx_model_Encoder     = os.path.join(onnx_folder, "Dolphin_Encoder.onnx")                              # The exported onnx encoder model path.
 onnx_model_Decoder     = os.path.join(onnx_folder, "Dolphin_Decoder.onnx")                              # The exported onnx decoder (main, pure-float) model path.

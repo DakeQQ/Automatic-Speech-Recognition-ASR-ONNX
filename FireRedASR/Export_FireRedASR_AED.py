@@ -1,15 +1,11 @@
 import gc
 import subprocess
+import shutil
 import os
-import re
 import sys
-import time
 import importlib
 import torch
-import logging
 import torchaudio
-import numpy as np
-import sentencepiece as spm
 from pathlib import Path
 
 
@@ -70,6 +66,7 @@ SAMPLE_RATE = 16000                                         # The model paramete
 INPUT_AUDIO_DTYPE = "INT16"                                 # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. Kaldi fbank works on the int16 numeric range, so "F32"/"F16" carry int16-range values (no ÷32768).
 STOP_TOKEN = [4]                                            # 4 is the end token for FireRedASR-AED series model.
 SOS_TOKEN = 3                                               # 3 is the start token for FireRedASR-AED series model.
+COMPUTE_IN_F32 = False                                      # F16 KV-cache compute precision. False = minimum-cast f16 attention (self + cross Q@K/mask/softmax/attn@V run in f16 on the f16 caches; the context is cast back to f32). True = keep the f16 KV *storage* (cache I/O dtype unchanged) but upcast K/V (and the mask, internally) to f32 at the attention use points, keeping Q/softmax in f32 (f16 storage, f32 compute).
 OPSET = 17                                                  # ONNX opset version for the export.
 
 
@@ -576,10 +573,10 @@ class FIRE_RED_ENCODER(torch.nn.Module):
         valid_len = valid_lengths.squeeze(0)
         enc_outputs = enc_outputs[:, :valid_len.to(torch.int64)]
         for idx, decoder_layer in enumerate(self.model.decoder.layer_stack):
-            cross_kv = decoder_layer.cross_attn.kv(enc_outputs).view(-1, 2 * self.cross_num_heads, self.cross_head_dim).transpose(0, 1)
+            cross_kv = decoder_layer.cross_attn.kv(enc_outputs).half().view(-1, 2 * self.cross_num_heads, self.cross_head_dim).transpose(0, 1)
             k, v = cross_kv.split(self.cross_num_heads, dim=0)
-            self.save_en_keys[idx] = k.half().transpose(1, 2)       # f16 cross-attention key   (num_heads, head_dim, T)
-            self.save_en_values[idx] = v.half()                     # f16 cross-attention value (num_heads, T, head_dim)
+            self.save_en_keys[idx] = k.transpose(1, 2)      # f16 cross-attention key   (num_heads, head_dim, T)
+            self.save_en_values[idx] = v                    # f16 cross-attention value (num_heads, T, head_dim)
         return *self.save_en_keys, *self.save_en_values
 
 
@@ -632,6 +629,7 @@ class FIRE_RED_DECODER(torch.nn.Module):
         super(FIRE_RED_DECODER, self).__init__()
         self.model = fire_red
         self.num_layers_de = num_layers_de
+        self.compute_in_f32 = COMPUTE_IN_F32
         self.idx_en_key = num_layers_de + num_layers_de         # en cross-attn keys start (2 * L)
         self.idx_en_value = self.idx_en_key + num_layers_de     # en cross-attn values start (3 * L)
         self.idx_hidden = self.idx_en_value + num_layers_de     # token-embedding input (4 * L)
@@ -678,20 +676,44 @@ class FIRE_RED_DECODER(torch.nn.Module):
         hidden_states = all_inputs[self.idx_hidden] + all_inputs[self.idx_position]
         attention_mask = all_inputs[-1]
         batch_size = hidden_states.shape[0].unsqueeze(0)
+        # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
+        # dtype unchanged) and upcast to f32 ONCE here, shared by every layer. Minimum-cast path uses it as-is (f16).
+        attn_mask = attention_mask.float() if self.compute_in_f32 else attention_mask
         for idx, decoder_layer in enumerate(self.model.decoder.layer_stack):
             hidden_states_norm = decoder_layer.self_attn_norm(hidden_states)
-            qkv = decoder_layer.self_attn.qkv(hidden_states_norm).view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
+            # Self-attention. OFF (minimum-cast): cast the fused QKV DOWN to f16 before the split so
+            # Q@K/mask/softmax/attn@V run in f16 on the f16 K/V cache; the context is cast back to f32 for fc.
+            # ON (COMPUTE_IN_F32): keep the f16 K/V *storage* (K/V still cast to f16 before the cache concat, so
+            # the cache I/O dtype is unchanged) but upcast K/V to f32 at the matmul use points and keep
+            # Q/mask/softmax in f32 -- f16 storage, f32 compute. Q is never downcast.
+            qkv = decoder_layer.self_attn.qkv(hidden_states_norm)
+            if not self.compute_in_f32:
+                qkv = qkv.half()
+            qkv = qkv.view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
             q, k, v = qkv.split(self.num_heads, dim=1)
-            k = torch.cat((all_inputs[idx], k.half().transpose(-1, -2)), dim=-1)            # f16 key cache   (batch, num_heads, head_dim, kv_seq_len)
-            v = torch.cat((all_inputs[idx + self.num_layers_de], v.half()), dim=-2)        # f16 value cache (batch, num_heads, kv_seq_len, head_dim)
+            if self.compute_in_f32:
+                k = k.half()   # f16 K storage (no-op in the minimum-cast path: qkv is already f16)
+                v = v.half()   # f16 V storage
+            k = torch.cat((all_inputs[idx], k.transpose(-1, -2)), dim=-1)            # f16 key cache   (batch, num_heads, head_dim, kv_seq_len)
+            v = torch.cat((all_inputs[idx + self.num_layers_de], v), dim=-2)        # f16 value cache (batch, num_heads, kv_seq_len, head_dim)
             self.save_de_keys[idx] = k
             self.save_de_values[idx] = v
-            hidden_state_attn = torch.matmul(torch.softmax(torch.matmul(q.half(), k) + attention_mask, dim=-1), v).transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float()
+            if self.compute_in_f32:
+                hidden_state_attn = torch.matmul(torch.softmax(torch.matmul(q, k.float()) + attn_mask, dim=-1), v.float()).transpose(1, 2).reshape(batch_size, -1, self.hidden_size)
+            else:
+                hidden_state_attn = torch.matmul(torch.softmax(torch.matmul(q, k) + attn_mask, dim=-1), v).transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float()
             hidden_state_attn = decoder_layer.self_attn.fc(hidden_state_attn)
             hidden_state_attn += hidden_states
+            # Cross-attention against the f16 encoder cross-KV cache. OFF: downcast Q to f16 and run in f16 on
+            # the f16 cross cache, context back to f32. ON: keep Q in f32 and upcast the f16 cross K/V to f32 at
+            # the matmul use points (the cross cache is produced f16 by the encoder; its I/O dtype is unchanged).
             q = decoder_layer.cross_attn.w_qs(decoder_layer.cross_attn_norm(hidden_state_attn)).view(batch_size, -1, self.cross_num_heads, self.cross_head_dim).transpose(1, 2)
-            hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q.half(), all_inputs[idx + self.idx_en_key]), dim=-1), all_inputs[idx + self.idx_en_value])
-            hidden_state_cross = decoder_layer.cross_attn.fc(hidden_state_cross.transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float())
+            if self.compute_in_f32:
+                hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q, all_inputs[idx + self.idx_en_key].float()), dim=-1), all_inputs[idx + self.idx_en_value].float())
+                hidden_state_cross = decoder_layer.cross_attn.fc(hidden_state_cross.transpose(1, 2).reshape(batch_size, -1, self.hidden_size))
+            else:
+                hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q.half(), all_inputs[idx + self.idx_en_key]), dim=-1), all_inputs[idx + self.idx_en_value])
+                hidden_state_cross = decoder_layer.cross_attn.fc(hidden_state_cross.transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float())
             hidden_state_cross += hidden_state_attn
             hidden_states = hidden_state_cross + decoder_layer.mlp(decoder_layer.mlp_norm(hidden_state_cross))
         hidden_states = self.model.decoder.layer_norm_out(hidden_states[:, -1])
@@ -1123,6 +1145,7 @@ with torch.inference_mode():
             "fireredasr_metadata_version": 1,
             "producer": "Export_FireRedASR_AED.py",
             "model_variant": "FireRedASR2-AED" if IS_V2 else "FireRedASR-AED",
+            "compute_in_f32": COMPUTE_IN_F32,
         },
         {
             "num_decoder_layers": NUM_LAYER_DE,
@@ -1179,6 +1202,18 @@ with torch.inference_mode():
 
 if project_path in sys.path:
     sys.path.remove(project_path)
+
+# ── Copy the tokenizer assets (vocab + BPE model) into the ONNX folder so the exported folder runs ──
+# inference stand-alone (no external FireRedASR source path needed at inference time).
+for _asset in ("dict.txt", "train_bpe1000.model"):
+    _src = os.path.join(model_path, _asset)
+    _dst = os.path.join(onnx_dir, _asset)
+    try:
+        shutil.copy2(_src, _dst)
+        print(f"[Tokenizer] Copied {_asset} -> {onnx_dir}")
+    except Exception as _exc:  # noqa: BLE001 - a failed copy must not abort the auto demo
+        print(f"[Tokenizer] Skipped {_asset} ({_exc})")
+
 print('\nExport done!\n')
 print('Running ONNX Runtime demo via Inference_FireRedASR_AED_ONNX.py ...')
 subprocess.run(
@@ -1186,7 +1221,6 @@ subprocess.run(
         sys.executable,
         str(SCRIPT_DIR / "Inference_FireRedASR_AED_ONNX.py"),
         "--onnx-folder", onnx_dir,
-        "--source-model-folder", model_path,
     ],
     check=True,
 )

@@ -2,9 +2,8 @@ import gc
 import subprocess
 import sys
 import os
-import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Tuple
 
 import numpy as np
 import torch
@@ -791,7 +790,7 @@ class FORCED_ALIGNER_ENCODER(torch.nn.Module):
         hidden_states = hidden_states.reshape(num_windows, self.tokens_per_window, self.model_dim)
         valid_counts = aftercnn_lens.reshape(num_windows, self.chunks_per_window).sum(dim=1, dtype=torch.int32)
         valid_mask_float = self.valid_mask_float_lookup[valid_counts].float()
-        key_mask = self.key_mask_lookup[:, valid_counts]
+        key_mask = self.key_mask_lookup[:, valid_counts].float()
         for layer in self.audio_tower.layers:
             residual = hidden_states
             normed = layer.self_attn_layer_norm(hidden_states)
@@ -1238,6 +1237,15 @@ def export_all() -> None:
     print(f"\n[Metadata] Stamped {len(onnx_metadata)} keys into {len(written)} ONNX graph(s):")
     for key in sorted(onnx_metadata):
         print(f"    {key} = {onnx_metadata[key]}")
+
+    # ── Save the tokenizer into the ONNX folder so the exported folder runs inference ──
+    # stand-alone (no external Qwen3-ForcedAligner model path needed at inference time).
+    try:
+        _tokenizer_dir = onnx_folder / "tokenizer"
+        tokenizer.save_pretrained(str(_tokenizer_dir))
+        print(f"[Tokenizer] Saved tokenizer -> {_tokenizer_dir}")
+    except Exception as _exc:  # noqa: BLE001 - a failed save must not abort the auto demo
+        print(f"[Tokenizer] Skipped tokenizer bundle ({_exc})")
     print("\nExport complete.\n")
 
 

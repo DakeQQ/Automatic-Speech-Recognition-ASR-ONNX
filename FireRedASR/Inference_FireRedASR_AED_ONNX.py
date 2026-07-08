@@ -20,19 +20,15 @@ from Example_Audio import model_audio_paths
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Run FireRedASR AED ONNX inference.")
-    parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", type=Path, default=_SCRIPT_DIR / "FireRedASR_Optimized", help="Folder containing ONNX graphs, for example FireRedASR_Optimized or FireRedASR_ONNX.")
-    parser.add_argument("--source-model-folder", dest="source_model_folder", default="/home/DakeQQ/Downloads/FireRedASR-AED-L", help="FireRedASR source model folder containing dict.txt and train_bpe1000.model.")
+    parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", type=Path, default=_SCRIPT_DIR / "FireRedASR_Optimized", help="Folder containing ONNX graphs, for example FireRedASR_Optimized or FireRedASR_ONNX. The tokenizer assets (dict.txt + train_bpe1000.model) are read from this same folder.")
     return parser.parse_args()
 
 
 _ARGS = _parse_args()
 
 
-model_path = str(_ARGS.source_model_folder)  # The FireRedASR-AED model download path (dict.txt + train_bpe1000.model).
-
-
 # -- Optimized ONNX graph paths (Optimize_ONNX.py output): core pipeline (Embed keeps token ids out of the float decoder; Prefill / Decode build position embedding + causal mask) --
-onnx_folder            = _ARGS.onnx_folder.expanduser().resolve()                # Selected ONNX graph folder.
+onnx_folder            = _ARGS.onnx_folder.expanduser().resolve()                # Selected ONNX graph folder (also holds the bundled tokenizer assets).
 
 onnx_model_Metadata    = f"{onnx_folder}/FireRedASR_Metadata.onnx"               # Tiny metadata carrier graph.
 onnx_model_Encoder     = f"{onnx_folder}/FireRedASR_Encoder.onnx"                # The exported ONNX encoder model path.
@@ -468,7 +464,8 @@ out_name_Decode_position = out_name_Decode[0]
 out_name_Decode_kv_seq_len = out_name_Decode[1]
 binding_Decode = ort_session_Decode.io_binding()
 
-tokenizer = ChineseCharEnglishSpmTokenizer(model_path + "/dict.txt", model_path + "/train_bpe1000.model")
+# Tokenizer assets are bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
+tokenizer = ChineseCharEnglishSpmTokenizer(str(onnx_folder / "dict.txt"), str(onnx_folder / "train_bpe1000.model"))
 
 # ---- Decoding-strategy resolution ----
 if USE_BEAM_SEARCH and (TOP_K < BEAM_SIZE):

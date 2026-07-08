@@ -3,23 +3,22 @@ os.environ["HF_HUB_OFFLINE"] = "1"          # Load all HuggingFace assets from l
 os.environ["TRANSFORMERS_OFFLINE"] = "1"    # Disable transformers' network HEAD/update checks
 
 import gc
+import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
-import numpy as np
 from funasr import AutoModel
 from funasr.register import tables
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 from STFT_Process import STFT_Process
 
 
-model_path                     = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512'              # Set the path where the [Fun-ASR-Nano-2512, Fun-ASR-MLT-Nano-2512] downloaded. URL: https://modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512 / https://modelscope.cn/models/FunAudioLLM/Fun-ASR-MLT-Nano-2512
-tokenizer_path                 = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'   # Set the tokenizer path.
+model_path                     = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512'            # Set the path where the [Fun-ASR-Nano-2512, Fun-ASR-MLT-Nano-2512] downloaded. URL: https://modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512 / https://modelscope.cn/models/FunAudioLLM/Fun-ASR-MLT-Nano-2512
+tokenizer_path                 = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B' # Set the tokenizer path.
 
 # Store (and later load) the exported ONNX models in a local folder next to this script; created automatically if missing.
 onnx_folder                    = Path(__file__).resolve().parent / "Fun_ASR_Nano_ONNX"  # Local folder holding all exported ONNX graphs.
@@ -56,24 +55,25 @@ LFR_N                         = 6                 # The model parameter, do not 
 STOP_TOKEN                    = [151643, 151645]  # The stop_id in Qwen is "151643" & "151645"
 MAX_SEQ_LEN                   = 1024              # The max context length.
 USE_FP16_KV                   = True              # Use fp16 KV cache + minimum-cast f16 attention (q/k/v/mask/softmax in f16; only the context is cast back to f32 for o_proj).
+COMPUTE_IN_F32                = False             # F16-KV compute precision. False = minimum-cast f16 attention (above). True = keep the f16 KV *storage* (cache I/O dtype unchanged) but upcast K/V (and the mask, internally) to f32 at the attention use points, Q/softmax in f32 (f16 storage, f32 compute). No effect when USE_FP16_KV=False.
 USE_CTC_DECODER               = True              # If True, the Encoder graph also emits the fast CTC transcription (greedy-collapsed token ids). If False, the CTC decoder & head are excluded to shrink the model and cut computation.
 
 # Weight-Quantization-Friendly Reorder (EXACT, zero runtime cost; helps only when weight-quant group_size < head_dim)
-REORDER_DOWNPROJ_FOR_QUANT  = True       # Reorder MLP intermediate channels so down_proj block-quant groups are magnitude-homogeneous (absorbed into gate_up + down_proj).
-REORDER_OPROJ_FOR_QUANT     = True       # Reorder each head's head_dim so o_proj sub-head groups are homogeneous (compensated on the qkv v-rows). Pure win for f16 KV.
-REORDER_KEY                 = "absmean"  # Channel key: "absmean" (robust; best at group=32) | "L4" (best at group=128) | "rms" | "std".
+REORDER_DOWNPROJ_FOR_QUANT    = True       # Reorder MLP intermediate channels so down_proj block-quant groups are magnitude-homogeneous (absorbed into gate_up + down_proj).
+REORDER_OPROJ_FOR_QUANT       = True       # Reorder each head's head_dim so o_proj sub-head groups are homogeneous (compensated on the qkv v-rows). Pure win for f16 KV.
+REORDER_KEY                   = "absmean"  # Channel key: "absmean" (robust; best at group=32) | "L4" (best at group=128) | "rms" | "std".
 
 # Input & Processing Limits
 MAX_INPUT_AUDIO_LENGTH        = 480000  # The maximum input audio length.
 DYNAMIC_AXES                  = True    # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
 
 # Decoding Strategy
-USE_BEAM_SEARCH              = False  # Use beam search or greedy search. It recommended to use greedy search for Fun-ASR-Nano.
-TOP_K                        = 3      # The top k candidate in decoding.
-BEAM_SIZE                    = 3      # Number of beams in searching.
-PENALTY_RANGE                = 10     # Penalizes the most recent output. "10" means the last 10 tokens.
-MAX_BEAM_SIZE                = 10     # Max beams for exported model.
-REPEAT_PENALTY               = 1.0    # Range from 0.0 to 1.0; "1.0" means no penalty.
+USE_BEAM_SEARCH                = False  # Use beam search or greedy search. It recommended to use greedy search for Fun-ASR-Nano.
+TOP_K                          = 3      # The top k candidate in decoding.
+BEAM_SIZE                      = 3      # Number of beams in searching.
+PENALTY_RANGE                  = 10     # Penalizes the most recent output. "10" means the last 10 tokens.
+MAX_BEAM_SIZE                  = 10     # Max beams for exported model.
+REPEAT_PENALTY                 = 1.0    # Range from 0.0 to 1.0; "1.0" means no penalty.
 
 # Runtime & Export Settings
 OPSET                        = 20  # ONNX Runtime opset version.
@@ -399,8 +399,10 @@ class ROTARY_MASK_PREFILL(torch.nn.Module):
     def __init__(self, llm, max_seq_len):
         super().__init__()
 
-        # Mask dtype tracks the attention-compute dtype: float16 for the minimum-cast f16 KV attention,
-        # float32 otherwise. It is added to the (f16 or f32) attention scores in FUNASR_NANO_DECODER_MAIN.
+        # Mask dtype = the KV-cache dtype, so the exported mask I/O dtype is stable: float16 with the f16 KV
+        # cache, float32 with a float32 KV cache. Deliberately NOT gated on COMPUTE_IN_F32 -- the f16-storage
+        # f32-compute path upcasts this f16 mask to f32 INTERNALLY (mask I/O + inference runtime unchanged).
+        # It is added to the attention scores in FUNASR_NANO_DECODER_MAIN.
         self.mask_dtype = torch.float16 if USE_FP16_KV else torch.float32
 
         # Causal attention mask: upper triangle → -128
@@ -811,6 +813,7 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
 
         # ── Minimum-cast f16 KV attention toggle ─────────────────────────
         self.use_fp16_kv = USE_FP16_KV
+        self.compute_in_f32 = COMPUTE_IN_F32
 
         # RMS norm is emitted as ORT's fused SimplifiedLayerNormalization (default ONNX domain): it computes
         # y = x * rsqrt(mean(x^2) + eps) * scale and reduces in float32 (stash_type=1). Feeding scale = 1/sqrt(N)
@@ -1011,6 +1014,11 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         attention_mask     = all_inputs[-1]
         batch_size         = hidden_states.shape[0]
 
+        # f16-storage / f32-compute (COMPUTE_IN_F32): keep the causal mask f16 at the graph boundary (I/O
+        # dtype unchanged) but upcast it to f32 ONCE here, shared by every layer (cast loop-invariant
+        # constants once). In every other mode it is used as-is (f16 minimum-cast, or f32 for a float32 cache).
+        attn_mask = attention_mask.float() if (self.use_fp16_kv and self.compute_in_f32) else attention_mask
+
         for i, layer in enumerate(self.funasr_nano.model.layers):
 
             # ── Self-Attention ───────────────────────────────────────
@@ -1027,19 +1035,21 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             qk_rot = qk * rotary_pos_emb_cos + self._rotate_half(qk, batch_size) * rotary_pos_emb_sin
 
             # Split into query and key
-            q, k = torch.split(qk_rot, [self.num_heads, self.num_key_value_heads], dim=-2)
+            # Minimum-cast float16 KV attention (OFF): cast qk_rot + V DOWN to f16 before the split so
+            # Q@K/mask/softmax/attn@V run in f16; only the context is cast back to f32 for o_proj.
+            # COMPUTE_IN_F32 (ON): keep the f16 KV *storage* (K/V are still cast to f16 before the cache
+            # concat, so the cache I/O dtype is unchanged) but upcast the f16 K/V to f32 at the matmul use
+            # points and keep Q/mask/softmax in f32 -- f16 storage, f32 compute. Q is never downcast.
+            if self.use_fp16_kv and not self.compute_in_f32:
+                qk_rot = qk_rot.half()
 
-            # Minimum-cast float16 KV attention: cast q DOWN to f16 (K/V already f16), run Q@K, the mask Add,
-            # Softmax and attn@V all in float16, then cast only the context back to f32 for o_proj (after the
-            # dtype-agnostic Transpose/Reshape). A float32 KV cache keeps the plain float32 attention.
+            q, k = torch.split(qk_rot, [self.num_heads, self.num_key_value_heads], dim=-2)
             if self.use_fp16_kv:
-                q = q.half()
-                k = k.half().permute(0, 3, 2, 4, 1)
-                v = v.half().transpose(1, 3)
-            else:
-                k = k.permute(0, 3, 2, 4, 1)
-                v = v.transpose(1, 3)
+                k = k.half()   # f16 KV storage (no-op in the minimum-cast path: qk_rot is already f16)
+                v = v.half()
             q = q.reshape(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim).permute(0, 2, 3, 1, 4)
+            k = k.permute(0, 3, 2, 4, 1)
+            v = v.transpose(1, 3)
 
             # ── KV Cache Update & Attention Compute ──────────────────
             k = torch.cat((all_inputs[i], k), dim=-1)
@@ -1047,13 +1057,18 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             self.save_key[i] = k
             self.save_value[i] = v
 
-            attn = torch.matmul(q, k) + attention_mask
-            attn = torch.softmax(attn, dim=-1)
-            attn = torch.matmul(attn, v)
+            if self.use_fp16_kv and self.compute_in_f32:
+                attn = torch.matmul(q, k.float()) + attn_mask
+                attn = torch.softmax(attn, dim=-1)
+                attn = torch.matmul(attn, v.float())
+            else:
+                attn = torch.matmul(q, k) + attn_mask
+                attn = torch.softmax(attn, dim=-1)
+                attn = torch.matmul(attn, v)
 
             # Output projection & residual
             attn = attn.permute(0, 3, 1, 2, 4).reshape(batch_size, -1, layer.self_attn.o_proj.in_features)
-            if self.use_fp16_kv:
+            if self.use_fp16_kv and not self.compute_in_f32:
                 attn = attn.float()
             hidden_states = residual + layer.self_attn.o_proj(attn)
 
@@ -1428,7 +1443,9 @@ with torch.inference_mode():
             "input_audio_length": MAX_INPUT_AUDIO_LENGTH,
             "max_input_audio_length": MAX_INPUT_AUDIO_LENGTH,
             "use_fp16_kv": USE_FP16_KV,
+            "compute_in_f32": COMPUTE_IN_F32,
             "use_ctc_decoder": USE_CTC_DECODER,
+            "is_mlt": "MLT" in tokenizer_path,
             "num_mels": N_MELS,
             "nfft_stft": NFFT_STFT,
             "window_length": WINDOW_LENGTH,
@@ -1478,6 +1495,25 @@ with torch.inference_mode():
         for _entry in _skipped:
             print(f"    {_entry}")
     gc.collect()
+
+# ── Bundle the tokenizer into the export folder so the ONNX model set is self-contained ──
+# The inference script loads its tokenizer(s) from this folder when the local copy is present
+# (falling back to the configured source paths), so the exported folder runs stand-alone.
+_tokenizer_dst = onnx_folder / Path(tokenizer_path).name
+try:
+    shutil.copytree(tokenizer_path, _tokenizer_dst, dirs_exist_ok=True)
+    print(f"[Tokenizer] Copied tokenizer -> {_tokenizer_dst}")
+except Exception as _exc:  # noqa: BLE001 - a failed copy must not abort the demo run
+    print(f"[Tokenizer] Skipped tokenizer copy ({_exc}); inference will use tokenizer_path.")
+
+if USE_CTC_DECODER:
+    _ctc_vocab_src = Path(model_path) / "multilingual.tiktoken"
+    _ctc_vocab_dst = onnx_folder / _ctc_vocab_src.name
+    try:
+        shutil.copyfile(_ctc_vocab_src, _ctc_vocab_dst)
+        print(f"[Tokenizer] Copied CTC vocab -> {_ctc_vocab_dst}")
+    except Exception as _exc:  # noqa: BLE001 - a failed copy must not abort the demo run
+        print(f"[Tokenizer] Skipped CTC vocab copy ({_exc}); inference will use ctc_tokenizer_path.")
 
 print('\nExport done!\n')
 print('Running ONNX Runtime demo via Inference_Fun_ASR_Nano_ONNX.py ...')

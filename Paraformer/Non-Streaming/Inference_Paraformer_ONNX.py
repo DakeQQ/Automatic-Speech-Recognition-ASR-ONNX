@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 import argparse
 import sys
@@ -16,7 +15,6 @@ if str(_REPO_ROOT) not in sys.path:
 from Example_Audio import model_audio_paths
 
 
-tokens_path = "/home/DakeQQ/Downloads/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/tokens.json"   # The Paraformer download path. Large Verion: [speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/tokens.json] / Small Verion: [speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1/tokens.json]
 def _parse_args():
     parser = argparse.ArgumentParser(description="Run Paraformer ONNX inference.")
     parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", type=Path, default=_SCRIPT_DIR / "Paraformer_Optimized", help="Folder containing ONNX graphs, for example Paraformer_Optimized or Paraformer_ONNX.")
@@ -40,7 +38,6 @@ SLIDING_WINDOW       = 0                 # Sliding window step for test audio re
 # The audio input dtype is auto-detected from the model's audio input tensor in the ONNX model
 # (kaldi fbank keeps the int16 numeric range, so "float16"/"float" carry int16-range values, no ÷32768); no manual setting needed.
 USE_NORMALISE_AUDIO  = False             # Apply RMS loudness normalisation before feeding the model (RMS-normalize the demo audio).
-DECODE_MODE          = "zh"              # Token decoding mode ('zh' or 'en').
 
 
 def prepare_audio_input(audio_int16: np.ndarray, input_audio_dtype: str, target_rms: float = 8192.0) -> np.ndarray:
@@ -159,8 +156,9 @@ run_options.log_verbosity_level = 4
 run_options.add_run_config_entry("disable_synchronize_execution_providers", "0")
 
 
-with open(tokens_path, 'r', encoding='UTF-8') as json_file:
-    tokenizer = np.array(json.load(json_file), dtype=np.str_)
+# The vocab list is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
+with open(onnx_folder / "Vocab_Paraformer.txt", 'r', encoding='UTF-8') as vocab_file:
+    tokenizer = np.array([_line.rstrip('\n') for _line in vocab_file], dtype=np.str_)
 
 
 ort_session_Metadata = onnxruntime.InferenceSession(
@@ -206,8 +204,14 @@ def _meta_int(key):
 
 SAMPLE_RATE = _meta_int("sample_rate")
 INPUT_AUDIO_LENGTH = _meta_int("input_audio_length")
+DECODE_MODE = _model_meta.get("language")               # Token decoding mode ('zh' or 'en'); model-derived, auto-detected at export.
+if DECODE_MODE is None:
+    raise KeyError(
+        f"Required metadata key 'language' is missing from {onnx_model_Metadata}. "
+        f"Re-export with Export_Paraformer.py to stamp the model metadata."
+    )
 print(f"\nModel metadata: {len(_model_meta)} keys "
-      f"(input_audio_length={INPUT_AUDIO_LENGTH}, sample_rate={SAMPLE_RATE}).")
+      f"(input_audio_length={INPUT_AUDIO_LENGTH}, sample_rate={SAMPLE_RATE}, decode={DECODE_MODE}).")
 
 
 # Load the input audio

@@ -16,9 +16,6 @@ if str(_REPO_ROOT) not in sys.path:
 from Example_Audio import model_audio_paths
 
 
-tokenizer_path                  = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B'                          # Set the tokenizer path.
-ctc_tokenizer_path              = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/multilingual.tiktoken'               # SenseVoice multilingual tiktoken vocab for the CTC branch.
-
 def _parse_args():
     parser = argparse.ArgumentParser(description="Run Fun-ASR-Nano ONNX inference.")
     parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", type=Path, default=_SCRIPT_DIR / "Fun_ASR_Nano_Optimized", help="Folder containing ONNX graphs, for example Fun_ASR_Nano_Optimized or Fun_ASR_Nano_ONNX.")
@@ -29,6 +26,12 @@ _ARGS = _parse_args()
 
 # Load the selected ONNX models from a local folder next to this script by default.
 onnx_folder                     = _ARGS.onnx_folder.expanduser().resolve()                                      # Selected ONNX graph folder.
+
+# Tokenizer assets are bundled inside the selected ONNX folder by Export_Fun_ASR_Nano.py
+# (and mirrored into the optimized folder by Optimize_ONNX.py), so the model folder runs
+# stand-alone with no external tokenizer path.
+resolved_tokenizer_path         = str(onnx_folder / "Qwen3-0.6B")                                               # Bundled Qwen3 tokenizer directory.
+resolved_ctc_tokenizer_path     = str(onnx_folder / "multilingual.tiktoken")                                    # Bundled multilingual tiktoken vocab (CTC branch).
 
 onnx_model_Metadata             = str(onnx_folder / "FunASR_Nano_Metadata.onnx")                                # Tiny metadata carrier graph.
 onnx_model_Encoder              = str(onnx_folder / "FunASR_Nano_Encoder.onnx")                                 # The exported onnx model path.
@@ -42,12 +45,6 @@ onnx_model_First_Beam           = str(onnx_folder / "FunASR_Nano_First_Beam_Sear
 onnx_model_Second_Beam          = str(onnx_folder / "FunASR_Nano_Second_Beam_Search.onnx")
 onnx_model_Penalty              = str(onnx_folder / "FunASR_Nano_Apply_Penalty.onnx")
 onnx_model_Argmax               = str(onnx_folder / "FunASR_Nano_Argmax.onnx")
-
-
-test_audio = model_audio_paths("fun_asr_nano_mlt" if "MLT" in tokenizer_path else "fun_asr_nano")      # The test audio list.
-task_prompt = ["将语音转写成中文：", "将语音转写成英文：", "将语音转写成粤语：", "将语音转写成日文："]              # The prompt of transcription task.
-if "MLT" in tokenizer_path:
-    task_prompt += ["将语音转写成韩文："]
 
 
 # official_demo_prompt = """请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。
@@ -379,13 +376,22 @@ print(f"\nModel metadata: {len(_model_meta)} keys "
       f"max_input_audio_length={MAX_INPUT_AUDIO_LENGTH}, stop_token_ids={STOP_TOKEN}, "
       f"use_ctc_decoder={EXPORTED_USE_CTC_DECODER}).")
 
+# The MLT variant (Fun-ASR-MLT-Nano) additionally supports Korean. Detect it from the exported
+# `is_mlt` metadata flag (defaults to the base model when absent), replacing the old substring
+# check on the removed absolute tokenizer path.
+IS_MLT = (_model_meta.get("is_mlt") == "1")
+test_audio  = model_audio_paths("fun_asr_nano_mlt" if IS_MLT else "fun_asr_nano")   # The test audio list.
+task_prompt = ["将语音转写成中文：", "将语音转写成英文：", "将语音转写成粤语：", "将语音转写成日文："]      # The prompt of transcription task.
+if IS_MLT:
+    task_prompt += ["将语音转写成韩文："]
+
 # --- CTC Decoder (optional; loaded only when USE_CTC_DECODER) ---
 if USE_CTC_DECODER:
     ort_session_CTC_Decoder = create_session(onnx_model_CTC_Decoder, **packed_settings)
     binding_CTC_Decoder     = ort_session_CTC_Decoder.io_binding()
     in_name_CTC_Decoder     = get_in_names(ort_session_CTC_Decoder)[0]
     out_name_CTC_Decoder    = get_out_names(ort_session_CTC_Decoder)
-    ctc_tokenizer           = CTCTokenizer(ctc_tokenizer_path)
+    ctc_tokenizer           = CTCTokenizer(resolved_ctc_tokenizer_path)
 
 # --- Embed ---
 ort_session_Embed = create_session(onnx_model_Embed, **packed_settings)
@@ -471,7 +477,7 @@ STOP_TOKEN_SET = set(STOP_TOKEN)
 # ══════════════════════════════════════════════════════════════════════════════
 # TOKENIZER & SHARED ORTVALUE BUFFERS
 # ══════════════════════════════════════════════════════════════════════════════
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+tokenizer = AutoTokenizer.from_pretrained(resolved_tokenizer_path)
 
 _rotary_meta = ort_session_Rotary_Mask_Decode._outputs_meta
 
@@ -597,15 +603,22 @@ for prompt_embed, test in zip(init_all_outputs_Embed, test_audio):
     slice_end = INPUT_AUDIO_LENGTH
     rtf_time = time.time()
 
+    # Bind the encoder once per clip (Nemotron-style): every window feeds a fixed-shape
+    # (1, 1, INPUT_AUDIO_LENGTH) audio tensor, so allocate that buffer a single time and
+    # refresh only its samples via update_inplace. The constant prompt embed input and the
+    # device output slots are bound once here too — no per-window OrtValue is allocated or
+    # re-bound (the standalone encoder threads no cache across windows, so this is safe).
+    audio_buffer = create_ort_with_shape((1, 1, INPUT_AUDIO_LENGTH), audio.dtype, device_type, DEVICE_ID)
+    binding_Encoder.bind_ortvalue_input(in_name_Encoder[0], audio_buffer)
+    binding_Encoder.bind_ortvalue_input(in_name_Encoder[1], prompt_embed)
+    bind_ort_out(binding_Encoder, out_name_Encoder, _ort_device_type)
+
     while slice_end <= aligned_len:
-        ort_audio = onnxruntime.OrtValue.ortvalue_from_numpy(audio[..., slice_start:slice_end], device_type, DEVICE_ID)
+        audio_buffer.update_inplace(np.ascontiguousarray(audio[..., slice_start:slice_end]))
 
         # ══════════════════════════════════════════════════════════════
         # ENCODER
         # ══════════════════════════════════════════════════════════════
-        binding_Encoder.bind_ortvalue_input(in_name_Encoder[0], ort_audio)
-        binding_Encoder.bind_ortvalue_input(in_name_Encoder[1], prompt_embed)
-        bind_ort_out(binding_Encoder, out_name_Encoder, _ort_device_type)
         run(ort_session_Encoder, binding_Encoder)
         all_outputs_Encoder = binding_Encoder.get_outputs()
         hidden_states = all_outputs_Encoder[0]   # concat_embed

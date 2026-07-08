@@ -2,10 +2,8 @@ import gc
 import subprocess
 import sys
 import os
-import time
 import torch
 import torchaudio
-import numpy as np
 from STFT_Process import STFT_Process                                             # The custom STFT/ISTFT can be exported in ONNX format.
 from transformers import AutoFeatureExtractor, AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
 
@@ -60,6 +58,7 @@ WINDOW_LENGTH         = 400             # Length of windowing; edit carefully.
 HOP_LENGTH            = 160             # Samples between successive STFT frames; edit carefully.
 PRE_EMPHASIZE         = 0.97            # Audio pre-emphasis coefficient.
 INPUT_AUDIO_DTYPE     = "INT16"         # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. "INT16" feeds raw PCM (÷32768 in-graph); "F32"/"F16" feed audio pre-normalised to [-1, 1].
+COMPUTE_IN_F32        = False           # F16 KV-cache compute precision. False = minimum-cast f16 attention (self + cross Q@K/mask/softmax/attn@V run in f16 on the f16 caches; the context is cast back to f32). True = keep the f16 KV *storage* (cache I/O dtype unchanged) but upcast K/V (and the mask, internally) to f32 at the attention use points, keeping Q/softmax in f32 (f16 storage, f32 compute).
 # N_MELS              = 80              # Set from the Whisper model config (num_mel_bins); edit carefully.
 
 # -- Export --
@@ -518,10 +517,10 @@ class WHISPER_ENCODER(torch.nn.Module):
             hidden_states = hidden_states_attn + encoder_layer.fc2(encoder_layer.activation_fn(encoder_layer.fc1(encoder_layer.final_layer_norm(hidden_states_attn))))
         hidden_states = self.encoder.layer_norm(hidden_states)
         for i, decoder_layer in enumerate(self.decoder.layers):
-            cross_kv = decoder_layer.encoder_attn.kv(hidden_states).view(-1, 2 * self.cross_num_heads, self.cross_head_dim).transpose(0, 1)
+            cross_kv = decoder_layer.encoder_attn.kv(hidden_states).half().view(-1, 2 * self.cross_num_heads, self.cross_head_dim).transpose(0, 1)
             k, v = cross_kv.split(self.cross_num_heads, dim=0)                   # each (num_heads, T, head_dim)
-            self.save_encoder_key[i] = k.half().transpose(1, 2)                  # f16 cross-attention key   (num_heads, head_dim, T)
-            self.save_encoder_value[i] = v.half()                                # f16 cross-attention value (num_heads, T, head_dim)
+            self.save_encoder_key[i] = k.transpose(1, 2)                  # f16 cross-attention key   (num_heads, head_dim, T)
+            self.save_encoder_value[i] = v                                # f16 cross-attention value (num_heads, T, head_dim)
         return *self.save_encoder_key, *self.save_encoder_value
 
 
@@ -573,6 +572,7 @@ class WHISPER_DECODER(torch.nn.Module):
         self.decoder = whisper.model.decoder
         self.suppress_tokens = suppress_tokens
         self.num_layers_de = num_layers_de
+        self.compute_in_f32 = COMPUTE_IN_F32
         self.idx_en_key = self.num_layers_de + self.num_layers_de            # en cross-attn keys start (2 * L)
         self.idx_en_value = self.idx_en_key + self.num_layers_de             # en cross-attn values start (3 * L)
         self.idx_hidden = self.idx_en_value + self.num_layers_de             # token-embedding input (4 * L)
@@ -620,21 +620,45 @@ class WHISPER_DECODER(torch.nn.Module):
         hidden_states = all_inputs[self.idx_hidden] + all_inputs[self.idx_position]
         attention_mask = all_inputs[-1]
         batch_size = hidden_states.shape[0].unsqueeze(0)
+        # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
+        # dtype unchanged) and upcast to f32 ONCE here, shared by every layer. Minimum-cast path uses it as-is (f16).
+        attn_mask = attention_mask.float() if self.compute_in_f32 else attention_mask
         for idx, decoder_layer in enumerate(self.decoder.layers):
             hidden_states_norm = decoder_layer.self_attn_layer_norm(hidden_states)
-            qkv = decoder_layer.self_attn.qkv(hidden_states_norm).view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
+            # Self-attention. OFF (minimum-cast): cast the fused QKV DOWN to f16 before the split so
+            # Q@K/mask/softmax/attn@V run in f16 on the f16 K/V cache; the context is cast back to f32 for out_proj.
+            # ON (COMPUTE_IN_F32): keep the f16 K/V *storage* (K/V still cast to f16 before the cache concat, so
+            # the cache I/O dtype is unchanged) but upcast K/V to f32 at the matmul use points and keep
+            # Q/mask/softmax in f32 -- f16 storage, f32 compute. Q is never downcast.
+            qkv = decoder_layer.self_attn.qkv(hidden_states_norm)
+            if not self.compute_in_f32:
+                qkv = qkv.half()
+            qkv = qkv.view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
             q, k, v = qkv.split(self.num_heads, dim=1)                            # each (batch, num_heads, ids_len, head_dim)
-            k = torch.cat((all_inputs[idx], k.half().transpose(-1, -2)), dim=-1)  # f16 key cache (batch, num_heads, head_dim, kv_seq_len)
-            v = torch.cat((all_inputs[idx + self.num_layers_de], v.half()), dim=-2)  # f16 value cache
+            if self.compute_in_f32:
+                k = k.half()   # f16 K storage (no-op in the minimum-cast path: qkv is already f16)
+                v = v.half()   # f16 V storage
+            k = torch.cat((all_inputs[idx], k.transpose(-1, -2)), dim=-1)  # f16 key cache (batch, num_heads, head_dim, kv_seq_len)
+            v = torch.cat((all_inputs[idx + self.num_layers_de], v), dim=-2)  # f16 value cache
             self.save_de_keys[idx] = k
             self.save_de_values[idx] = v
-            attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q.half(), k) + attention_mask, dim=-1), v).transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float()
+            if self.compute_in_f32:
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k.float()) + attn_mask, dim=-1), v.float()).transpose(1, 2).reshape(batch_size, -1, self.hidden_size)
+            else:
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k) + attn_mask, dim=-1), v).transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float()
             hidden_states_attn = decoder_layer.self_attn.out_proj(attn)
             hidden_states_attn += hidden_states
             hidden_states_attn_norm = decoder_layer.encoder_attn_layer_norm(hidden_states_attn)
+            # Cross-attention against the f16 encoder cross-KV cache. OFF: downcast Q to f16 and run in f16 on the
+            # f16 cross cache, context back to f32. ON: keep Q in f32 and upcast the f16 cross K/V to f32 at the
+            # matmul use points (the cross cache is produced f16 by the encoder; its I/O dtype is unchanged).
             q = decoder_layer.encoder_attn.q_proj(hidden_states_attn_norm).view(batch_size, -1, self.cross_num_heads, self.cross_head_dim).transpose(1, 2)
-            attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q.half(), all_inputs[idx + self.idx_en_key]), dim=-1), all_inputs[idx + self.idx_en_value])
-            hidden_state_cross = decoder_layer.encoder_attn.out_proj(attn.transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float())
+            if self.compute_in_f32:
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, all_inputs[idx + self.idx_en_key].float()), dim=-1), all_inputs[idx + self.idx_en_value].float())
+                hidden_state_cross = decoder_layer.encoder_attn.out_proj(attn.transpose(1, 2).reshape(batch_size, -1, self.hidden_size))
+            else:
+                attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q.half(), all_inputs[idx + self.idx_en_key]), dim=-1), all_inputs[idx + self.idx_en_value])
+                hidden_state_cross = decoder_layer.encoder_attn.out_proj(attn.transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float())
             hidden_state_cross += hidden_states_attn
             hidden_states = hidden_state_cross + decoder_layer.fc2(decoder_layer.activation_fn(decoder_layer.fc1(decoder_layer.final_layer_norm(hidden_state_cross))))
         hidden_states = self.decoder.layer_norm(hidden_states[:, -1])
@@ -1050,6 +1074,7 @@ with torch.inference_mode():
             "producer": "Export_Whisper.py",
             "model_variant": "v3" if is_v3 else "v2",
             "custom_vocab": custom_vocab,
+            "compute_in_f32": COMPUTE_IN_F32,
         },
         {
             "num_decoder_layers": NUM_LAYER_DE,
@@ -1100,6 +1125,16 @@ with torch.inference_mode():
         for _entry in _skipped:
             print(f"    {_entry}")
     gc.collect()
+
+# ── Save the tokenizer + generation config into the ONNX folder so the exported folder runs ──
+# inference stand-alone (no external Whisper model path needed at inference time).
+try:
+    _tokenizer_dir = os.path.join(onnx_folder, "tokenizer")
+    tokenizer.save_pretrained(_tokenizer_dir)
+    generation_config.save_pretrained(_tokenizer_dir)
+    print(f"[Tokenizer] Saved tokenizer + generation config -> {_tokenizer_dir}")
+except Exception as _exc:  # noqa: BLE001 - a failed save must not abort the auto demo
+    print(f"[Tokenizer] Skipped tokenizer bundle ({_exc})")
 
 print('\nExport done!\n')
 print('Running ONNX Runtime demo via Inference_Whisper_ONNX.py ...')

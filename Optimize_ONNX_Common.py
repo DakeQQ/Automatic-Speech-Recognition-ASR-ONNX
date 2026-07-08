@@ -71,13 +71,13 @@ class OptimizerConfig:
     optimized_folder_path: str
     model_plans: dict[str, Plan]
     # weight-only defaults
-    weight_only_algorithm: str = "k_quant"
+    weight_only_algorithm: str = "DEFAULT"
     block_size: int = 32
     accuracy_level: int = 4
     quant_symmetric: bool = False
     quant_format: str = "QOperator"
     # dynamic INT8 defaults
-    dynamic_weight_type: str = "QUInt8"
+    dynamic_weight_type: str = "QInt8"
     dynamic_per_channel: bool = True
     dynamic_reduce_range: bool = False
     dynamic_default_tensor_type: int | None = None
@@ -187,6 +187,11 @@ def validate_plan(name: str, rp: ResolvedPlan) -> None:
             raise ValueError(f"[{name}] op_types {rp.op_types} and axes {rp.axes} must have equal length.")
         if "Gather" in rp.op_types and rp.algo != "DEFAULT":
             raise ValueError(f"[{name}] Gather quantization requires algo='DEFAULT' (got {rp.algo!r}).")
+        if rp.algo in {"RTN", "k_quant"} and bits != 4:
+            raise ValueError(
+                f"[{name}] algo {rp.algo!r} supports only 4-bit (method='Q4'); got {bits}-bit. "
+                f"Use algo='DEFAULT' or 'HQQ' for {bits}-bit weights."
+            )
         if rp.quant_format == "QDQ" and (rp.algo != "DEFAULT" or bits != 4):
             raise ValueError(
                 f"[{name}] QDQ format supports only algo='DEFAULT' with 4-bit (got {rp.algo!r}, {bits}-bit)."
@@ -227,6 +232,8 @@ def _save_model(model, model_path: str, external: bool) -> None:
             save_as_external_data=True,
             all_tensors_to_one_file=True,
             location=os.path.basename(model_path) + ".data",
+            size_threshold=1024,
+            convert_attribute=True,
         )
     else:
         onnx.save(model, model_path)
@@ -257,8 +264,52 @@ def _retarget_external_location(model_path: str, new_location: str) -> None:
     gc.collect()
 
 
+def _materialize_constant_tensors_as_initializers(graph) -> int:
+    existing_initializers = {initializer.name for initializer in graph.initializer}
+    nodes_to_remove = []
+    converted = 0
+
+    for node in graph.node:
+        for attr in node.attribute:
+            if attr.HasField("g"):
+                converted += _materialize_constant_tensors_as_initializers(attr.g)
+            for subgraph in attr.graphs:
+                converted += _materialize_constant_tensors_as_initializers(subgraph)
+
+        if node.op_type != "Constant" or len(node.output) != 1:
+            continue
+
+        tensor = None
+        for attr in node.attribute:
+            if attr.name == "value" and attr.HasField("t"):
+                tensor = TensorProto()
+                tensor.CopyFrom(attr.t)
+                break
+        if tensor is None:
+            continue
+
+        output_name = node.output[0]
+        if output_name in existing_initializers:
+            nodes_to_remove.append(node)
+            continue
+
+        tensor.name = output_name
+        graph.initializer.append(tensor)
+        existing_initializers.add(output_name)
+        nodes_to_remove.append(node)
+        converted += 1
+
+    for node in nodes_to_remove:
+        graph.node.remove(node)
+
+    return converted
+
+
 def resave(src_path: str, dst_path: str, external: bool) -> None:
     model = onnx.load(src_path)
+    converted_constants = _materialize_constant_tensors_as_initializers(model.graph)
+    if converted_constants:
+        print(f"  Materialized {converted_constants} Constant tensor nodes as initializers before save.")
     _save_model(model, dst_path, external)
     del model
     gc.collect()
@@ -417,7 +468,7 @@ def optimize_onnx_model(model_path: str, rp: ResolvedPlan, config: OptimizerConf
         renamed = _deduplicate_node_names(model.model.graph)
         if renamed:
             print(f"  Renamed {renamed} duplicate node names after float16 conversion.")
-    model.save_model_to_file(model_path, use_external_data_format=external)
+    model.save_model_to_file(model_path, use_external_data_format=external, convert_attribute=True)
     del model
     gc.collect()
 
@@ -435,6 +486,17 @@ def upgrade_opset_version(model_path: str, version: int, external: bool) -> None
 
 
 def build_weight_only_config(rp: ResolvedPlan, bits: int):
+    algo = rp.algo
+    _ALGO_CONFIG_CLASSES = {
+        "RTN": "RTNWeightOnlyQuantConfig",
+        "k_quant": "KQuantWeightOnlyQuantConfig",
+        "HQQ": "HQQWeightOnlyQuantConfig",
+    }
+    if algo in _ALGO_CONFIG_CLASSES:
+        if not hasattr(matmul_nbits_quantizer, _ALGO_CONFIG_CLASSES[algo]):
+            print(f"  {algo} weight-only quantizer is unavailable in this ONNX Runtime build; using DEFAULT.")
+            algo = "DEFAULT"
+
     op_types, axes = list(rp.op_types), list(rp.axes)
     quant_axes = tuple(zip(op_types, axes))
     quant_format = _QUANT_FORMATS[rp.quant_format]
@@ -442,13 +504,13 @@ def build_weight_only_config(rp: ResolvedPlan, bits: int):
         "quant_format": quant_format,
         "op_types_to_quantize": tuple(op_types),
     }
-    if rp.algo == "RTN":
+    if algo == "RTN":
         cfg = matmul_nbits_quantizer.RTNWeightOnlyQuantConfig(**common)
-    elif rp.algo == "HQQ":
+    elif algo == "HQQ":
         cfg = matmul_nbits_quantizer.HQQWeightOnlyQuantConfig(
             bits=bits, block_size=rp.block_size, axis=axes[0], quant_axes=quant_axes, **common,
         )
-    elif rp.algo == "k_quant":
+    elif algo == "k_quant":
         cfg = matmul_nbits_quantizer.KQuantWeightOnlyQuantConfig(**common)
     else:
         cfg = matmul_nbits_quantizer.DefaultWeightOnlyQuantConfig(
@@ -459,16 +521,19 @@ def build_weight_only_config(rp: ResolvedPlan, bits: int):
             **common,
         )
     cfg.bits = bits
-    return cfg, quant_axes
+    return cfg, quant_axes, algo
 
 
 def quantize_weight_only(src_path: str, dst_path: str, rp: ResolvedPlan, bits: int, external: bool) -> None:
-    cfg, quant_axes = build_weight_only_config(rp, bits)
+    cfg, quant_axes, algo = build_weight_only_config(rp, bits)
     print(
-        f"  Quantizing weights ({rp.algo}, {bits}-bit, block={rp.block_size}, "
+        f"  Quantizing weights ({algo}, {bits}-bit, block={rp.block_size}, "
         f"format={rp.quant_format}, ops={list(rp.op_types)})..."
     )
     model = quant_utils.load_model_with_shape_infer(Path(src_path))
+    converted_constants = _materialize_constant_tensors_as_initializers(model.graph)
+    if converted_constants:
+        print(f"  Materialized {converted_constants} Constant tensor nodes as initializers for weight quantization.")
     quant = matmul_nbits_quantizer.MatMulNBitsQuantizer(
         model,
         block_size=rp.block_size,
@@ -482,7 +547,8 @@ def quantize_weight_only(src_path: str, dst_path: str, rp: ResolvedPlan, bits: i
         nodes_to_include=_resolve_nodes(rp.nodes_to_include, src_path),
     )
     quant.process()
-    quant.model.save_model_to_file(dst_path, external)
+    quant.model.topological_sort()
+    _save_model(quant.model.model, dst_path, external)
     del model, quant
     gc.collect()
 
@@ -503,6 +569,9 @@ def quantize_dynamic_int8(src_path: str, dst_path: str, rp: ResolvedPlan, extern
         f"per_channel={rp.per_channel}, reduce_range={rp.reduce_range})..."
     )
     model = quant_utils.load_model_with_shape_infer(Path(src_path))
+    converted_constants = _materialize_constant_tensors_as_initializers(model.graph)
+    if converted_constants:
+        print(f"  Materialized {converted_constants} Constant tensor nodes as initializers for weight quantization.")
     quantize_dynamic(
         model_input=model,
         model_output=dst_path,

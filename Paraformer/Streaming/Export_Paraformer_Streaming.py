@@ -1,8 +1,6 @@
 import gc
 import subprocess
 import sys
-import time
-import json
 from pathlib import Path
 import torch
 import numpy as np
@@ -10,7 +8,7 @@ import torchaudio.compliance.kaldi as kaldi
 from funasr import AutoModel
 
 
-model_path         = "/home/DakeQQ/Downloads/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"      # The Paraformer-Chinese-Online-Streaming download path.
+model_path         = "/home/DakeQQ/Downloads/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"    # The Paraformer-Chinese-Online-Streaming download path.
 onnx_folder        = Path(__file__).resolve().parent / "Paraformer_ONNX"                                          # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
 onnx_folder.mkdir(parents=True, exist_ok=True)
 onnx_model_Metadata = str(onnx_folder / "Paraformer_Streaming_Metadata.onnx")                                      # Tiny metadata carrier graph.
@@ -32,6 +30,7 @@ LFR_N                  = 6                                  # The model paramete
 PRE_EMPHASIZE          = 0.97                               # Kaldi fbank per-frame pre-emphasis coefficient.
 INPUT_AUDIO_DTYPE      = "INT16"                            # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. Kaldi fbank works on the int16 numeric range, so "F32"/"F16" carry int16-range values (no ÷32768).
 PREVENT_F16_OVERFLOW   = False                              # Set True before export if the front-end will be converted to fp16.
+COMPUTE_IN_F32         = False                              # F16-cache compute precision. False = minimum-cast f16 attention (encoder self-attn + decoder cross-attn Q@K/softmax/attn@V run in f16 on the f16 caches; the context is cast back to f32). True = keep the f16 cache *storage* (cache I/O dtype unchanged) but upcast K/V to f32 at the attention use points, keeping Q/softmax in f32 (f16 storage, f32 compute).
 LOOK_BACK_ENCODER      = 4                                  # The model parameter, edit it carefully.
 LOOK_BACK_DECODER      = 1                                  # The model parameter, edit it carefully.
 DYNAMIC_AXES           = True                               # The dynamic_axes setting. Do not turn off for the Paraformer Streaming model.
@@ -217,6 +216,7 @@ class PARAFORMER_ENCODER(torch.nn.Module):
         self.indices_mel = indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1).to(torch.int32)  # int32 LFR gather indices
         self.total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders)
         self.cache_layer_num_en = len(self.total_encoders)
+        self.compute_in_f32 = COMPUTE_IN_F32
         self.save_keys_en = [None] * self.cache_layer_num_en
         self.save_values_en = [None] * self.cache_layer_num_en
         positions = torch.arange(1, max_continue_streaming, dtype=torch.int32).unsqueeze(0)
@@ -268,7 +268,11 @@ class PARAFORMER_ENCODER(torch.nn.Module):
             self.save_keys_en[layer_idx] = k[:, :, self.look_back_en:-self.look_back_C]
             self.save_values_en[layer_idx] = v_h[:, self.look_back_en:-self.look_back_C]
             v_fsmn = attn.fsmn_block(v.transpose(1, 2)).transpose(1, 2) + v                  # FSMN symmetric pad folded into the Conv1d
-            context = torch.matmul(torch.softmax(torch.matmul(q.half(), k), dim=-1), v_h).transpose(0, 1).reshape(1, -1, self.cif_hidden_size).float()   # minimum-cast: run attention in f16 on the f16 cache, then cast the context back to f32
+            if self.compute_in_f32:
+                # f16 storage, f32 compute: upcast the f16 K/V cache to f32 at the matmul use points (Q stays f32).
+                context = torch.matmul(torch.softmax(torch.matmul(q, k.float()), dim=-1), v_h.float()).transpose(0, 1).reshape(1, -1, self.cif_hidden_size)
+            else:
+                context = torch.matmul(torch.softmax(torch.matmul(q.half(), k), dim=-1), v_h).transpose(0, 1).reshape(1, -1, self.cif_hidden_size).float()   # minimum-cast: run attention in f16 on the f16 cache, then cast the context back to f32
             x = attn.linear_out(context) + v_fsmn
             if layer_idx > 0:
                 x += residual
@@ -328,6 +332,7 @@ class PARAFORMER_DECODER(torch.nn.Module):
         self.cif_hidden_size = cif_hidden_size
         self.fsmn_kernal_size_minus = -torch.tensor([self.decoder.decoders._modules["0"].self_attn.kernel_size - 1], dtype=torch.int64)
         self.cache_layer_num_de = cache_layer_num_de
+        self.compute_in_f32 = COMPUTE_IN_F32
         self.cache_layer_num_de_2 = cache_layer_num_de + cache_layer_num_de
         self.save_fsmn_de = [None] * cache_layer_num_de
         self.save_keys_de = [None] * cache_layer_num_de
@@ -377,7 +382,11 @@ class PARAFORMER_DECODER(torch.nn.Module):
             v = torch.cat([all_inputs[layer_idx + self.cache_layer_num_de_2], v], dim=1)
             self.save_keys_de[layer_idx] = k[:, :, -self.look_back_de:]
             self.save_values_de[layer_idx] = v[:, -self.look_back_de:]
-            context = torch.matmul(torch.softmax(torch.matmul(q, k.float()), dim=-1), v.float()).transpose(0, 1).reshape(1, -1, self.cif_hidden_size)   # cast the f16 cache back to f32 for the matmuls
+            if self.compute_in_f32:
+                context = torch.matmul(torch.softmax(torch.matmul(q, k.float()), dim=-1), v.float()).transpose(0, 1).reshape(1, -1, self.cif_hidden_size)   # cast the f16 cache back to f32 for the matmuls
+            else:
+                # minimum-cast: downcast Q to f16 and run the attention in f16 on the f16 cache, then cast the context back to f32.
+                context = torch.matmul(torch.softmax(torch.matmul(q.half(), k), dim=-1), v).transpose(0, 1).reshape(1, -1, self.cif_hidden_size).float()
             list_frame = residual + cross.linear_out(context)
         decoder_layer = self.decoder.decoders3[0]
         ff = decoder_layer.feed_forward
@@ -572,6 +581,7 @@ with torch.inference_mode():
         {
             "paraformer_streaming_metadata_version": 1,
             "producer": "Export_Paraformer_Streaming.py",
+            "compute_in_f32": COMPUTE_IN_F32,
         },
         {
             "num_encoder_layers": NUM_LAYER_EN,
