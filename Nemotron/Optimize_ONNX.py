@@ -65,7 +65,7 @@ def _make_config(target: dict) -> OptimizerConfig:
         optimized_folder_path=str(target["optimized"]),
         model_plans=_model_plans(target["prefix"]),
         dynamic_weight_type="QInt8",
-        dynamic_per_channel=False,
+        dynamic_per_channel=True,
         dynamic_reduce_range=False,
         force_external_data=FORCE_EXTERNAL_DATA,
         upgrade_opset=UPGRADE_OPSET,

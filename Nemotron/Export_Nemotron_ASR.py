@@ -32,8 +32,7 @@ from torch import Tensor, nn
 
 # Configuration
 _SCRIPT_DIR    = Path(__file__).resolve().parent
-_REPO_ROOT     = _SCRIPT_DIR.parent
-_DOWNLOADS     = _REPO_ROOT.parent
+_DOWNLOADS     = Path("/home/DakeQQ/Downloads")
 
 NEMO_PATH     = _DOWNLOADS / "nemotron-3.5-asr-streaming-0.6b" / "nemotron-3.5-asr-streaming-0.6b.nemo"
 

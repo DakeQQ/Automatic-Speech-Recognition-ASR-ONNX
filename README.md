@@ -36,6 +36,7 @@
 | **Qwen3 ForcedAligner** | [model](https://www.modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B) | - Non-autoregressive word-level timestamps <br> - 非自回归词级时间戳 |
 | **X-ASR** | [repo](https://github.com/Gilgamesh-J/X-ASR) | - Streaming Zipformer transducer (ZH-EN) <br> - 流式 Zipformer 转录器（中英） |
 | **Nemotron** | [model](https://modelscope.cn/models/nv-community/nemotron-3.5-asr-streaming-0.6b) | - Streaming Multilingual <br> - 流式多语种 |
+| **Parakeet** | [model](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) | - Multilingual FastConformer + TDT decoder <br> - 多语种 FastConformer + TDT 解码器 |
 
 
 ---
@@ -55,10 +56,13 @@
 | Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | Paraformer-Small-Chinese<br>f32                  | 0.04                                               |
 | Ubuntu 24.04     | Laptop     | CPU<br>i5-7300HQ     | Paraformer-Large-English<br>q8f32                | 0.14                                               |
 | Ubuntu 24.04     | Desktop    | CPU<br>i3-12300      | Paraformer-Large-Streaming-Chinese<br>f32        | 0.06 <br> Chunk Size: 8000                         |
-| Ubuntu 24.04     | Laptop     | CPU<br>i3-12300      | FireRedASR-AED-L-Chinese<br>q8f32                | 0.17                                               |
+| Ubuntu 24.04     | Desktop     | CPU<br>i3-12300     | FireRedASR-AED-L-Chinese<br>q8f32                | 0.17                                               |
 | Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Dolphin-Small<br>q8f32                           | 0.14                                               |
 | Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Fun-ASR-Nano<br>q4f32                            | 0.11                                               |
-| Ubuntu 24.04     | Laptop     | CPU<br>i7-12300      | Qwen3-ASR-0.6B<br>q4f32                          | 0.12                                               |
+| Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Qwen3-ASR-0.6B<br>q4f32                          | 0.12                                               |
+| Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Nemotron-ASR-0.6B<br>q8f32                       | 0.1                                                |
+| Ubuntu 24.04     | Laptop     | CPU<br>i7-1165G7     | Parakeet-ASR-0.6B<br>q8f32                       | 0.08                                               |
+
 
 
 ---

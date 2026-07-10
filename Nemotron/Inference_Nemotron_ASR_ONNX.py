@@ -246,12 +246,16 @@ def main() -> None:
     dj_enc_proj_in, dj_frame_idx_in, dj_token_in, dj_state_h_in, dj_state_c_in = dj_names_in
     dj_next_token_out, dj_is_blank_out, dj_state_h_next_out, dj_state_c_next_out = dj_names_out
 
+    # LSTM state dtype follows the exported decoder graph (F32 or F16), never hard-coded.
+    dj_in_specs = {spec.name: spec for spec in sess_dj.get_inputs()}
+    state_dtype = _np_dtype(dj_in_specs[dj_state_h_in].type)
+
     # Shared RNN-T greedy decoder: state buffers bound in==out for in-place updates.
     frame_idx_np = np.zeros((1,), dtype=np.int32)
     frame_idx_ort = _ort_from_numpy(np.zeros((1,), dtype=np.int32))
     token_buf = _ort_from_numpy(np.array([[blank_id]], dtype=np.int32))
-    state_h_buf = _ort_from_numpy(np.zeros((lstm_layers, 1, pred_hidden), dtype=np.float32))
-    state_c_buf = _ort_from_numpy(np.zeros((lstm_layers, 1, pred_hidden), dtype=np.float32))
+    state_h_buf = _ort_from_numpy(np.zeros((lstm_layers, 1, pred_hidden), dtype=state_dtype))
+    state_c_buf = _ort_from_numpy(np.zeros((lstm_layers, 1, pred_hidden), dtype=state_dtype))
     is_blank_buf = _ort_from_numpy(np.zeros((1, 1), dtype=np.int32))
 
     binding_dj = sess_dj.io_binding()
@@ -280,8 +284,8 @@ def main() -> None:
                 emitted += 1
 
     blank_token_np = np.array([[blank_id]], dtype=np.int32)
-    zero_h_np = np.zeros((lstm_layers, 1, pred_hidden), dtype=np.float32)
-    zero_c_np = np.zeros((lstm_layers, 1, pred_hidden), dtype=np.float32)
+    zero_h_np = np.zeros((lstm_layers, 1, pred_hidden), dtype=state_dtype)
+    zero_c_np = np.zeros((lstm_layers, 1, pred_hidden), dtype=state_dtype)
 
     def reset_decoder_state():
         token_buf.update_inplace(blank_token_np)
