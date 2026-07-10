@@ -24,7 +24,7 @@ _ARGS = _parse_args()
 
 onnx_folder            = os.path.abspath(_ARGS.onnx_folder)                          # Selected ONNX graph folder.
 save_vocab             = os.path.join(onnx_folder, "vocab_Dolphin_CN_Dialect.txt")    # The exported Dolphin-CN-Dialect vocab path.
-onnx_model_Metadata    = os.path.join(onnx_folder, "Dolphin_Metadata.onnx")                             # Tiny metadata carrier graph.
+onnx_model_Metadata    = os.path.join(onnx_folder, "ASR_Matadata.onnx")                             # Tiny metadata carrier graph.
 onnx_model_Encoder     = os.path.join(onnx_folder, "Dolphin_Encoder.onnx")                              # The exported onnx encoder model path.
 onnx_model_Decoder     = os.path.join(onnx_folder, "Dolphin_Decoder.onnx")                              # The exported onnx decoder (main, pure-float) model path.
 onnx_model_Embed       = os.path.join(onnx_folder, "Dolphin_Decoder_Embed.onnx")                        # Token-embedding graph (keeps int ids out of the decoder).

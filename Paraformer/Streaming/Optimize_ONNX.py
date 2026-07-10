@@ -15,7 +15,7 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, model_size_mb, run_optimizer
+from Optimize_ONNX_Common import OptimizerConfig, Plan, metadata_int_for_model, run_optimizer
 
 
 ORIGINAL_FOLDER_PATH = str(_SCRIPT_DIR / "Paraformer_ONNX")
@@ -23,8 +23,6 @@ OPTIMIZED_FOLDER_PATH = str(_SCRIPT_DIR / "Paraformer_Optimized")
 
 FORCE_EXTERNAL_DATA = False
 UPGRADE_OPSET = 0
-
-PARAFORMER_NUM_HEADS = 4
 
 F16_OP_BLOCK_LIST = [
     "DynamicQuantizeLinear",
@@ -36,16 +34,20 @@ F16_OP_BLOCK_LIST = [
 ]
 
 
+def paraformer_num_heads(model_path: str) -> int:
+    key = "num_encoder_heads" if "Encoder" in Path(model_path).stem else "num_decoder_heads"
+    return metadata_int_for_model(model_path, key)
+
+
 def paraformer_hidden_size(model_path: str) -> int:
-    return 512 if model_size_mb(model_path) > 500.0 else 320
+    return metadata_int_for_model(model_path, "hidden_size")
 
 
 # ============================== MODEL PLANS ==============================
 
-TRANSFORMER_PLAN = dict(num_heads=PARAFORMER_NUM_HEADS, hidden_size=paraformer_hidden_size)
+TRANSFORMER_PLAN = dict(num_heads=paraformer_num_heads, hidden_size=paraformer_hidden_size)
 
 MODEL_PLANS = {
-    "Paraformer_Streaming_Metadata": Plan(method="F32", transformer=False),
     "Paraformer_Streaming_Encoder": Plan(method="DYNAMIC", **TRANSFORMER_PLAN),
     "Paraformer_Streaming_Decoder": Plan(method="DYNAMIC", **TRANSFORMER_PLAN),
 }

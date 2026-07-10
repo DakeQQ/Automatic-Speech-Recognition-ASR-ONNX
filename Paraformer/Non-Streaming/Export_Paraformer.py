@@ -22,7 +22,7 @@ MODEL_PATH      = DOWNLOADS_DIR / "speech_paraformer-large_asr_nat-zh-cn-16k-com
 ONNX_OUTPUT_DIR = SCRIPT_DIR / "Paraformer_ONNX"                                                        # Where exported artifacts are written.
 ONNX_MODEL_PATH = ONNX_OUTPUT_DIR / "Paraformer.onnx"                                                   # The exported onnx model path.
 VOCAB_FILE_PATH = ONNX_OUTPUT_DIR / "Vocab_Paraformer.txt"                                              # Save the vocab list.
-ONNX_METADATA_PATH = ONNX_OUTPUT_DIR / "Paraformer_Metadata.onnx"                                       # Tiny metadata carrier graph.
+ONNX_METADATA_PATH = ONNX_OUTPUT_DIR / "ASR_Matadata.onnx"                                       # Tiny metadata carrier graph.
 
 
 # ============================== Language profiles ==============================
@@ -479,7 +479,7 @@ with torch.inference_mode():
         },
     )
     _written, _skipped = [], []
-    for _target in [onnx_model_Metadata, onnx_model_A]:
+    for _target in [onnx_model_Metadata]:
         try:
             write_onnx_metadata(_target, onnx_metadata)
             _written.append(Path(_target).name)

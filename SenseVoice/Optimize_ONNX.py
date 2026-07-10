@@ -15,7 +15,7 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, collect_quant_unsafe_nodes, run_optimizer
+from Optimize_ONNX_Common import OptimizerConfig, Plan, collect_quant_unsafe_nodes, metadata_int_for_model, run_optimizer
 
 
 ORIGINAL_FOLDER_PATH = str(_SCRIPT_DIR / "SenseVoice_ONNX")
@@ -24,8 +24,12 @@ OPTIMIZED_FOLDER_PATH = str(_SCRIPT_DIR / "SenseVoice_Optimized")
 FORCE_EXTERNAL_DATA = False
 UPGRADE_OPSET = 0
 
-SENSEVOICE_NUM_HEADS = 4
-SENSEVOICE_HIDDEN_SIZE = 512
+def sensevoice_num_heads(model_path: str) -> int:
+    return metadata_int_for_model(model_path, "num_heads")
+
+
+def sensevoice_hidden_size(model_path: str) -> int:
+    return metadata_int_for_model(model_path, "hidden_size")
 
 F16_OP_BLOCK_LIST = [
     "DynamicQuantizeLinear",
@@ -39,12 +43,11 @@ F16_OP_BLOCK_LIST = [
 # ============================== MODEL PLANS ==============================
 
 MODEL_PLANS = {
-    "SenseVoice_Metadata": Plan(method="F32", transformer=False),
     "SenseVoiceSmall": Plan(
         method="DYNAMIC",
         opt_level=2,
-        num_heads=SENSEVOICE_NUM_HEADS,
-        hidden_size=SENSEVOICE_HIDDEN_SIZE,
+        num_heads=sensevoice_num_heads,
+        hidden_size=sensevoice_hidden_size,
         nodes_to_exclude=collect_quant_unsafe_nodes,
     ),
 }

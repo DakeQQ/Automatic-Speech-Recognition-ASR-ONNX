@@ -13,7 +13,7 @@ model_path = "/home/DakeQQ/Downloads/whisper-large-v3-turbo"    # Source Whisper
 # -- Exported ONNX graph paths: core pipeline (Embed keeps token ids out of the float decoder; Prefill / Decode build position embedding + causal mask) --
 onnx_folder               = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Whisper_ONNX")   # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
 os.makedirs(onnx_folder, exist_ok=True)
-onnx_model_Metadata       = os.path.join(onnx_folder, "Whisper_Metadata.onnx")
+onnx_model_Metadata       = os.path.join(onnx_folder, "ASR_Matadata.onnx")
 onnx_model_Encoder        = os.path.join(onnx_folder, "Whisper_Encoder.onnx")
 onnx_model_Decoder        = os.path.join(onnx_folder, "Whisper_Decoder.onnx")
 onnx_model_Embed          = os.path.join(onnx_folder, "Whisper_Decoder_Embed.onnx")
@@ -1101,12 +1101,7 @@ with torch.inference_mode():
         },
     )
 
-    _metadata_targets = [
-        onnx_model_Metadata, onnx_model_Encoder, onnx_model_Decoder, onnx_model_Embed,
-        onnx_model_Prefill, onnx_model_Decode, onnx_model_Greedy,
-        onnx_model_Argmax, onnx_model_First_Beam, onnx_model_Second_Beam,
-        onnx_model_Penality, onnx_model_No_Speech,
-    ]
+    _metadata_targets = [onnx_model_Metadata]
     _written, _skipped = [], []
     for _target in _metadata_targets:
         if not os.path.exists(_target):

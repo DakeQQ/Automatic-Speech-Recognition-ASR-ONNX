@@ -33,7 +33,7 @@ onnx_folder                     = _ARGS.onnx_folder.expanduser().resolve()      
 resolved_tokenizer_path         = str(onnx_folder / "Qwen3-0.6B")                                               # Bundled Qwen3 tokenizer directory.
 resolved_ctc_tokenizer_path     = str(onnx_folder / "multilingual.tiktoken")                                    # Bundled multilingual tiktoken vocab (CTC branch).
 
-onnx_model_Metadata             = str(onnx_folder / "FunASR_Nano_Metadata.onnx")                                # Tiny metadata carrier graph.
+onnx_model_Metadata             = str(onnx_folder / "ASR_Matadata.onnx")                                # Tiny metadata carrier graph.
 onnx_model_Encoder              = str(onnx_folder / "FunASR_Nano_Encoder.onnx")                                 # The exported onnx model path.
 onnx_model_CTC_Decoder          = str(onnx_folder / "FunASR_Nano_CTC_Decoder.onnx")                             # Optional fast CTC transcription head; loaded only when USE_CTC_DECODER=True.
 onnx_model_Embed                = str(onnx_folder / "FunASR_Nano_Decoder_Embed.onnx")

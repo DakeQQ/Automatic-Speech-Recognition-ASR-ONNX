@@ -30,7 +30,7 @@ else:
 os.makedirs(onnx_dir, exist_ok=True)
 
 # -- Exported ONNX graph paths: core pipeline (Embed keeps token ids out of the float decoder; Prefill / Decode build position embedding + causal mask) --
-onnx_model_Metadata    = f"{onnx_dir}/FireRedASR_Metadata.onnx"                  # Tiny metadata carrier graph.
+onnx_model_Metadata    = f"{onnx_dir}/ASR_Matadata.onnx"                  # Tiny metadata carrier graph.
 onnx_model_Encoder     = f"{onnx_dir}/FireRedASR_Encoder.onnx"                    # The exported onnx encoder model path.
 onnx_model_Decoder     = f"{onnx_dir}/FireRedASR_Decoder.onnx"                    # The exported onnx decoder (main, pure-float) model path.
 onnx_model_Embed       = f"{onnx_dir}/FireRedASR_Decoder_Embed.onnx"              # Token-embedding graph (keeps int ids out of the decoder).
@@ -1174,12 +1174,7 @@ with torch.inference_mode():
         },
     )
 
-    _metadata_targets = [
-        onnx_model_Metadata, onnx_model_Encoder, onnx_model_Decoder, onnx_model_Embed,
-        onnx_model_Prefill, onnx_model_Decode, onnx_model_Greedy,
-        onnx_model_Argmax, onnx_model_First_Beam, onnx_model_Second_Beam,
-        onnx_model_Penality,
-    ]
+    _metadata_targets = [onnx_model_Metadata]
     _written, _skipped = [], []
     for _target in _metadata_targets:
         if not os.path.exists(_target):

@@ -15,10 +15,9 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, run_optimizer
+from Optimize_ONNX_Common import OptimizerConfig, Plan, metadata_int_for_model, run_optimizer
 
 
-MODEL_SIZE = "0.6B"
 ORIGINAL_FOLDER_PATH = str(_SCRIPT_DIR / "Qwen_ForcedAligner_ONNX")
 OPTIMIZED_FOLDER_PATH = str(_SCRIPT_DIR / "Qwen_ForcedAligner_Optimized")
 
@@ -26,8 +25,16 @@ USE_OPENVINO = False
 FORCE_EXTERNAL_DATA = True
 UPGRADE_OPSET = 0
 
-FORCED_ALIGNER_NUM_HEADS = 16
-FORCED_ALIGNER_HIDDEN_SIZE = 1024 if "0.6B" in MODEL_SIZE else 2048
+def forced_aligner_num_heads(model_path: str) -> int:
+    if "Encoder" in Path(model_path).stem:
+        return metadata_int_for_model(model_path, "audio_encoder_attention_heads")
+    return metadata_int_for_model(model_path, "num_attention_heads")
+
+
+def forced_aligner_hidden_size(model_path: str) -> int:
+    if "Encoder" in Path(model_path).stem:
+        return metadata_int_for_model(model_path, "audio_encoder_d_model")
+    return metadata_int_for_model(model_path, "hidden_size")
 
 WEIGHT_ONLY_ALGORITHM = "k_quant"
 BLOCK_SIZE = 32
@@ -44,12 +51,11 @@ F16_OP_BLOCK_LIST = [
 
 # ============================== MODEL PLANS ==============================
 
-TRANSFORMER_PLAN = dict(num_heads=FORCED_ALIGNER_NUM_HEADS, hidden_size=FORCED_ALIGNER_HIDDEN_SIZE)
+TRANSFORMER_PLAN = dict(num_heads=forced_aligner_num_heads, hidden_size=forced_aligner_hidden_size)
 Q4_MATMUL = dict(method="Q4", op_types=("MatMul",), axes=(0,), **TRANSFORMER_PLAN)
 Q4_GATHER = dict(method="Q4", algo="DEFAULT", op_types=("Gather",), axes=(1,), block_size=16, **TRANSFORMER_PLAN)
 
 MODEL_PLANS = {
-    "ForcedAligner_Metadata":       Plan(method="F32", transformer=False),
     "ForcedAligner_Encoder":        Plan(**Q4_MATMUL, opt_level=2),
     "ForcedAligner_Embed":          Plan(**Q4_GATHER),
     "ForcedAligner_Decoder_Main":   Plan(**Q4_MATMUL),

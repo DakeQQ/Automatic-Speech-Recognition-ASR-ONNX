@@ -11,7 +11,7 @@ from funasr import AutoModel
 model_path = "/home/DakeQQ/Downloads/SenseVoiceSmall"                                     # The SenseVoice download path.
 onnx_folder = Path(__file__).resolve().parent / "SenseVoice_ONNX"                       # Local folder next to this script holding the exported ONNX graph; created automatically if missing.
 onnx_folder.mkdir(parents=True, exist_ok=True)
-onnx_model_Metadata = str(onnx_folder / "SenseVoice_Metadata.onnx")      # Tiny metadata carrier graph.
+onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")      # Tiny metadata carrier graph.
 onnx_model_A = str(onnx_folder / "SenseVoiceSmall.onnx")              # The exported onnx model path.
 
 
@@ -300,7 +300,7 @@ with torch.inference_mode():
         },
     )
     _written, _skipped = [], []
-    for _target in [onnx_model_Metadata, onnx_model_A]:
+    for _target in [onnx_model_Metadata]:
         try:
             write_onnx_metadata(_target, onnx_metadata)
             _written.append(Path(_target).name)

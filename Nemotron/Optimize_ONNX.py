@@ -14,7 +14,7 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, run_optimizer
+from Optimize_ONNX_Common import OptimizerConfig, Plan, metadata_int_for_model, run_optimizer
 
 
 USE_OPENVINO = False
@@ -29,8 +29,12 @@ F16_OP_BLOCK_LIST = [
     "MatMulIntegerToFloat",
 ]
 
-ENCODER_NUM_HEADS = 8
-ENCODER_HIDDEN_SIZE = 1024
+def nemotron_encoder_heads(model_path: str) -> int:
+    return metadata_int_for_model(model_path, "encoder_heads")
+
+
+def nemotron_encoder_hidden_size(model_path: str) -> int:
+    return metadata_int_for_model(model_path, "encoder_d_model")
 
 # Both possible graph sets; each is optimized only if its exported ONNX folder is present, so the same
 # script auto-adapts to whatever the fused Export_Nemotron_ASR.py produced (offline, streaming, or both).
@@ -48,8 +52,7 @@ _TARGETS = (
 
 def _model_plans(prefix: str) -> dict:
     return {
-        f"{prefix}_Metadata": Plan(method="F32", transformer=False),
-        f"{prefix}_Encoder":  Plan(method="DYNAMIC", external=False, num_heads=ENCODER_NUM_HEADS, hidden_size=ENCODER_HIDDEN_SIZE),  # mel front-end + Conformer + prompt head
+        f"{prefix}_Encoder":  Plan(method="DYNAMIC", external=False, num_heads=nemotron_encoder_heads, hidden_size=nemotron_encoder_hidden_size),  # mel front-end + Conformer + prompt head
         f"{prefix}_Decoder":  Plan(method="F32", external=False, transformer=False),  # folded RNN-T decoder/joint + greedy search
     }
 
@@ -76,7 +79,7 @@ def _make_config(target: dict) -> OptimizerConfig:
 
 
 def _is_present(target: dict) -> bool:
-    return (target["original"] / f"{target['prefix']}_Metadata.onnx").exists()
+    return (target["original"] / "ASR_Matadata.onnx").exists()
 
 
 def main() -> None:

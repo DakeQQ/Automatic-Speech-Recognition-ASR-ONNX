@@ -27,7 +27,7 @@ from STFT_Process import STFT_Process
 download_path                  = r'/home/DakeQQ/Downloads/Qwen3-ASR-0.6B'                   # Set the path where the Qwen3-ASR-[0.6B, 1.7B] model downloaded.
 onnx_folder                    = Path(__file__).resolve().parent / "Qwen_ASR_ONNX"          # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
 onnx_folder.mkdir(parents=True, exist_ok=True)
-onnx_model_Metadata            = str(onnx_folder / "Qwen3_ASR_Metadata.onnx")               # Tiny metadata carrier graph.
+onnx_model_Metadata            = str(onnx_folder / "ASR_Matadata.onnx")               # Tiny metadata carrier graph.
 onnx_model_Encoder             = str(onnx_folder / "Qwen3_ASR_Encoder.onnx")                # The exported onnx model path.
 onnx_model_Embed               = str(onnx_folder / "Qwen3_ASR_Decoder_Embed.onnx")
 onnx_model_Main                = str(onnx_folder / "Qwen3_ASR_Decoder_Main.onnx")
@@ -1580,6 +1580,7 @@ with torch.inference_mode():
             "hidden_size": hidden_size,
             "vocab_size": vocab_size,
             "audio_encoder_layers": audio_cfg.encoder_layers,
+            "audio_encoder_attention_heads": audio_cfg.encoder_attention_heads,
             "audio_encoder_d_model": audio_cfg.d_model,
             "audio_encoder_output_dim": audio_cfg.output_dim,
             "num_mels": N_MELS,
@@ -1612,20 +1613,7 @@ with torch.inference_mode():
     )
     del metadata_marker
 
-    metadata_targets = [
-        onnx_model_Metadata,
-        onnx_model_Encoder,
-        onnx_model_Embed,
-        onnx_model_Main,
-        onnx_model_Rotary_Mask_Prefill,
-        onnx_model_Rotary_Mask_Decode,
-        onnx_model_Greedy,
-        onnx_model_First_Beam,
-        onnx_model_Second_Beam,
-        onnx_model_Penalty,
-        onnx_model_Argmax,
-        onnx_model_Concat_Embed,
-    ]
+    metadata_targets = [onnx_model_Metadata]
     written = []
     for target in metadata_targets:
         if not Path(target).exists():

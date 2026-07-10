@@ -7,6 +7,7 @@ import os
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import onnx
@@ -26,6 +27,7 @@ _QUANT_FORMATS = {
 }
 _DYNAMIC_WEIGHT_TYPES = {"QUINT8": QuantType.QUInt8, "QINT8": QuantType.QInt8}
 _VALID_ALGOS = {"DEFAULT", "RTN", "HQQ", "k_quant"}
+ASR_METADATA_ARTIFACT = "ASR_Matadata.onnx"
 
 
 @dataclass
@@ -107,6 +109,7 @@ class OptimizerConfig:
     f16_op_block_list: list[str] | None = None
     # optional side artifacts copied after all models are processed
     copy_artifacts: tuple[str, ...] = ()
+    metadata_artifact: str = ASR_METADATA_ARTIFACT
 
 
 @dataclass
@@ -328,8 +331,8 @@ def write_onnx_metadata(model_path: str, metadata: dict[str, str]) -> None:
     """Add/overwrite ``metadata_props`` on an ONNX file in place, preserving external-weight sidecars.
 
     ``load_external_data=False`` keeps any ``*.data`` sidecar untouched (only the graph proto + metadata
-    are rewritten), so restamping is safe for both inline and external-data models. A no-op when the
-    source model carried no metadata.
+    are rewritten), so updating the metadata carrier is safe for inline and external-data models. A no-op
+    when the source model carried no metadata.
     """
     if not metadata:
         return
@@ -343,6 +346,37 @@ def write_onnx_metadata(model_path: str, metadata: dict[str, str]) -> None:
     onnx.save(model, model_path)
     del model
     gc.collect()
+
+
+@lru_cache(maxsize=None)
+def read_asr_metadata(metadata_path: str) -> dict[str, str]:
+    metadata_path = os.path.abspath(metadata_path)
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(
+            f"ASR metadata carrier not found: {metadata_path}. "
+            "Run the export script first so ASR_Matadata.onnx is created."
+        )
+    return read_onnx_metadata(metadata_path)
+
+
+def read_asr_metadata_for_model(model_path: str, artifact: str = ASR_METADATA_ARTIFACT) -> dict[str, str]:
+    return read_asr_metadata(os.path.join(os.path.dirname(model_path), artifact))
+
+
+def metadata_value_for_model(model_path: str, *keys: str, artifact: str = ASR_METADATA_ARTIFACT) -> str:
+    metadata = read_asr_metadata_for_model(model_path, artifact)
+    for key in keys:
+        value = metadata.get(key)
+        if value is not None:
+            return value
+    raise KeyError(
+        f"Required metadata key {keys!r} is missing from "
+        f"{os.path.join(os.path.dirname(model_path), artifact)}."
+    )
+
+
+def metadata_int_for_model(model_path: str, *keys: str, artifact: str = ASR_METADATA_ARTIFACT) -> int:
+    return int(metadata_value_for_model(model_path, *keys, artifact=artifact))
 
 
 def run_onnxslim(model_path: str, external: bool, config: OptimizerConfig, no_shape_infer: bool) -> None:
@@ -641,7 +675,6 @@ def process_model(name: str, rp: ResolvedPlan, config: OptimizerConfig, mixed_pr
         print(f"  Skipping - file not found: {src_path}")
         return
 
-    source_metadata = read_onnx_metadata(src_path)
     _remove_external_files(dst_path)
 
     external = rp.external or model_exceeds_2gb(src_path)
@@ -669,18 +702,14 @@ def process_model(name: str, rp: ResolvedPlan, config: OptimizerConfig, mixed_pr
     if not external and os.path.exists(dst_path + ".data"):
         os.remove(dst_path + ".data")
 
-    # Restamp the source model's metadata_props onto the optimized output. Quantization / onnxslim /
-    # the transformers optimizer can drop custom metadata; the geometry / token / max_seq_len facts are
-    # invariant through those passes, so copying them across keeps the runtime's metadata reads working.
-    # Only the activation dtype is allowed to change here, and only for plans that actually run fp16 conversion.
-    output_metadata = dict(source_metadata)
-    if use_fp16:
-        output_metadata["activations_fp16"] = "1"
-    write_onnx_metadata(dst_path, output_metadata)
-
 
 def copy_artifacts(config: OptimizerConfig) -> None:
-    for artifact in config.copy_artifacts:
+    artifacts = (*config.copy_artifacts, config.metadata_artifact)
+    seen = set()
+    for artifact in artifacts:
+        if not artifact or artifact in seen:
+            continue
+        seen.add(artifact)
         src_path = os.path.join(config.original_folder_path, artifact)
         dst_path = os.path.join(config.optimized_folder_path, artifact)
         if os.path.exists(src_path):

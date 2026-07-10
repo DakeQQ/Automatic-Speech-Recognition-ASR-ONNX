@@ -5,14 +5,14 @@ Standalone and NeMo-free: reads weights/config from the .nemo archive. The CHUNK
 the export mode (see the Configuration block):
 
   CHUNK_MS = 0  -> OFFLINE. One full-sequence graph folding mel, Conformer, and prompt projection:
-      Nemotron_ASR_Metadata.onnx   marker -> marker
+      ASR_Matadata.onnx   marker -> marker
       Nemotron_ASR_Encoder.onnx    audio + prompt_id -> enc_proj
       Nemotron_ASR_Decoder.onnx    enc_proj + frame_idx + token + state -> next_token + is_blank + state
 
   CHUNK_MS > 0  -> STREAMING. A cache-aware encoder consuming one fixed audio window per step while
       threading NeMo's Conformer caches; each step emits VALID_OUT_LEN frames that are bit-for-bit
       equal to the offline graph, so the reused RNN-T greedy decoder keeps offline quality:
-      Nemotron_ASR_Streaming_Metadata.onnx / _Encoder.onnx / _Decoder.onnx
+      ASR_Matadata.onnx / _Encoder.onnx / _Decoder.onnx
 
 Offline graphs go to Nemotron_ASR_ONNX/; streaming graphs go to Streaming/Nemotron_ASR_Streaming_ONNX/.
 """
@@ -56,12 +56,12 @@ FIXED_INPUT_AUDIO_SECONDS = 10.0    # Offline only: used when DYNAMIC_AXES is Fa
 
 if STREAMING:
     ONNX_FOLDER        = _SCRIPT_DIR / "Nemotron_ASR_Streaming_ONNX"
-    METADATA_NAME      = "Nemotron_ASR_Streaming_Metadata.onnx"
+    METADATA_NAME      = "ASR_Matadata.onnx"
     ENCODER_NAME       = "Nemotron_ASR_Streaming_Encoder.onnx"
     DECODER_JOINT_NAME = "Nemotron_ASR_Streaming_Decoder.onnx"
 else:
     ONNX_FOLDER        = _SCRIPT_DIR / "Nemotron_ASR_ONNX"
-    METADATA_NAME      = "Nemotron_ASR_Metadata.onnx"
+    METADATA_NAME      = "ASR_Matadata.onnx"
     ENCODER_NAME       = "Nemotron_ASR_Encoder.onnx"
     DECODER_JOINT_NAME = "Nemotron_ASR_Decoder.onnx"
 
@@ -188,17 +188,18 @@ def build_model_metadata(*sections):
     return metadata
 
 
-def finalize_graph(onnx_path: Path, metadata: dict) -> None:
-    """Merge torch external sidecars into one data file and stamp metadata."""
+def finalize_graph(onnx_path: Path, metadata: dict | None = None) -> None:
+    """Merge torch external sidecars into one data file and optionally stamp metadata."""
     import onnx
 
     model = onnx.load(str(onnx_path))
-    existing = {prop.key: prop for prop in model.metadata_props}
-    for key, value in metadata.items():
-        if key in existing:
-            existing[key].value = value
-        else:
-            model.metadata_props.add(key=key, value=value)
+    if metadata:
+        existing = {prop.key: prop for prop in model.metadata_props}
+        for key, value in metadata.items():
+            if key in existing:
+                existing[key].value = value
+            else:
+                model.metadata_props.add(key=key, value=value)
     for sidecar in onnx_path.parent.glob("*Constant_*_attr__value"):
         sidecar.unlink()
     data_name = onnx_path.name + ".data"
@@ -829,7 +830,7 @@ def export_all():
                                       output_names=["enc_proj"],
                                       dynamic_axes=enc_axes,
                                       opset_version=OPSET, dynamo=False)
-                finalize_graph(p, metadata)
+                finalize_graph(p)
 
                 p = ONNX_FOLDER / DECODER_JOINT_NAME
                 if STREAMING:
@@ -854,7 +855,7 @@ def export_all():
                                   output_names=["next_token", "is_blank", "state_h_next", "state_c_next"],
                                   dynamic_axes=dec_axes,
                                   opset_version=OPSET, dynamo=False)
-                finalize_graph(p, metadata)
+                finalize_graph(p)
 
                 print(f"Stamped {len(metadata)} metadata keys. Export complete.")
 

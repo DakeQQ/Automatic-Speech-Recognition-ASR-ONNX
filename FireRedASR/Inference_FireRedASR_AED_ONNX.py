@@ -30,7 +30,7 @@ _ARGS = _parse_args()
 # -- Optimized ONNX graph paths (Optimize_ONNX.py output): core pipeline (Embed keeps token ids out of the float decoder; Prefill / Decode build position embedding + causal mask) --
 onnx_folder            = _ARGS.onnx_folder.expanduser().resolve()                # Selected ONNX graph folder (also holds the bundled tokenizer assets).
 
-onnx_model_Metadata    = f"{onnx_folder}/FireRedASR_Metadata.onnx"               # Tiny metadata carrier graph.
+onnx_model_Metadata    = f"{onnx_folder}/ASR_Matadata.onnx"               # Tiny metadata carrier graph.
 onnx_model_Encoder     = f"{onnx_folder}/FireRedASR_Encoder.onnx"                # The exported ONNX encoder model path.
 onnx_model_Decoder     = f"{onnx_folder}/FireRedASR_Decoder.onnx"                # The exported ONNX decoder (main, pure-float) model path.
 onnx_model_Embed       = f"{onnx_folder}/FireRedASR_Decoder_Embed.onnx"          # Token-embedding graph (keeps int ids out of the decoder).

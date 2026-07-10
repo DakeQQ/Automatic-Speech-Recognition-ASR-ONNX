@@ -15,7 +15,7 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, run_optimizer
+from Optimize_ONNX_Common import OptimizerConfig, Plan, metadata_int_for_model, run_optimizer
 
 
 ORIGINAL_FOLDER_PATH = str(_SCRIPT_DIR / "FireRedASR_ONNX")
@@ -25,8 +25,13 @@ USE_OPENVINO = False
 FORCE_EXTERNAL_DATA = False
 UPGRADE_OPSET = 0
 
-FIRERED_NUM_HEADS = 20
-FIRERED_HIDDEN_SIZE = 1280
+def firered_num_heads(model_path: str) -> int:
+    key = "num_encoder_heads" if "Encoder" in Path(model_path).stem else "num_decoder_heads"
+    return metadata_int_for_model(model_path, key)
+
+
+def firered_hidden_size(model_path: str) -> int:
+    return metadata_int_for_model(model_path, "hidden_size")
 
 F16_OP_BLOCK_LIST = [
     "DynamicQuantizeLinear",
@@ -39,10 +44,9 @@ F16_OP_BLOCK_LIST = [
 
 # ============================== MODEL PLANS ==============================
 
-TRANSFORMER_PLAN = dict(num_heads=FIRERED_NUM_HEADS, hidden_size=FIRERED_HIDDEN_SIZE)
+TRANSFORMER_PLAN = dict(num_heads=firered_num_heads, hidden_size=firered_hidden_size)
 
 MODEL_PLANS = {
-    "FireRedASR_Metadata":                Plan(method="F32", transformer=False),
     "FireRedASR_Encoder":                 Plan(method="DYNAMIC", **TRANSFORMER_PLAN),
     "FireRedASR_Decoder":                 Plan(method="DYNAMIC", **TRANSFORMER_PLAN),
     "FireRedASR_Decoder_Embed":           Plan(method="DYNAMIC", transformer=False),

@@ -12,7 +12,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 model_path             = "/home/DakeQQ/Downloads/dolphin-cn-dialect-small-prompt"                                 # The Dolphin-CN-Dialect project download path (small.cn.prompt).
 onnx_folder            = os.path.join(_SCRIPT_DIR, "Dolphin_CN_Dialect_ONNX")                                   # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
 os.makedirs(onnx_folder, exist_ok=True)
-onnx_model_Metadata    = os.path.join(onnx_folder, "Dolphin_Metadata.onnx")                                     # Tiny metadata carrier graph.
+onnx_model_Metadata    = os.path.join(onnx_folder, "ASR_Matadata.onnx")                                     # Tiny metadata carrier graph.
 onnx_model_Encoder     = os.path.join(onnx_folder, "Dolphin_Encoder.onnx")                                      # The exported onnx encoder model path.
 onnx_model_Decoder     = os.path.join(onnx_folder, "Dolphin_Decoder.onnx")                                      # The exported onnx decoder (main, pure-float) model path.
 onnx_model_Embed       = os.path.join(onnx_folder, "Dolphin_Decoder_Embed.onnx")                                # Token-embedding graph (keeps int ids out of the decoder).
@@ -534,11 +534,11 @@ class DOLPHIN_DECODER(torch.nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
-# ONNX METADATA  (embed model geometry + special tokens into every graph)
+# ONNX METADATA  (store model geometry + special tokens in ASR_Matadata.onnx)
 # ──────────────────────────────────────────────────────────────────────────────────
 # The inference runtime used to hard-code the special-token IDs, max_seq_len and sample_rate as
-# constants that HAD to be kept in sync with this exporter. Stamping the same facts into every graph's
-# `metadata_props` lets the runtime read them directly (in ONNX Runtime:
+# constants that HAD to be kept in sync with this exporter. Stamping the same facts into the metadata
+# carrier's `metadata_props` lets the runtime read them directly (in ONNX Runtime:
 # InferenceSession.get_modelmeta().custom_metadata_map), removing the fragile "keep the inference
 # constants in sync with the exporter" duplication. All values are stored as strings.
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -567,7 +567,7 @@ def write_onnx_metadata(onnx_path, metadata):
     """Add/overwrite `metadata_props` on an ONNX file in place, preserving external-weight sidecars.
 
     load_external_data=False keeps any big `*.data` weights on disk untouched (only the graph proto +
-    metadata are rewritten), so this is safe and cheap for every exported Dolphin graph.
+    metadata are rewritten), so this is safe and cheap for the metadata carrier graph.
     """
     import onnx  # lazy: only needed when actually exporting
     model = onnx.load(onnx_path, load_external_data=False)
@@ -941,11 +941,10 @@ with torch.inference_mode():
     gc.collect()
 
     # ══════════════════════════════════════════════════════════════════════════════════
-    # Stamp model metadata into every exported graph
+    # Stamp model metadata into ASR_Matadata.onnx
     # ──────────────────────────────────────────────────────────────────────────────────
-    # The SAME facts are written into every graph so the runtime can read them from whichever model it
-    # queries. Special-token IDs are taken from the tokenizer (units.txt) so they can never drift from
-    # the model; the verified module constants are the fallback. Geometry / max_seq_len / sample_rate
+    # Special-token IDs are taken from the tokenizer (units.txt) so they can never drift from the
+    # model; the verified module constants are the fallback. Geometry / max_seq_len / sample_rate
     # collapse the inference script's hand-kept constants into simple metadata lookups.
     # ══════════════════════════════════════════════════════════════════════════════════
     token_to_id = {token: idx for idx, token in id_to_token.items()}
@@ -1004,12 +1003,7 @@ with torch.inference_mode():
         },
     )
 
-    _metadata_targets = [
-        onnx_model_Metadata, onnx_model_Encoder, onnx_model_Decoder, onnx_model_Embed,
-        onnx_model_Prefill, onnx_model_Decode, onnx_model_Greedy,
-        onnx_model_Argmax, onnx_model_First_Beam, onnx_model_Second_Beam,
-        onnx_model_Penality,
-    ]
+    _metadata_targets = [onnx_model_Metadata]
     _written, _skipped = [], []
     for _target in _metadata_targets:
         if not os.path.exists(_target):

@@ -50,7 +50,6 @@ X_ASR_PLAN = dict(
 )
 
 MODEL_PLANS = {
-    "X_ASR_Metadata": Plan(method="F32", transformer=False),
     "X_ASR_Encoder": Plan(**X_ASR_PLAN),
     "X_ASR_Decoder": Plan(**X_ASR_PLAN),
     "X_ASR_Joiner": Plan(**X_ASR_PLAN),

@@ -11,7 +11,7 @@ from funasr import AutoModel
 model_path         = "/home/DakeQQ/Downloads/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"    # The Paraformer-Chinese-Online-Streaming download path.
 onnx_folder        = Path(__file__).resolve().parent / "Paraformer_ONNX"                                          # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
 onnx_folder.mkdir(parents=True, exist_ok=True)
-onnx_model_Metadata = str(onnx_folder / "Paraformer_Streaming_Metadata.onnx")                                      # Tiny metadata carrier graph.
+onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")                                      # Tiny metadata carrier graph.
 onnx_model_Encoder = str(onnx_folder / "Paraformer_Streaming_Encoder.onnx")                                         # The exported onnx model path.
 onnx_model_Decoder = str(onnx_folder / "Paraformer_Streaming_Decoder.onnx")                                         # The exported onnx model path.
 vocab_path         = str(onnx_folder / "Vocab_Paraformer.txt")                                                      # Save the vocab list.
@@ -605,7 +605,7 @@ with torch.inference_mode():
             "input_audio_length": INPUT_AUDIO_LENGTH,
         },
     )
-    _metadata_targets = [onnx_model_Metadata, onnx_model_Encoder, onnx_model_Decoder]
+    _metadata_targets = [onnx_model_Metadata]
     _written, _skipped = [], []
     for _target in _metadata_targets:
         try:

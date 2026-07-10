@@ -15,7 +15,7 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, model_size_mb, run_optimizer
+from Optimize_ONNX_Common import OptimizerConfig, Plan, metadata_int_for_model, run_optimizer
 
 
 ORIGINAL_FOLDER_PATH = str(_SCRIPT_DIR / "Paraformer_ONNX")
@@ -23,8 +23,6 @@ OPTIMIZED_FOLDER_PATH = str(_SCRIPT_DIR / "Paraformer_Optimized")
 
 FORCE_EXTERNAL_DATA = False
 UPGRADE_OPSET = 0
-
-PARAFORMER_NUM_HEADS = 4
 
 F16_OP_BLOCK_LIST = [
     "DynamicQuantizeLinear",
@@ -35,18 +33,21 @@ F16_OP_BLOCK_LIST = [
 ]
 
 
+def paraformer_num_heads(model_path: str) -> int:
+    return metadata_int_for_model(model_path, "num_heads", "num_encoder_heads")
+
+
 def paraformer_hidden_size(model_path: str) -> int:
-    return 512 if model_size_mb(model_path) > 500.0 else 320
+    return metadata_int_for_model(model_path, "hidden_size")
 
 
 # ============================== MODEL PLANS ==============================
 
 MODEL_PLANS = {
-    "Paraformer_Metadata": Plan(method="F32", transformer=False),
     "Paraformer": Plan(
         method="DYNAMIC",
         opt_level=2,
-        num_heads=PARAFORMER_NUM_HEADS,
+        num_heads=paraformer_num_heads,
         hidden_size=paraformer_hidden_size,
     ),
 }

@@ -37,8 +37,8 @@ def _parse_args() -> argparse.Namespace:
 _ARGS = _parse_args()
 
 # The fused inference auto-detects offline vs streaming graphs in the target folder.
-_OFFLINE_NAMES   = ("Nemotron_ASR_Metadata.onnx", "Nemotron_ASR_Encoder.onnx", "Nemotron_ASR_Decoder.onnx")
-_STREAMING_NAMES = ("Nemotron_ASR_Streaming_Metadata.onnx", "Nemotron_ASR_Streaming_Encoder.onnx",
+_OFFLINE_NAMES   = ("ASR_Matadata.onnx", "Nemotron_ASR_Encoder.onnx", "Nemotron_ASR_Decoder.onnx")
+_STREAMING_NAMES = ("ASR_Matadata.onnx", "Nemotron_ASR_Streaming_Encoder.onnx",
                     "Nemotron_ASR_Streaming_Decoder.onnx")
 _DEFAULT_CANDIDATES = (
     _SCRIPT_DIR / "Nemotron_ASR_Optimized",

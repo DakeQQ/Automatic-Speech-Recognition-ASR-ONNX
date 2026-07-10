@@ -24,7 +24,7 @@ def _parse_args():
 
 _ARGS = _parse_args()
 onnx_folder = _ARGS.onnx_folder.expanduser().resolve()
-onnx_model_Metadata = str(onnx_folder / "SenseVoice_Metadata.onnx")
+onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")
 onnx_model_A = str(onnx_folder / "SenseVoiceSmall.onnx")
 test_audio = model_audio_paths("sensevoice")[0]                                                  # The test audio path.
 

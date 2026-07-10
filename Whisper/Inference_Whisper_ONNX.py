@@ -21,7 +21,7 @@ def _parse_args():
 _ARGS = _parse_args()
 
 onnx_folder               = os.path.abspath(_ARGS.onnx_folder)   # Selected ONNX graph folder.
-onnx_model_Metadata       = os.path.join(onnx_folder, "Whisper_Metadata.onnx")
+onnx_model_Metadata       = os.path.join(onnx_folder, "ASR_Matadata.onnx")
 onnx_model_Encoder        = os.path.join(onnx_folder, "Whisper_Encoder.onnx")               # The exported onnx model paths.
 onnx_model_Decoder        = os.path.join(onnx_folder, "Whisper_Decoder.onnx")
 onnx_model_Embed          = os.path.join(onnx_folder, "Whisper_Decoder_Embed.onnx")

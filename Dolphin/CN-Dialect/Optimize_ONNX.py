@@ -14,10 +14,9 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, run_optimizer
+from Optimize_ONNX_Common import OptimizerConfig, Plan, metadata_int_for_model, run_optimizer
 
 
-MODEL_PATH = r"/home/DakeQQ/Downloads/dolphin-cn-dialect-small-prompt"
 ORIGINAL_FOLDER_PATH = str(_SCRIPT_DIR / "Dolphin_CN_Dialect_ONNX")
 OPTIMIZED_FOLDER_PATH = str(_SCRIPT_DIR / "Dolphin_CN_Dialect_Optimized")
 
@@ -25,8 +24,13 @@ USE_OPENVINO = False
 FORCE_EXTERNAL_DATA = False
 UPGRADE_OPSET = 0
 
-DOLPHIN_NUM_HEADS = 12 if "small" in MODEL_PATH.lower() else 8
-DOLPHIN_HIDDEN_SIZE = 768 if "small" in MODEL_PATH.lower() else 512
+def dolphin_num_heads(model_path: str) -> int:
+    key = "num_encoder_heads" if "Encoder" in Path(model_path).stem else "num_decoder_heads"
+    return metadata_int_for_model(model_path, key)
+
+
+def dolphin_hidden_size(model_path: str) -> int:
+    return metadata_int_for_model(model_path, "hidden_size")
 
 F16_OP_BLOCK_LIST = [
     "DynamicQuantizeLinear",
@@ -39,10 +43,9 @@ F16_OP_BLOCK_LIST = [
 
 # ============================== MODEL PLANS ==============================
 
-TRANSFORMER_PLAN = dict(num_heads=DOLPHIN_NUM_HEADS, hidden_size=DOLPHIN_HIDDEN_SIZE)
+TRANSFORMER_PLAN = dict(num_heads=dolphin_num_heads, hidden_size=dolphin_hidden_size)
 
 MODEL_PLANS = {
-    "Dolphin_Metadata":                 Plan(method="F32", transformer=False),
     "Dolphin_Encoder":                  Plan(method="DYNAMIC", **TRANSFORMER_PLAN),
     "Dolphin_Decoder":                  Plan(method="DYNAMIC", **TRANSFORMER_PLAN),
     "Dolphin_Decoder_Embed":            Plan(method="DYNAMIC", transformer=False),

@@ -45,7 +45,7 @@ from STFT_Process import STFT_Process
 download_path               = r'/home/DakeQQ/Downloads/Qwen3-ForcedAligner-0.6B'             # Local Qwen3-ForcedAligner-0.6B directory (must contain model.safetensors).
 onnx_folder                 = Path(__file__).resolve().parent / "Qwen_ForcedAligner_ONNX"  # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
 onnx_folder.mkdir(parents=True, exist_ok=True)
-onnx_model_Metadata         = str(onnx_folder / "ForcedAligner_Metadata.onnx")
+onnx_model_Metadata         = str(onnx_folder / "ASR_Matadata.onnx")
 onnx_model_Embed            = str(onnx_folder / "ForcedAligner_Embed.onnx")
 onnx_model_Encoder          = str(onnx_folder / "ForcedAligner_Encoder.onnx")
 onnx_model_Rotary_Mask      = str(onnx_folder / "ForcedAligner_Rotary_Mask.onnx")
@@ -1212,6 +1212,7 @@ def export_all() -> None:
             "num_timestamp_buckets": classify_num,
             "timestamp_segment_ms": TIMESTAMP_SEGMENT_TIME,
             "audio_encoder_layers": audio_cfg.encoder_layers,
+            "audio_encoder_attention_heads": audio_cfg.encoder_attention_heads,
             "audio_encoder_d_model": audio_cfg.d_model,
             "audio_encoder_output_dim": audio_cfg.output_dim,
             "num_mels": N_MELS,
@@ -1227,7 +1228,7 @@ def export_all() -> None:
             "timestamp_token_id": _token_id(tokenizer, "<timestamp>", TIMESTAMP_TOKEN_ID),
         },
     )
-    metadata_targets = [onnx_model_Metadata, onnx_model_Embed, onnx_model_Encoder, onnx_model_Rotary_Mask, onnx_model_Main]
+    metadata_targets = [onnx_model_Metadata]
     written = []
     for target in metadata_targets:
         if not Path(target).exists():

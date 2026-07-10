@@ -18,7 +18,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 model_path             = "/home/DakeQQ/Downloads/dolphin-small"                                   # The dolphin project download path. Currently, only support dolphin-small and dolphin-base.
 onnx_folder            = os.path.join(_SCRIPT_DIR, "Dolphin_ONNX")                              # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
 os.makedirs(onnx_folder, exist_ok=True)
-onnx_model_Metadata    = os.path.join(onnx_folder, "Dolphin_Metadata.onnx")                     # Tiny metadata carrier graph.
+onnx_model_Metadata    = os.path.join(onnx_folder, "ASR_Matadata.onnx")                     # Tiny metadata carrier graph.
 onnx_model_Encoder     = os.path.join(onnx_folder, "Dolphin_Encoder.onnx")                      # The exported onnx encoder model path.
 onnx_model_Decoder     = os.path.join(onnx_folder, "Dolphin_Decoder.onnx")                      # The exported onnx decoder (main, pure-float) model path.
 onnx_model_Embed       = os.path.join(onnx_folder, "Dolphin_Decoder_Embed.onnx")                # Token-embedding graph (keeps int ids out of the decoder).
@@ -1163,12 +1163,7 @@ with torch.inference_mode():
         },
     )
 
-    _metadata_targets = [
-        onnx_model_Metadata, onnx_model_Encoder, onnx_model_Decoder, onnx_model_Embed,
-        onnx_model_Prefill, onnx_model_Decode, onnx_model_Greedy,
-        onnx_model_Argmax, onnx_model_First_Beam, onnx_model_Second_Beam,
-        onnx_model_Penality,
-    ]
+    _metadata_targets = [onnx_model_Metadata]
     _written, _skipped = [], []
     for _target in _metadata_targets:
         if not os.path.exists(_target):

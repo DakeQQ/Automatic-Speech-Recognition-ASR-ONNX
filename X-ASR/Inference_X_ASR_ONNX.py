@@ -46,7 +46,7 @@ def _parse_args():
 
 _ARGS = _parse_args()
 onnx_folder = _ARGS.onnx_folder.expanduser().resolve()
-onnx_model_Metadata = str(onnx_folder / "X_ASR_Metadata.onnx")
+onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")
 onnx_encoder = str(onnx_folder / "X_ASR_Encoder.onnx")
 onnx_decoder = str(onnx_folder / "X_ASR_Decoder.onnx")
 onnx_joiner = str(onnx_folder / "X_ASR_Joiner.onnx")

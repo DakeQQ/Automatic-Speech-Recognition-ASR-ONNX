@@ -29,7 +29,7 @@ def _parse_args() -> argparse.Namespace:
 _ARGS = _parse_args()
 
 onnx_folder                    = _ARGS.onnx_folder.expanduser().resolve()                   # Selected ONNX graph folder.
-onnx_model_Metadata            = str(onnx_folder / "Qwen3_ASR_Metadata.onnx")               # Tiny metadata carrier graph.
+onnx_model_Metadata            = str(onnx_folder / "ASR_Matadata.onnx")               # Tiny metadata carrier graph.
 onnx_model_Encoder             = str(onnx_folder / "Qwen3_ASR_Encoder.onnx")                # The exported onnx model path.
 onnx_model_Embed               = str(onnx_folder / "Qwen3_ASR_Decoder_Embed.onnx")
 onnx_model_Main                = str(onnx_folder / "Qwen3_ASR_Decoder_Main.onnx")

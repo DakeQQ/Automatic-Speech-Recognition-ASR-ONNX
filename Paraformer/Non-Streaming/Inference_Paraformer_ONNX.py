@@ -23,7 +23,7 @@ def _parse_args():
 
 _ARGS = _parse_args()
 onnx_folder = _ARGS.onnx_folder.expanduser().resolve()
-onnx_model_Metadata = str(onnx_folder / "Paraformer_Metadata.onnx")
+onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")
 onnx_model_A = str(onnx_folder / "Paraformer.onnx")
 test_audio = model_audio_paths("paraformer")[0]                                                                                                           # The test audio path.
     

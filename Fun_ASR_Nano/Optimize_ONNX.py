@@ -15,7 +15,7 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, run_optimizer
+from Optimize_ONNX_Common import OptimizerConfig, Plan, metadata_int_for_model, run_optimizer
 
 
 ORIGINAL_FOLDER_PATH = str(_SCRIPT_DIR / "Fun_ASR_Nano_ONNX")
@@ -25,8 +25,12 @@ USE_OPENVINO = False
 FORCE_EXTERNAL_DATA = False
 UPGRADE_OPSET = 0
 
-FUN_ASR_NUM_HEADS = 16
-FUN_ASR_HIDDEN_SIZE = 1024
+def fun_asr_num_heads(model_path: str) -> int:
+    return metadata_int_for_model(model_path, "num_attention_heads")
+
+
+def fun_asr_hidden_size(model_path: str) -> int:
+    return metadata_int_for_model(model_path, "hidden_size")
 
 WEIGHT_ONLY_ALGORITHM = "k_quant"
 BLOCK_SIZE = 32
@@ -43,13 +47,12 @@ F16_OP_BLOCK_LIST = [
 
 # ============================== MODEL PLANS ==============================
 
-TRANSFORMER_PLAN = dict(num_heads=FUN_ASR_NUM_HEADS, hidden_size=FUN_ASR_HIDDEN_SIZE)
+TRANSFORMER_PLAN = dict(num_heads=fun_asr_num_heads, hidden_size=fun_asr_hidden_size)
 Q4_MATMUL = dict(method="Q4", op_types=("MatMul",), axes=(0,), **TRANSFORMER_PLAN)
 Q4_GATHER = dict(method="Q4", algo="DEFAULT", op_types=("Gather",), axes=(1,), **TRANSFORMER_PLAN)
 F32_HELPER = dict(method="F32", transformer=False)
 
 MODEL_PLANS = {
-    "FunASR_Nano_Metadata":                 Plan(**F32_HELPER),
     "FunASR_Nano_Encoder":                  Plan(**Q4_MATMUL, opt_level=2),
     "FunASR_Nano_CTC_Decoder":              Plan(**Q4_MATMUL, opt_level=2),
     "FunASR_Nano_Decoder_Embed":            Plan(**Q4_GATHER),

@@ -24,7 +24,7 @@ tokenizer_path                 = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen
 onnx_folder                    = Path(__file__).resolve().parent / "Fun_ASR_Nano_ONNX"  # Local folder holding all exported ONNX graphs.
 onnx_folder.mkdir(parents=True, exist_ok=True)
 
-onnx_model_Metadata            = str(onnx_folder / "FunASR_Nano_Metadata.onnx")         # Tiny metadata carrier graph.
+onnx_model_Metadata            = str(onnx_folder / "ASR_Matadata.onnx")         # Tiny metadata carrier graph.
 onnx_model_Encoder             = str(onnx_folder / "FunASR_Nano_Encoder.onnx")          # The exported onnx model path.
 onnx_model_CTC_Decoder         = str(onnx_folder / "FunASR_Nano_CTC_Decoder.onnx")      # Optional fast CTC transcription head; exported & loaded only when USE_CTC_DECODER=True.
 onnx_model_Embed               = str(onnx_folder / "FunASR_Nano_Decoder_Embed.onnx")
@@ -1471,12 +1471,7 @@ with torch.inference_mode():
     )
     del metadata_marker
 
-    _metadata_targets = [
-        onnx_model_Metadata, onnx_model_Encoder, onnx_model_CTC_Decoder, onnx_model_Embed,
-        onnx_model_Main, onnx_model_Rotary_Mask_Prefill, onnx_model_Rotary_Mask_Decode,
-        onnx_model_Greedy, onnx_model_First_Beam, onnx_model_Second_Beam,
-        onnx_model_Penalty, onnx_model_Argmax,
-    ]
+    _metadata_targets = [onnx_model_Metadata]
     _written, _skipped = [], []
     for _target in _metadata_targets:
         if not Path(_target).exists():

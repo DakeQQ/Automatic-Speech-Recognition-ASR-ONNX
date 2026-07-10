@@ -36,7 +36,7 @@ PRE_EMPHASIS  = 0.97                # kaldi pre-emphasis coefficient, do not edi
 
 onnx_folder = Path(__file__).resolve().parent / "X_ASR_ONNX"
 onnx_folder.mkdir(parents=True, exist_ok=True)
-onnx_model_Metadata = str(onnx_folder / "X_ASR_Metadata.onnx")
+onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")
 onnx_encoder = str(onnx_folder / "X_ASR_Encoder.onnx")
 onnx_decoder = str(onnx_folder / "X_ASR_Decoder.onnx")
 onnx_joiner = str(onnx_folder / "X_ASR_Joiner.onnx")
@@ -702,7 +702,7 @@ def export_all():
             input_names=["metadata_marker"], output_names=["metadata_marker_out"],
             dynamic_axes=None, opset_version=OPSET, dynamo=False,
         )
-        _add_meta(onnx_model_Metadata, common_meta)
+        _add_meta(onnx_model_Metadata, enc_meta)
         del metadata_marker
 
         if INPUT_AUDIO_DTYPE == "INT16":
@@ -715,7 +715,6 @@ def export_all():
             input_names=in_names, output_names=out_names, dynamic_axes=dyn,
             do_constant_folding=True, opset_version=OPSET, dynamo=False,
         )
-        _add_meta(onnx_encoder, enc_meta)
 
         print("Exporting decoder ...")
         y = torch.zeros(1, CONTEXT_SIZE, dtype=torch.int32)
@@ -725,7 +724,6 @@ def export_all():
             dynamic_axes={"y": {0: "N"}, "decoder_out": {0: "N"}} if DYNAMIC_AXES else None,
             do_constant_folding=True, opset_version=OPSET, dynamo=False,
         )
-        _add_meta(onnx_decoder, common_meta)
 
         print("Exporting joiner (argmax folded) ...")
         eo = torch.randn(1, JOINER_DIM, dtype=torch.float32)
@@ -736,11 +734,10 @@ def export_all():
             dynamic_axes={"encoder_out": {0: "N"}, "decoder_out": {0: "N"}, "max_token_id": {0: "N"}} if DYNAMIC_AXES else None,
             do_constant_folding=True, opset_version=OPSET, dynamo=False,
         )
-        _add_meta(onnx_joiner, common_meta)
 
-    print(f"\n[Metadata] Stamped {len(common_meta)} common keys into 4 ONNX graph(s):")
-    for _key in sorted(common_meta):
-        print(f"    {_key} = {common_meta[_key]}")
+    print(f"\n[Metadata] Stamped {len(enc_meta)} keys into {Path(onnx_model_Metadata).name}:")
+    for _key in sorted(enc_meta):
+        print(f"    {_key} = {enc_meta[_key]}")
 
     del encoder_embed, encoder, decoder, joiner, enc, dec, joi
     gc.collect()

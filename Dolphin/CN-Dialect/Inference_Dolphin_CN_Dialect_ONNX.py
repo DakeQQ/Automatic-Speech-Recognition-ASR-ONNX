@@ -24,7 +24,7 @@ _ARGS = _parse_args()
 
 onnx_folder            = os.path.abspath(_ARGS.onnx_folder)                          # Selected ONNX graph folder.
 save_vocab             = os.path.join(onnx_folder, "vocab_Dolphin_CN_Dialect.txt")    # The exported Dolphin-CN-Dialect vocab path.
-onnx_model_Metadata    = os.path.join(onnx_folder, "Dolphin_Metadata.onnx")                             # Tiny metadata carrier graph.
+onnx_model_Metadata    = os.path.join(onnx_folder, "ASR_Matadata.onnx")                             # Tiny metadata carrier graph.
 onnx_model_Encoder     = os.path.join(onnx_folder, "Dolphin_Encoder.onnx")                              # The exported onnx encoder model path.
 onnx_model_Decoder     = os.path.join(onnx_folder, "Dolphin_Decoder.onnx")                              # The exported onnx decoder (main, pure-float) model path.
 onnx_model_Embed       = os.path.join(onnx_folder, "Dolphin_Decoder_Embed.onnx")                        # Token-embedding graph (keeps int ids out of the decoder).
@@ -285,7 +285,7 @@ input_audio_dtype = "INT16" if "int16" in _audio_input_type else ("F16" if "floa
 _audio_np_dtype = {"INT16": np.int16, "F32": np.float32, "F16": np.float16}[input_audio_dtype]   # sliding-window buffer dtype
 
 # ---- Model metadata: the SOLE source of the runtime geometry / token constants ----
-# Written by Export_Dolphin_CN_Dialect.py into Dolphin_Metadata.onnx; read here so the special-token IDs,
+# Written by Export_Dolphin_CN_Dialect.py into ASR_Matadata.onnx; read here so the special-token IDs,
 # max_seq_len and sample_rate never have to be kept in sync by hand. A missing key is a hard error
 # (re-export with Export_Dolphin_CN_Dialect.py to stamp the metadata) -- there is no compiled-in fallback.
 _model_meta = ort_session_Metadata.get_modelmeta().custom_metadata_map or {}

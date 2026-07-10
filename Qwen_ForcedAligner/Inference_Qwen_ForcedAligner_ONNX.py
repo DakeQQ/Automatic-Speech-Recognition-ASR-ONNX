@@ -53,7 +53,7 @@ def _parse_args() -> argparse.Namespace:
 _ARGS = _parse_args()
 
 onnx_folder            = _ARGS.onnx_folder.expanduser().resolve()          # Selected ONNX graph folder.
-onnx_model_Metadata    = str(onnx_folder / "ForcedAligner_Metadata.onnx")
+onnx_model_Metadata    = str(onnx_folder / "ASR_Matadata.onnx")
 onnx_model_Embed       = str(onnx_folder / "ForcedAligner_Embed.onnx")
 onnx_model_Encoder     = str(onnx_folder / "ForcedAligner_Encoder.onnx")
 onnx_model_Rotary_Mask = str(onnx_folder / "ForcedAligner_Rotary_Mask.onnx")
