@@ -73,7 +73,7 @@ class OptimizerConfig:
     optimized_folder_path: str
     model_plans: dict[str, Plan]
     # weight-only defaults
-    weight_only_algorithm: str = "DEFAULT"
+    weight_only_algorithm: str = "k_quant"
     block_size: int = 32
     accuracy_level: int = 4
     quant_symmetric: bool = False
