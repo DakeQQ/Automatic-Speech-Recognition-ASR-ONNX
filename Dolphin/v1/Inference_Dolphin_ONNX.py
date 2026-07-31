@@ -1,352 +1,194 @@
+"""Run Dolphin v1 with merged prefill/decode graphs and shared weights."""
+
+from __future__ import annotations
+
 import argparse
-import os
 import sys
 import time
+from pathlib import Path
+
+import numpy as np
 import onnxruntime
 from onnxruntime.capi import _pybind_state as C
-import numpy as np
 from pydub import AudioSegment
-try:
-    import sentencepiece as spm
-except ImportError:
-    spm = None
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+import sentencepiece as spm
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from Example_Audio import model_audio_paths
+from ORT_IO import (
+    array_for,
+    filled_for,
+    is_dynamic_dim,
+    metadata_by_name,
+    load_special_token_ids,
+    load_supported_languages,
+    numpy_dtype,
+    resolve_shape,
+    resolve_supported_language,
+    scalar_for,
+)
+from Shared_Merged import DEFAULT_MODEL_FILE_NAMES, attach_shared_initializers
 
 
-def _parse_args():
-    parser = argparse.ArgumentParser(description="Run Dolphin ONNX inference.")
-    parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", default=os.path.join(_SCRIPT_DIR, "Dolphin_Optimized"), help="Folder containing ONNX graphs, for example Dolphin_Optimized or Dolphin_ONNX.")
+VOCAB_FILE_NAME = "vocab_Dolphin.txt"
+BPE_MODEL_FILE_NAME = "bpe.model"
+
+
+def default_onnx_folder():
+    """Prefer an optimized v1 bundle, then fall back to the exported v1 bundle."""
+    candidates = (
+        SCRIPT_DIR / "Dolphin_Optimized",
+        SCRIPT_DIR / "Dolphin_ONNX",
+    )
+    for candidate in candidates:
+        if (candidate / "ASR_Metadata.onnx").is_file():
+            return candidate
+    return candidates[0]
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run merged Dolphin-v1 ONNX inference."
+    )
+    parser.add_argument(
+        "--onnx-folder",
+        "--model-folder",
+        dest="onnx_folder",
+        type=Path,
+        default=default_onnx_folder(),
+        help=(
+            "Dolphin-v1 folder containing merged graphs and "
+            "Dolphin_SharedInitializers.onnx(.data)."
+        ),
+    )
+    parser.add_argument(
+        "--vocab-path",
+        type=Path,
+        default=None,
+        help=f"Optional vocabulary text file; defaults to {VOCAB_FILE_NAME} in the model folder.",
+    )
+    parser.add_argument(
+        "--tokenizer-path",
+        "--bpe-model-path",
+        dest="tokenizer_path",
+        type=Path,
+        default=None,
+        help=f"Optional SentencePiece model; defaults to {BPE_MODEL_FILE_NAME} in the model folder.",
+    )
     return parser.parse_args()
 
 
-_ARGS = _parse_args()
-
-
-onnx_folder            = os.path.abspath(_ARGS.onnx_folder)                          # Selected ONNX graph folder.
-onnx_model_Metadata    = os.path.join(onnx_folder, "ASR_Matadata.onnx")                      # Tiny metadata carrier graph.
-onnx_model_Encoder     = os.path.join(onnx_folder, "Dolphin_Encoder.onnx")                       # The exported onnx encoder model path.
-onnx_model_Decoder     = os.path.join(onnx_folder, "Dolphin_Decoder.onnx")                       # The exported onnx decoder (main, pure-float) model path.
-onnx_model_Embed       = os.path.join(onnx_folder, "Dolphin_Decoder_Embed.onnx")                 # Token-embedding graph (keeps int ids out of the decoder).
-onnx_model_Prefill     = os.path.join(onnx_folder, "Dolphin_Position_Mask_Prefill.onnx")         # Prefill position-embedding + causal-mask graph.
-onnx_model_Decode      = os.path.join(onnx_folder, "Dolphin_Position_Mask_Decode.onnx")          # Decode position-embedding graph for the single new token.
-onnx_model_Greedy      = os.path.join(onnx_folder, "Dolphin_Greedy_Search.onnx")                 # Greedy argmax + save_id history (used with Apply_Penality).
-onnx_model_Argmax      = os.path.join(onnx_folder, "Dolphin_Argmax.onnx")                        # Bare argmax (greedy decoding without a repetition penalty).
-onnx_model_First_Beam  = os.path.join(onnx_folder, "Dolphin_First_Beam_Search.onnx")             # First beam-search step.
-onnx_model_Second_Beam = os.path.join(onnx_folder, "Dolphin_Second_Beam_Search.onnx")            # Subsequent beam-search steps.
-onnx_model_Penality    = os.path.join(onnx_folder, "Dolphin_Apply_Penality.onnx")                # Sliding-window repetition penalty on the logits.
-save_vocab             = os.path.join(onnx_folder, "vocab_Dolphin.txt")                          # The exported Dolphin vocab path.
-TARGET_LANGUAGE        = "Auto-Auto"                                                             # See 'LANGUAGE_REGION' for detail.
-
-test_audio = model_audio_paths("dolphin")                                                         # The test audio list.
-
-
-USE_BEAM_SEARCH    = False              # Use beam search or greedy search.
-REPEAT_PENALITY    = 1.0                # Range from 0.0 to 1.0; "1.0" means no penality.
-PENALITY_RANGE     = 20                 # Penalizes the most recent output. "30" means the last 30 tokens.
-TOP_K              = 3                  # The top k candidate in decoding.
-BEAM_SIZE          = 3                  # Number of beams in searching.
-# The audio input dtype is auto-detected from the encoder's audio input tensor in the ONNX model
-# ("int16" -> raw PCM ÷32768 in-graph; "float16"/"float" -> pre-normalised [-1, 1]); no manual setting needed.
-USE_NORMALISE_AUDIO = False             # Apply RMS loudness normalisation before feeding the model. The reference Dolphin pipeline keeps the decoded waveform amplitude unchanged.
-SLIDING_WINDOW     = 0                  # Set the sliding window step for test audio reading; use 0 to disable.
+ARGS = parse_args()
+ONNX_FOLDER = ARGS.onnx_folder.expanduser().resolve()
+METADATA_PATH = ONNX_FOLDER / "ASR_Metadata.onnx"
 
 
 # ============================================================================
-# ONNX Runtime runtime configuration (IOBinding + shared buffers, mirrors Qwen ASR)
+# User configuration
 # ============================================================================
-ORT_Accelerate_Providers = []           # ORT execution providers; ['CUDAExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider']
-ORT_LOG                = False          # Enable ONNX Runtime logging for debugging. Set to False for best performance.
-ORT_FP16               = False          # Set to True for FP16 ONNX Runtime settings. For CPUs, this requires ARM64-v8.2a or newer.
-MAX_THREADS            = 0              # Parallel CPU threads. Set 0 for auto.
-DEVICE_ID              = 0              # Default to zero.
+# IMPORTANT: CLI options are intentionally limited to model/vocabulary/tokenizer
+# paths. Edit this section for all decoding, audio, demo, and runtime behavior.
+
+# Sampling takes precedence; otherwise REPEAT_PENALTY=1.0 selects greedy and
+# another valid value selects penalty-greedy.
+USE_SAMPLING = False
+TEMPERATURE = 0.8
+TOP_K = 10
+TOP_P = 0.95
+REPEAT_PENALTY = 0.8
+SAMPLING_REPETITION_PENALTY = 1.0
+PENALTY_RANGE = 20
+
+USE_NORMALISE_AUDIO = False
+SLIDING_WINDOW = 0
+LANGUAGE = "auto-auto"
 
 
-_INV_INT16_SCALE = np.float32(1.0 / 32768.0)   # pre-computed [-1, 1] normalisation scale, reused every call
+# ============================================================================
+# ONNX Runtime configuration
+# ============================================================================
+ORT_ACCELERATE_PROVIDERS = []
+ORT_LOG = False
+ORT_FP16 = False
+MAX_THREADS = 0
+DEVICE_ID = 0
 
 
-def prepare_audio_input(audio_int16: np.ndarray, input_audio_dtype: str, target_rms: float = 8192.0) -> np.ndarray:
-    # Fold the optional RMS loudness normalisation and the model-dtype conversion into a
-    # single pass over the raw int16 PCM that pydub returns, casting to the model's
-    # audio input dtype exactly once (no float32<->int16 round-trip for the float paths).
-    # `input_audio_dtype` is derived from the encoder's audio input tensor in the ONNX model.
-    #   "INT16": raw PCM (the graph divides by 32768 internally).
-    #   "F32"/"F16": normalised to [-1, 1] here (÷32768), because the float graph skips the
-    #   in-model division; "F16" stores those values (the graph up-casts back to f32).
-    if not USE_NORMALISE_AUDIO and input_audio_dtype == "INT16":
-        return np.ascontiguousarray(audio_int16, dtype=np.int16)
-    audio = audio_int16.astype(np.float32)
+def prepare_audio_input(
+    audio_int16: np.ndarray,
+    input_audio_dtype: np.dtype,
+    target_rms_pcm: float = 4096.0,
+) -> np.ndarray:
+    """Convert decoded PCM to the exact input representation used at export."""
+    if input_audio_dtype == np.dtype(np.int16):
+        if not USE_NORMALISE_AUDIO:
+            return np.ascontiguousarray(audio_int16, dtype=input_audio_dtype)
+        audio = audio_int16.astype(np.float32)
+        rms = np.sqrt(np.mean(audio * audio, dtype=np.float32), dtype=np.float32)
+        if rms > 0:
+            audio *= target_rms_pcm / (rms + 1e-7)
+            np.clip(audio, -float(AUDIO_PCM_SCALE), float(AUDIO_PCM_SCALE - 1), out=audio)
+        return audio.astype(input_audio_dtype)
+
+    audio = audio_int16.astype(np.float32) * np.float32(1.0 / AUDIO_PCM_SCALE)
     if USE_NORMALISE_AUDIO:
         rms = np.sqrt(np.mean(audio * audio, dtype=np.float32), dtype=np.float32)
         if rms > 0:
-            audio *= (target_rms / (rms + 1e-7))
-            np.clip(audio, -32768.0, 32767.0, out=audio)
-    if input_audio_dtype == "INT16":
-        return audio.astype(np.int16)
-    audio *= _INV_INT16_SCALE   # fold the pre-computed ÷32768 scale into the same float buffer
-    if input_audio_dtype == "F16":
-        return audio.astype(np.float16)
-    return audio
-
-
-LANGUAGE_REGION = {
-    # ───────────────────────────── Auto Detection ─────────────────────────────
-    "Auto"                         : "auto-auto",
-    "Auto-Auto"                    : "auto-auto",
-    "Chinese-Auto"                 : "zh-auto",
-    "Mandarin-Auto"                : "zh-auto",
-    "Yue-Auto"                     : "ct-NULL",
-    "Tamil-Auto"                   : "ta-auto",
-    "Urdu-Auto"                    : "ur-auto",
-    "Arabic-Auto"                  : "ar-auto",
-
-    "自动"                          : "auto-auto",
-    "自动-自动"                      : "auto-auto",
-    "中文-自动"                      : "zh-auto",
-    "普通话-自动"                    : "zh-auto",
-    "粤语-自动"                      : "ct-NULL",
-    "泰米尔语-自动"                   : "ta-auto",
-    "乌尔都语-自动"                   : "ur-auto",
-    "阿拉伯语-自动"                   : "ar-auto",
-
-    # ───────────────────────────── Chinese variants ─────────────────────────────
-    "Chinese"                       : "zh-CN",
-    "Mandarin"                      : "zh-CN",
-    "Chinese-Mandarin"              : "zh-CN",
-    "Chinese-Taiwan"                : "zh-TW",
-    "Chinese-Wuyu"                  : "zh-WU",
-    "Chinese-Sichuan"               : "zh-SICHUAN",
-    "Chinese-Shanxi"                : "zh-SHANXI",
-    "Chinese-Anhui"                 : "zh-ANHUI",
-    "Chinese-Tianjin"               : "zh-TIANJIN",
-    "Chinese-Ningxia"               : "zh-NINGXIA",
-    "Chinese-Shaanxi"               : "zh-SHAANXI",
-    "Chinese-Hebei"                 : "zh-HEBEI",
-    "Chinese-Shandong"              : "zh-SHANDONG",
-    "Chinese-Guangdong"             : "zh-GUANGDONG",
-    "Chinese-Shanghai"              : "zh-SHANGHAI",
-    "Chinese-Hubei"                 : "zh-HUBEI",
-    "Chinese-Liaoning"              : "zh-LIAONING",
-    "Chinese-Gansu"                 : "zh-GANSU",
-    "Chinese-Fujian"                : "zh-FUJIAN",
-    "Chinese-Hunan"                 : "zh-HUNAN",
-    "Chinese-Henan"                 : "zh-HENAN",
-    "Chinese-Yunnan"                : "zh-YUNNAN",
-    "Chinese-Minnan"                : "zh-MINNAN",
-    "Chinese-Wenzhou"               : "zh-WENZHOU",
-
-    "中文"                           : "zh-CN",
-    "普通话"                         : "zh-CN",
-    "中文-普通话"                    : "zh-CN",
-    "中文-台湾"                      : "zh-TW",
-    "中文-吴语"                      : "zh-WU",
-    "中文-四川话"                    : "zh-SICHUAN",
-    "中文-山西话"                    : "zh-SHANXI",
-    "中文-安徽话"                    : "zh-ANHUI",
-    "中文-天津话"                    : "zh-TIANJIN",
-    "中文-宁夏话"                    : "zh-NINGXIA",
-    "中文-陕西话"                    : "zh-SHAANXI",
-    "中文-河北话"                    : "zh-HEBEI",
-    "中文-山东话"                    : "zh-SHANDONG",
-    "中文-广东话"                    : "zh-GUANGDONG",
-    "中文-上海话"                    : "zh-SHANGHAI",
-    "中文-湖北话"                    : "zh-HUBEI",
-    "中文-辽宁话"                    : "zh-LIAONING",
-    "中文-甘肃话"                    : "zh-GANSU",
-    "中文-福建话"                    : "zh-FUJIAN",
-    "中文-湖南话"                    : "zh-HUNAN",
-    "中文-河南话"                    : "zh-HENAN",
-    "中文-云南话"                    : "zh-YUNNAN",
-    "中文-闽南语"                    : "zh-MINNAN",
-    "中文-温州话"                    : "zh-WENZHOU",
-
-    # ───────────────────────────── Yue-Cantonese variants ───────────────────────────
-    "Yue-Unknown"                  : "ct-NULL",
-    "Yue-Hongkong"                 : "ct-HK",
-    "Yue-Guangdong"                : "ct-GZ",
-
-    "粤语-未知"                     : "ct-NULL",
-    "粤语-香港"                     : "ct-HK",
-    "粤语-广东"                     : "ct-GZ",
-
-    # ───────────────────────────── East-Asian languages ──────────────────────────────
-    "Japanese"                      : "ja-JP",
-    "Korean"                        : "ko-KR",
-
-    "日文"                           : "ja-JP",
-    "日语"                           : "ja-JP",
-    "韩语"                           : "ko-KR",
-
-    # ───────────────────────────── South-East Asian languages ─────────────────────────
-    "Thai"                          : "th-TH",
-    "Indonesian"                    : "id-ID",
-    "Vietnamese"                    : "vi-VN",
-    "Malay"                         : "ms-MY",
-    "Burmese"                       : "my-MM",
-    "Tagalog"                       : "tl-PH",
-    "Khmer"                         : "km-KH",
-    "Javanese"                      : "jv-ID",
-    "Lao"                           : "lo-LA",
-    "Filipino"                      : "fil-PH",
-    "Sundanese"                     : "su-ID",
-
-    "泰语"                            : "th-TH",
-    "印度尼西亚语"                     : "id-ID",
-    "越南语"                          : "vi-VN",
-    "马来语"                          : "ms-MY",
-    "缅甸语"                          : "my-MM",
-    "塔加洛语"                        : "tl-PH",
-    "高棉语"                          : "km-KH",
-    "爪哇语"                          : "jv-ID",
-    "老挝语"                          : "lo-LA",
-    "菲律宾语"                        : "fil-PH",
-    "巽他语"                          : "su-ID",
-
-    # ───────────────────────────── South-Asian languages ──────────────────────────────
-    "Hindi"                         : "hi-IN",
-    "Bengali"                       : "bn-BD",
-    "Tamil-Singaporean"             : "ta-SG",
-    "Tamil-Sri Lankan"              : "ta-LK",
-    "Tamil-India"                   : "ta-IN",
-    "Tamil-Malaysia"                : "ta-MY",
-    "Telugu"                        : "te-IN",
-    "Gujarati"                      : "gu-IN",
-    "Oriya"                         : "or-IN",
-    "Odia"                          : "or-IN",
-    "Nepali"                        : "ne-NP",
-    "Sinhala"                       : "si-LK",
-    "Panjabi"                       : "pa-IN",
-    "Kashmiri"                      : "ks-IN",
-    "Marathi"                       : "mr-IN",
-
-    "印地语"                         : "hi-IN",
-    "孟加拉语"                       : "bn-BD",
-    "泰米尔语-新加坡"                 : "ta-SG",
-    "泰米尔语-斯里兰卡"                : "ta-LK",
-    "泰米尔语-印度"                   : "ta-IN",
-    "泰米尔语-马来西亚"                : "ta-MY",
-    "泰卢固语"                        : "te-IN",
-    "古吉拉特语"                      : "gu-IN",
-    "奥里亚语"                        : "or-IN",
-    "尼泊尔语"                        : "ne-NP",
-    "僧伽罗语"                        : "si-LK",
-    "旁遮普语"                        : "pa-IN",
-    "克什米尔语"                      : "ks-IN",
-    "马拉地语"                        : "mr-IN",
-
-    # ───────────────────────────── Middle-Eastern languages ───────────────────────────
-    "Urdu"                          : "ur-PK",
-    "Urdu-Islamic Republic of Pakistan": "ur-PK",
-    "Urdu-India"                    : "ur-IN",
-    "Persian"                       : "fa-IR",
-    "Pushto"                        : "ps-AF",
-
-    "乌尔都语"                        : "ur-PK",
-    "乌尔都语-印度"                    : "ur-IN",
-    "波斯语"                          : "fa-IR",
-    "普什图语"                        : "ps-AF",
-
-    # ───────────────────────────── Arabic variants ──────────────────────────────
-    "Arabic"                        : "ar-GLA",
-    "Arabic-Morocco"                : "ar-MA",
-    "Arabic-Saudi Arabia"           : "ar-SA",
-    "Arabic-Egypt"                  : "ar-EG",
-    "Arabic-Kuwait"                 : "ar-KW",
-    "Arabic-Libya"                  : "ar-LY",
-    "Arabic-Jordan"                 : "ar-JO",
-    "Arabic-U.A.E."                 : "ar-AE",
-    "Arabic-Levant"                 : "ar-LVT",
-
-    "阿拉伯语"                        : "ar-GLA",
-    "阿拉伯语-摩洛哥"                  : "ar-MA",
-    "阿拉伯语-沙特"                    : "ar-SA",
-    "阿拉伯语-埃及"                    : "ar-EG",
-    "阿拉伯语-科威特"                  : "ar-KW",
-    "阿拉伯语-利比亚"                  : "ar-LY",
-    "阿拉伯语-约旦"                    : "ar-JO",
-    "阿拉伯语-阿联酋"                  : "ar-AE",
-    "阿拉伯语-黎凡特"                  : "ar-LVT",
-
-    # ───────────────────────────── Central-Asian languages ────────────────────────────
-    "Uighur"                        : "ug-CN",
-    "Uzbek"                         : "uz-UZ",
-    "Kazakh"                        : "kk-KZ",
-    "Mongolian"                     : "mn-MN",
-    "Kabyle"                        : "kab-NULL",
-    "Bashkir"                       : "ba-NULL",
-    "Tajik"                         : "tg-TJ",
-    "Kirghiz"                       : "ky-KG",
-    "Azerbaijani"                   : "az-AZ",
-
-    "维吾尔语"                        : "ug-CN",
-    "乌兹别克语"                      : "uz-UZ",
-    "哈萨克语"                        : "kk-KZ",
-    "蒙古语"                          : "mn-MN",
-    "卡拜尔语"                        : "kab-NULL",
-    "巴什基尔语"                      : "ba-NULL",
-    "塔吉克语"                        : "tg-TJ",
-    "吉尔吉斯语"                      : "ky-KG",
-    "阿塞拜疆语"                      : "az-AZ",
-
-    # ───────────────────────────── Eastern-European languages ─────────────────────────
-    "Russian"                       : "ru-RU",
-    "俄语"                           : "ru-RU",
-}
+            audio *= np.float32(target_rms_pcm / AUDIO_PCM_SCALE) / (rms + 1e-7)
+            np.clip(audio, -1.0, 1.0 - 1.0 / AUDIO_PCM_SCALE, out=audio)
+    return audio.astype(input_audio_dtype)
 
 
 class Tokenizer:
     def __init__(self, filename, bpe_model=None):
         self.str_to_idx = {}
         self.idx_to_str = {}
-        self.num_vocab = 0
         self.sp = None
-        with open(filename, 'r', encoding='utf-8') as file:
-            for idx, line in enumerate(file):
-                token = line.rstrip('\n')
-                self.str_to_idx[token] = idx
-                self.idx_to_str[idx] = token
-        self.num_vocab = len(self.idx_to_str)
-        if spm is not None and bpe_model is not None and os.path.exists(bpe_model):
+        with open(filename, "r", encoding="utf-8") as file:
+            for index, line in enumerate(file):
+                token = line.rstrip("\n")
+                self.str_to_idx[token] = index
+                self.idx_to_str[index] = token
+        if bpe_model is not None:
             self.sp = spm.SentencePieceProcessor()
-            self.sp.load(bpe_model)
+            self.sp.load(str(bpe_model))
 
     def encode(self, token):
         return self.str_to_idx.get(token)
 
-    def decode(self, idx):
-        return self.idx_to_str.get(idx)
+    def decode(self, index):
+        return self.idx_to_str.get(int(index))
 
     def decode_ids(self, ids):
-        tokens = [self.decode(int(idx)) for idx in ids]
+        tokens = [self.decode(index) for index in ids]
         tokens = [token for token in tokens if token is not None]
         if self.sp is not None:
-            return self.sp.DecodePieces(tokens)
-        return ''.join(tokens).replace("▁", " ")
-
-    def num_vocab(self):
-        return self.num_vocab
+            return self.sp.DecodePieces(tokens).strip()
+        return "".join(tokens).replace("▁", " ").strip()
 
 
-def _build_run_options(silent):
-    ro = onnxruntime.RunOptions()
-    ro.log_severity_level = 0 if not silent else 4
-    ro.log_verbosity_level = 4
-    ro.add_run_config_entry("disable_synchronize_execution_providers", "0")
-    return ro
+def build_run_options(silent):
+    options = onnxruntime.RunOptions()
+    options.log_severity_level = 4 if silent else 0
+    options.log_verbosity_level = 4
+    options.add_run_config_entry("disable_synchronize_execution_providers", "0")
+    return options
 
 
-def _build_session_opts_ort():
-    opts = onnxruntime.SessionOptions()
-    opts.log_severity_level = 0 if ORT_LOG else 4
-    opts.log_verbosity_level = 4
-    opts.inter_op_num_threads = MAX_THREADS
-    opts.intra_op_num_threads = MAX_THREADS
-    opts.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
-    opts.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
-    cfgs = {
+def build_session_options():
+    options = onnxruntime.SessionOptions()
+    options.log_severity_level = 0 if ORT_LOG else 4
+    options.log_verbosity_level = 4
+    options.inter_op_num_threads = MAX_THREADS
+    options.intra_op_num_threads = MAX_THREADS
+    options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+    options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+    entries = {
         "session.set_denormal_as_zero": "1",
         "session.intra_op.allow_spinning": "1",
         "session.inter_op.allow_spinning": "1",
@@ -359,603 +201,739 @@ def _build_session_opts_ort():
         "optimization.enable_cast_chain_elimination": "1",
         "optimization.disable_specified_optimizers": (
             "CastFloat16Transformer;FuseFp16InitializerToFp32NodeTransformer"
-            if ORT_FP16 else ""
+            if ORT_FP16
+            else ""
         ),
     }
-    for key, value in cfgs.items():
-        opts.add_session_config_entry(key, value)
-    return opts
+    for key, value in entries.items():
+        options.add_session_config_entry(key, value)
+    return options
 
 
-if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
-    provider_options = [{
-        'device_type': 'CPU',
-        'precision': 'ACCURACY',
-        'num_of_threads': MAX_THREADS if MAX_THREADS != 0 else 8,
-        'num_streams': 1,
-        'enable_opencl_throttling': False,
-        'enable_qdq_optimizer': False,
-        'disable_dynamic_shapes': False,
-    }]
-    device_type = "cpu"
-    _ort_device_type = C.OrtDevice.cpu()
+def select_providers():
+    available = set(onnxruntime.get_available_providers())
+    selected = [
+        provider
+        for provider in ORT_ACCELERATE_PROVIDERS
+        if provider in available
+    ]
+    return selected or ["CPUExecutionProvider"]
 
-elif "CUDAExecutionProvider" in ORT_Accelerate_Providers:
-    provider_options = [{
-        'device_id': DEVICE_ID,
-        'gpu_mem_limit': 24 * (1024 ** 3),
-        'arena_extend_strategy': 'kNextPowerOfTwo',
-        'cudnn_conv_algo_search': 'EXHAUSTIVE',
-        'sdpa_kernel': '2',
-        'use_tf32': '1',
-        'fuse_conv_bias': '0',
-        'cudnn_conv_use_max_workspace': '1',
-        'cudnn_conv1d_pad_to_nc1d': '0',
-        'tunable_op_enable': '0',
-        'tunable_op_tuning_enable': '0',
-        'tunable_op_max_tuning_duration_ms': 10,
-        'do_copy_in_default_stream': '0',
-        'enable_cuda_graph': '0',
-        'prefer_nhwc': '0',
-        'enable_skip_layer_norm_strict_mode': '0',
-        'use_ep_level_unified_stream': '0',
-    }]
-    device_type = "cuda"
-    _ort_device_type = C.OrtDevice.cuda()
 
-elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
-    provider_options = [{
-        'device_id': DEVICE_ID,
-        'performance_preference': 'high_performance',
-        'device_filter': 'gpu',
-        'disable_metacommands': 'false',
-        'enable_graph_capture': 'false',
-        'enable_graph_serialization': 'false',
-    }]
-    device_type = "dml"
-    _ort_device_type = C.OrtDevice.dml()
+def resolve_provider(providers):
+    if "OpenVINOExecutionProvider" in providers:
+        return "cpu", C.OrtDevice.cpu(), [{
+            "device_type": "CPU",
+            "precision": "ACCURACY",
+            "num_of_threads": MAX_THREADS if MAX_THREADS else 8,
+            "num_streams": 1,
+            "enable_opencl_throttling": False,
+            "enable_qdq_optimizer": False,
+            "disable_dynamic_shapes": False,
+        }]
+    if "CUDAExecutionProvider" in providers:
+        return "cuda", C.OrtDevice.cuda(), [{
+            "device_id": DEVICE_ID,
+            "gpu_mem_limit": 24 * (1024 ** 3),
+            "arena_extend_strategy": "kNextPowerOfTwo",
+            "cudnn_conv_algo_search": "EXHAUSTIVE",
+            "sdpa_kernel": "2",
+            "use_tf32": "1",
+            "cudnn_conv_use_max_workspace": "1",
+            "do_copy_in_default_stream": "0",
+            "enable_cuda_graph": "0",
+        }]
+    if "DmlExecutionProvider" in providers:
+        return "dml", C.OrtDevice.dml(), [{
+            "device_id": DEVICE_ID,
+            "performance_preference": "high_performance",
+            "device_filter": "gpu",
+            "disable_metacommands": "false",
+            "enable_graph_capture": "false",
+            "enable_graph_serialization": "false",
+        }]
+    return "cpu", C.OrtDevice.cpu(), None
 
-else:
-    provider_options = None
-    device_type = "cpu"
-    _ort_device_type = C.OrtDevice.cpu()
 
-_ort_device_obj = C.OrtDevice(_ort_device_type, C.OrtDevice.default_memory(), DEVICE_ID)
-session_opts_ort = _build_session_opts_ort()
-run_options = _build_run_options(silent=not ORT_LOG)
-disabled_opts = (
-    ["CastFloat16Transformer", "FuseFp16InitializerToFp32NodeTransformer"]
-    if ORT_FP16 else None
+RUN_OPTIONS = build_run_options(silent=not ORT_LOG)
+PROVIDERS = select_providers()
+DEVICE_TYPE, ORT_DEVICE_TYPE, PROVIDER_OPTIONS = resolve_provider(PROVIDERS)
+ORT_DEVICE = C.OrtDevice(
+    ORT_DEVICE_TYPE, C.OrtDevice.default_memory(), DEVICE_ID
 )
-_packed = {
-    'sess_options': session_opts_ort,
-    'providers': ORT_Accelerate_Providers or ["CPUExecutionProvider"],
-    'provider_options': provider_options,
-    'disabled_optimizers': disabled_opts,
+def make_merged_session(path: Path, shared_path: Path):
+    options = build_session_options()
+    references = attach_shared_initializers(options, shared_path)
+    session = onnxruntime.InferenceSession(
+        str(path),
+        sess_options=options,
+        providers=PROVIDERS,
+        provider_options=PROVIDER_OPTIONS,
+        disabled_optimizers=(
+            ["CastFloat16Transformer", "FuseFp16InitializerToFp32NodeTransformer"]
+            if ORT_FP16 else None
+        ),
+    )
+    session._native_llm_shared_initializers = references
+    return session
+
+
+def run(session, binding):
+    session.run_with_iobinding(binding, run_options=RUN_OPTIONS)
+
+
+def input_names(session):
+    return [meta.name for meta in session.get_inputs()]
+
+
+def output_names(session):
+    return [meta.name for meta in session.get_outputs()]
+
+
+def ort_value(array, device=None):
+    return onnxruntime.OrtValue.ortvalue_from_numpy(
+        np.ascontiguousarray(array), device or DEVICE_TYPE, DEVICE_ID
+    )
+
+
+def bind_device_outputs(binding, names):
+    for name in names:
+        binding._iobinding.bind_output(name, ORT_DEVICE)
+
+
+def load_metadata(path: Path):
+    import onnx
+
+    model = onnx.load(str(path), load_external_data=False)
+    metadata = {prop.key: prop.value for prop in model.metadata_props}
+    del model
+    return metadata
+
+
+MODEL_META = load_metadata(METADATA_PATH)
+
+
+MODEL_FILE_ROLES = (
+    "probe_prefill_greedy",
+    "probe_prefill_penalty_greedy",
+    "probe_prefill_sampling",
+    "prefill_greedy",
+    "prefill_penalty_greedy",
+    "prefill_sampling",
+    "decode_greedy",
+    "decode_penalty_greedy",
+    "decode_sampling",
+    "shared_initializers",
+    "shared_initializers_data",
+)
+MODEL_FILES = {role: DEFAULT_MODEL_FILE_NAMES[role] for role in MODEL_FILE_ROLES}
+
+MAX_SEQ_LEN = int(MODEL_META["max_seq_len"])
+SAMPLE_RATE = int(MODEL_META["sample_rate"])
+AUDIO_PCM_SCALE = int(MODEL_META["audio_pcm_scale"])
+PROMPT_CONTROL_TOKEN_COUNT = int(MODEL_META["prompt_control_token_count"])
+SPECIAL_TOKEN_IDS = load_special_token_ids(MODEL_META)
+SUPPORTED_LANGUAGES = load_supported_languages(MODEL_META)
+LANGUAGE_CODE, LANGUAGE_ENTRY = resolve_supported_language(
+    SUPPORTED_LANGUAGES, LANGUAGE
+)
+LANGUAGE_TOKEN_START = int(MODEL_META["language_token_start"])
+LANGUAGE_TOKEN_END = int(MODEL_META["language_token_end"])
+REGION_TOKEN_START = int(MODEL_META["region_token_start"])
+REGION_TOKEN_END = int(MODEL_META["region_token_end"])
+SOS_TOKEN = SPECIAL_TOKEN_IDS["sos"]
+ASR_TOKEN = SPECIAL_TOKEN_IDS["asr"]
+NOTIMESTAMP = SPECIAL_TOKEN_IDS["notimestamp"]
+VOCAB_PATH = (
+    ARGS.vocab_path.expanduser().resolve()
+    if ARGS.vocab_path is not None
+    else ONNX_FOLDER / VOCAB_FILE_NAME
+)
+BPE_MODEL_PATH = (
+    ARGS.tokenizer_path.expanduser().resolve()
+    if ARGS.tokenizer_path is not None
+    else ONNX_FOLDER / BPE_MODEL_FILE_NAME
+)
+DEMO_AUDIO_KEY = "dolphin"
+STOP_TOKENS = {SPECIAL_TOKEN_IDS["stop"]}
+
+USE_PENALTY = not USE_SAMPLING and REPEAT_PENALTY != 1.0
+if USE_SAMPLING:
+    STRATEGY = "sampling"
+elif USE_PENALTY:
+    STRATEGY = "penalty_greedy"
+else:
+    STRATEGY = "greedy"
+
+GRAPH_PAIRS = {
+    "greedy": (MODEL_FILES["probe_prefill_greedy"], MODEL_FILES["prefill_greedy"], MODEL_FILES["decode_greedy"]),
+    "penalty_greedy": (
+        MODEL_FILES["probe_prefill_penalty_greedy"],
+        MODEL_FILES["prefill_penalty_greedy"],
+        MODEL_FILES["decode_penalty_greedy"],
+    ),
+    "sampling": (
+        MODEL_FILES["probe_prefill_sampling"],
+        MODEL_FILES["prefill_sampling"],
+        MODEL_FILES["decode_sampling"],
+    ),
+}
+PROBE_PATH = ONNX_FOLDER / GRAPH_PAIRS[STRATEGY][0]
+PREFILL_PATH = ONNX_FOLDER / GRAPH_PAIRS[STRATEGY][1]
+DECODE_PATH = ONNX_FOLDER / GRAPH_PAIRS[STRATEGY][2]
+SHARED_PATH = ONNX_FOLDER / MODEL_FILES["shared_initializers"]
+
+print(f"\nLoading Dolphin-v1 bundle: {ONNX_FOLDER}")
+print("Loading merged decoder sessions and one shared initializer mmap ...")
+PROBE_SESSION = make_merged_session(PROBE_PATH, SHARED_PATH)
+PREFILL_SESSION = make_merged_session(PREFILL_PATH, SHARED_PATH)
+DECODE_SESSION = make_merged_session(DECODE_PATH, SHARED_PATH)
+print(f"Usable Providers: {DECODE_SESSION.get_providers()}")
+print(
+    f"Decoder strategy: {STRATEGY}; sessions=3 (Encoder+probe + cached prefill + decode); "
+    "decode launches/token=1; shared initializer blob=1."
+)
+
+
+def indexed_layer_names(names, prefix):
+    indexed = []
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        suffix = name[len(prefix):]
+        indexed.append((int(suffix), name))
+    indexed.sort()
+    return [name for _, name in indexed]
+
+
+_decode_inputs = input_names(DECODE_SESSION)
+_state_key_inputs = indexed_layer_names(_decode_inputs, "in_de_key_layer_")
+NUM_LAYERS = len(_state_key_inputs)
+KV_NUM_TENSORS = NUM_LAYERS * 2
+
+
+def plan_merged_io(session, strategy, is_decode):
+    inputs = input_names(session)
+    outputs = output_names(session)
+    state_inputs = inputs[:KV_NUM_TENSORS]
+    state_outputs = outputs[:KV_NUM_TENSORS]
+
+    if strategy == "sampling":
+        max_output = "sampling_sampled_id"
+        next_token_output = max_output
+        save_output = "sampling_save_id_out"
+    elif strategy == "penalty_greedy":
+        max_output = "greedy_max_logits_idx"
+        next_token_output = max_output
+        save_output = "greedy_save_id_out"
+    else:
+        max_output = "argmax_max_logits_idx"
+        next_token_output = max_output
+        save_output = None
+
+    kv_sequence_outputs = [
+        name
+        for name in outputs
+        if name.startswith("decode_kv_seq_len_next")
+        or name.startswith("prefill_kv_seq_len")
+    ]
+    kv_sequence_output = kv_sequence_outputs[0]
+    cross_inputs = [
+        name for name in inputs if name.startswith(("en_key_", "en_value_"))
+    ]
+    cross_outputs = [
+        name for name in outputs if name.startswith(("encoder_en_key_", "encoder_en_value_"))
+    ]
+    probe = "audio" in inputs
+    if strategy == "greedy":
+        save_inputs = []
+    elif strategy == "sampling":
+        save_inputs = ["sampling_previous_ids"]
+    elif is_decode:
+        save_inputs = ["penalty_save_id_in", "greedy_save_id_in"]
+    else:
+        save_inputs = ["greedy_save_id_in"]
+    return {
+        "inputs": inputs,
+        "outputs": outputs,
+        "state_inputs": state_inputs,
+        "state_outputs": state_outputs,
+        "cross_inputs": cross_inputs,
+        "cross_outputs": cross_outputs,
+        "probe": probe,
+        "token_input": "embed_input_ids",
+        "kv_seq_input": "decode_kv_seq_len" if is_decode else None,
+        "kv_seq_output": kv_sequence_output,
+        "max_output": max_output,
+        "logits_output": (
+            "logits" if not is_decode and "logits" in outputs else None
+        ),
+        "next_token_output": next_token_output,
+        "save_inputs": save_inputs,
+        "save_output": save_output,
+    }
+
+
+PROBE_PLAN = plan_merged_io(PROBE_SESSION, STRATEGY, is_decode=False)
+PREFILL_PLAN = plan_merged_io(PREFILL_SESSION, STRATEGY, is_decode=False)
+DECODE_PLAN = plan_merged_io(DECODE_SESSION, STRATEGY, is_decode=True)
+PROBE_INPUT_META = metadata_by_name(PROBE_SESSION.get_inputs())
+PREFILL_INPUT_META = metadata_by_name(PREFILL_SESSION.get_inputs())
+DECODE_INPUT_META = metadata_by_name(DECODE_SESSION.get_inputs())
+PREFILL_OUTPUT_INDEX = {
+    name: index for index, name in enumerate(PREFILL_PLAN["outputs"])
+}
+PROBE_OUTPUT_INDEX = {name: index for index, name in enumerate(PROBE_PLAN["outputs"])}
+DECODE_OUTPUT_INDEX = {
+    name: index for index, name in enumerate(DECODE_PLAN["outputs"])
 }
 
 
-def _make_session(path):
-    return onnxruntime.InferenceSession(path, **_packed)
+def self_kv_sequence_axis(name):
+    meta = DECODE_INPUT_META[name]
+    candidates = [
+        axis
+        for axis, dim in enumerate(meta.shape)
+        if axis != 0 and is_dynamic_dim(dim)
+    ]
+    return candidates[-1]
 
 
-def _ort_from_numpy(arr):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(arr, device_type, DEVICE_ID)
+def empty_self_kv(meta):
+    sequence_axis = self_kv_sequence_axis(meta.name)
+    return filled_for(meta, axes={0: 1, sequence_axis: 0})
 
 
-def _ort_zeros(shape, dtype):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(shape, dtype=dtype), device_type, DEVICE_ID)
+def bind_array(binding, meta, value, keepalive, *, axes, device=None):
+    value_ort = ort_value(array_for(meta, value, axes=axes), device)
+    keepalive.append(value_ort)
+    binding.bind_ortvalue_input(meta.name, value_ort)
+    return value_ort
 
 
-def _ort_from_data(data, dtype):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(np.array(data, dtype=dtype), device_type, DEVICE_ID)
+def bind_scalar(binding, meta, value, keepalive, device=None):
+    value_ort = ort_value(scalar_for(meta, value), device)
+    keepalive.append(value_ort)
+    binding.bind_ortvalue_input(meta.name, value_ort)
+    return value_ort
 
 
-def _bind_inputs(binding, names, values):
-    for name, value in zip(names, values):
-        binding.bind_ortvalue_input(name, value)
+def bind_feedback(binding, meta, value):
+    binding.bind_ortvalue_input(meta.name, value)
 
 
-def _bind_device_outputs(binding, names):
-    for name in names:
-        binding._iobinding.bind_output(name, _ort_device_obj)
+def bind_sampling_controls(binding, input_meta, keepalive):
+    controls = (
+        ("sampling_temperature", TEMPERATURE),
+        ("sampling_top_k", TOP_K),
+        ("sampling_top_p", TOP_P),
+        ("sampling_repetition_penalty", SAMPLING_REPETITION_PENALTY),
+    )
+    for name, value in controls:
+        bind_scalar(binding, input_meta[name], value, keepalive)
 
 
-def _run(session, binding):
-    session.run_with_iobinding(binding, run_options=run_options)
-
-
-def _in_names(session):
-    return [x.name for x in session.get_inputs()]
-
-
-def _out_names(session):
-    return [x.name for x in session.get_outputs()]
-
-
-def _np_dtype(meta):
-    return np.float16 if "float16" in meta.type else np.float32
-
-
-print('\nLoading the model...')
-
-# ---- Core pipeline sessions ----
-ort_session_Metadata = _make_session(onnx_model_Metadata)
-ort_session_Encoder = _make_session(onnx_model_Encoder)
-print(f"\nUsable Providers: {ort_session_Encoder.get_providers()}")
-shape_value_in = ort_session_Encoder._inputs_meta[0].shape[-1]
-in_name_Encoder = _in_names(ort_session_Encoder)
-out_name_Encoder = _out_names(ort_session_Encoder)
-in_name_Encoder0 = in_name_Encoder[0]
-
-# The audio input dtype is taken straight from the encoder's audio input tensor in the ONNX model,
-# so it always matches how the model was exported: "int16" -> raw PCM (the graph divides by 32768),
-# "float16"/"float" -> audio pre-normalised to [-1, 1] in prepare_audio_input.
-_audio_input_type = ort_session_Encoder._inputs_meta[0].type
-input_audio_dtype = "INT16" if "int16" in _audio_input_type else ("F16" if "float16" in _audio_input_type else "F32")
-_audio_np_dtype = {"INT16": np.int16, "F32": np.float32, "F16": np.float16}[input_audio_dtype]   # sliding-window buffer dtype
-binding_Encoder = ort_session_Encoder.io_binding()
-
-_model_meta = ort_session_Metadata.get_modelmeta().custom_metadata_map or {}
-
-def _meta_int(key):
-    value = _model_meta.get(key)
-    if value is None:
-        raise KeyError(
-            f"Required metadata key '{key}' is missing from {onnx_model_Metadata}. "
-            f"Re-export with Export_Dolphin.py to stamp the model metadata."
+def prefill(input_ids, cross_kv_by_name, sampling_history=None):
+    binding = PREFILL_SESSION.io_binding()
+    keepalive = []
+    kv_device = "cpu" if DEVICE_TYPE == "dml" else DEVICE_TYPE
+    for name in PREFILL_PLAN["state_inputs"]:
+        meta = PREFILL_INPUT_META[name]
+        bind_array(
+            binding,
+            meta,
+            empty_self_kv(meta),
+            keepalive,
+            axes={0: 1, self_kv_sequence_axis(name): 0},
+            device=kv_device,
         )
-    return int(value)
-
-
-def _meta_int_list(key):
-    value = _model_meta.get(key)
-    if value is None:
-        raise KeyError(
-            f"Required metadata key '{key}' is missing from {onnx_model_Metadata}. "
-            f"Re-export with Export_Dolphin.py to stamp the model metadata."
+    for name in PREFILL_PLAN["cross_inputs"]:
+        bind_feedback(
+            binding,
+            PREFILL_INPUT_META[name],
+            cross_kv_by_name[name],
         )
-    return [int(x) for x in value.split(",") if x != ""]
+    token_count = input_ids.shape[1]
+    bind_array(
+        binding,
+        PREFILL_INPUT_META[PREFILL_PLAN["token_input"]],
+        input_ids,
+        keepalive,
+        axes={0: 1, 1: token_count},
+    )
+    bind_scalar(
+        binding, PREFILL_INPUT_META["prefill_ids_len"], token_count, keepalive
+    )
+    bind_scalar(
+        binding, PREFILL_INPUT_META["prefill_history_len"], 0, keepalive
+    )
+    for name in PREFILL_PLAN["save_inputs"]:
+        meta = PREFILL_INPUT_META[name]
+        history = filled_for(meta, axes={0: 1, 1: 0}) if (
+            sampling_history is None or name != "sampling_previous_ids"
+        ) else array_for(
+            meta,
+            sampling_history,
+            axes={0: 1, 1: np.asarray(sampling_history).shape[1]},
+        )
+        bind_array(
+            binding, meta, history, keepalive, axes={0: 1, 1: history.shape[1]}
+        )
+    if STRATEGY == "sampling":
+        bind_sampling_controls(binding, PREFILL_INPUT_META, keepalive)
+    bind_device_outputs(binding, PREFILL_PLAN["outputs"])
+    run(PREFILL_SESSION, binding)
+    return binding.get_outputs()
 
 
-MAX_SEQ_LEN = _meta_int("max_seq_len")
-SAMPLE_RATE = _meta_int("sample_rate")
-METADATA_INPUT_AUDIO_LENGTH = _meta_int("input_audio_length")
-STOP_TOKEN = _meta_int_list("stop_token_ids")
-print(f"\nModel metadata: {len(_model_meta)} keys "
-    f"(max_seq_len={MAX_SEQ_LEN}, sample_rate={SAMPLE_RATE}, "
-    f"input_audio_length={METADATA_INPUT_AUDIO_LENGTH}, "
-      f"stop_token_ids={STOP_TOKEN}).")
-
-ort_session_Decoder = _make_session(onnx_model_Decoder)
-in_name_Decoder = _in_names(ort_session_Decoder)
-out_name_Decoder = _out_names(ort_session_Decoder)
-amount_of_outputs_Decoder = len(out_name_Decoder)
-binding_Decoder = ort_session_Decoder.io_binding()
-
-num_layers = (amount_of_outputs_Decoder - 1) // 2          # outputs = decoder K/V caches (2 * L) + logits.
-num_keys_values = num_layers + num_layers
-# Beam search I/O indices (Qwen ASR layout). Inputs: caches(2L), logits, save_id[, prev_prob], beam_size[, topK].
-# Outputs: caches(2L), save_id, top_beam_prob, top_beam_indices (next token), max_logits_idx.
-beam_logits_in_idx   = num_keys_values                # logits input to First/Second beam.
-beam_save_id_in_idx  = num_keys_values + 1            # save_id input to First/Second beam.
-first_beam_size_idx  = num_keys_values + 2            # beam_size input (First beam).
-second_prev_prob_idx = num_keys_values + 2            # previous_prob input (Second beam).
-second_beam_size_idx = num_keys_values + 3            # beam_size input (Second beam).
-second_topk_idx      = num_keys_values + 4            # topK input (Second beam).
-beam_save_id_out_idx = num_keys_values                # save_id output.
-beam_prob_out_idx    = num_keys_values + 1            # top_beam_prob output.
-beam_ids_out_idx     = num_keys_values + 2            # top_beam_indices output (next token to embed).
-beam_max_out_idx     = num_keys_values + 3            # max_logits_idx output (stop check).
-idx_en_key = num_keys_values                          # decoder inputs: en cross-attn keys start (2 * L).
-idx_en_value = idx_en_key + num_layers                # en cross-attn values start (3 * L).
-idx_hidden = idx_en_value + num_layers                # token-embedding (hidden_states) input (4 * L).
-idx_position = idx_hidden + 1                         # position-embedding input (4 * L + 1); mask is in_name_Decoder[-1].
-out_name_Decoder_kv = out_name_Decoder[:num_keys_values]
-out_name_Decoder_logits = out_name_Decoder[num_keys_values]
-in_name_Decoder_self_kv = in_name_Decoder[:num_keys_values]         # decoder self-attn K/V cache feedback (beam / greedy).
-in_name_Decoder_en_kv = in_name_Decoder[idx_en_key: idx_hidden]     # encoder cross-attn K/V (rebound once per window).
-in_name_Decoder_hidden = in_name_Decoder[idx_hidden]               # token-embedding (hidden_states) input.
-in_name_Decoder_position = in_name_Decoder[idx_position]           # position-embedding input.
-in_name_Decoder_mask = in_name_Decoder[-1]                         # causal attention-mask input.
-vocab_size = ort_session_Decoder._outputs_meta[num_keys_values].shape[-1]
-hidden_size = ort_session_Decoder._inputs_meta[idx_hidden].shape[-1]
-
-kv_cache_dtype = _np_dtype(ort_session_Decoder._inputs_meta[0])
-logits_dtype = _np_dtype(ort_session_Decoder._outputs_meta[num_keys_values])
-hidden_dtype = _np_dtype(ort_session_Decoder._inputs_meta[idx_hidden])
-position_dtype = _np_dtype(ort_session_Decoder._inputs_meta[idx_position])
-mask_dtype = _np_dtype(ort_session_Decoder._inputs_meta[-1])
-
-ort_session_Embed = _make_session(onnx_model_Embed)
-in_name_Embed = _in_names(ort_session_Embed)
-out_name_Embed = _out_names(ort_session_Embed)
-in_name_Embed0 = in_name_Embed[0]
-out_name_Embed0 = out_name_Embed[0]
-binding_Embed = ort_session_Embed.io_binding()
-
-ort_session_Prefill = _make_session(onnx_model_Prefill)
-in_name_Prefill = _in_names(ort_session_Prefill)
-out_name_Prefill = _out_names(ort_session_Prefill)
-binding_Prefill = ort_session_Prefill.io_binding()
-
-ort_session_Decode = _make_session(onnx_model_Decode)
-in_name_Decode = _in_names(ort_session_Decode)
-out_name_Decode = _out_names(ort_session_Decode)
-in_name_Decode0 = in_name_Decode[0]
-out_name_Decode_position = out_name_Decode[0]
-out_name_Decode_kv_seq_len = out_name_Decode[1]
-binding_Decode = ort_session_Decode.io_binding()
-
-tokenizer = Tokenizer(save_vocab, os.path.join(onnx_folder, "bpe.model"))
-
-# ---- Decoding-strategy resolution ----
-if USE_BEAM_SEARCH and (TOP_K < BEAM_SIZE):
-    TOP_K = BEAM_SIZE
-if (TOP_K < 2) or (BEAM_SIZE < 2):
-    USE_BEAM_SEARCH = False
-    print("\nInappropriate Beam Search setting detected. Falling back to Greedy Search.")
-if not USE_BEAM_SEARCH:
-    BEAM_SIZE = 1
-decode_batch = BEAM_SIZE
-do_repeat_penality = REPEAT_PENALITY != 1.0
-
-beam_size_ort = _ort_from_data([BEAM_SIZE], np.int64)
-topK_ort = _ort_from_data([TOP_K], np.int64)
-
-if USE_BEAM_SEARCH:
-    ort_session_First_Beam = _make_session(onnx_model_First_Beam)
-    in_name_First_Beam = _in_names(ort_session_First_Beam)
-    out_name_First_Beam = _out_names(ort_session_First_Beam)
-    binding_First_Beam = ort_session_First_Beam.io_binding()
-
-    ort_session_Second_Beam = _make_session(onnx_model_Second_Beam)
-    in_name_Second_Beam = _in_names(ort_session_Second_Beam)
-    out_name_Second_Beam = _out_names(ort_session_Second_Beam)
-    binding_Second_Beam = ort_session_Second_Beam.io_binding()
-
-    # Pre-slice the beam I/O names once so the hot decode loop never re-slices these lists.
-    in_name_First_Beam_kv = in_name_First_Beam[:num_keys_values]
-    out_name_First_Beam_kv = out_name_First_Beam[:num_keys_values]
-    in_name_First_Beam_logits = in_name_First_Beam[beam_logits_in_idx]
-    in_name_First_Beam_save_id = in_name_First_Beam[beam_save_id_in_idx]
-    out_name_First_Beam_save_id = out_name_First_Beam[beam_save_id_out_idx]
-    out_name_First_Beam_prob = out_name_First_Beam[beam_prob_out_idx]
-    out_name_First_Beam_ids = out_name_First_Beam[beam_ids_out_idx]
-    out_name_First_Beam_max = out_name_First_Beam[beam_max_out_idx]
-    in_name_Second_Beam_kv = in_name_Second_Beam[:num_keys_values]
-    out_name_Second_Beam_kv = out_name_Second_Beam[:num_keys_values]
-    in_name_Second_Beam_logits = in_name_Second_Beam[beam_logits_in_idx]
-    in_name_Second_Beam_save_id = in_name_Second_Beam[beam_save_id_in_idx]
-    in_name_Second_Beam_prev_prob = in_name_Second_Beam[second_prev_prob_idx]
-    out_name_Second_Beam_save_id = out_name_Second_Beam[beam_save_id_out_idx]
-    out_name_Second_Beam_prob = out_name_Second_Beam[beam_prob_out_idx]
-    out_name_Second_Beam_ids = out_name_Second_Beam[beam_ids_out_idx]
-    out_name_Second_Beam_max = out_name_Second_Beam[beam_max_out_idx]
-
-    prob_dtype = _np_dtype(ort_session_First_Beam._outputs_meta[beam_prob_out_idx])
-
-    # Shared beam buffers (fixed shape, reused every step).
-    beam_ids_buf = _ort_zeros((BEAM_SIZE, 1), np.int32)              # top_beam_indices (next token to embed).
-    beam_score_buf = _ort_zeros((BEAM_SIZE, 1), prob_dtype)         # top_beam_prob / previous_prob (self-aliased).
-
-    # Static beam inputs (bound once).
-    binding_First_Beam.bind_ortvalue_input(in_name_First_Beam[first_beam_size_idx], beam_size_ort)
-    binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam[second_beam_size_idx], beam_size_ort)
-    binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam[second_topk_idx], topK_ort)
-else:
-    ort_session_Greedy = _make_session(onnx_model_Greedy)
-    in_name_Greedy = _in_names(ort_session_Greedy)
-    out_name_Greedy = _out_names(ort_session_Greedy)
-    binding_Greedy = ort_session_Greedy.io_binding()
-    in_name_Greedy_logits = in_name_Greedy[0]
-    in_name_Greedy_save_id = in_name_Greedy[1]
-    out_name_Greedy_max = out_name_Greedy[0]
-    out_name_Greedy_save_id = out_name_Greedy[1]
-
-    ort_session_Argmax = _make_session(onnx_model_Argmax)
-    in_name_Argmax = _in_names(ort_session_Argmax)
-    out_name_Argmax = _out_names(ort_session_Argmax)
-    binding_Argmax = ort_session_Argmax.io_binding()
-    in_name_Argmax_logits = in_name_Argmax[0]
-    out_name_Argmax_max = out_name_Argmax[0]
-
-# Repetition penalty is a standalone pass applied to the logits before greedy / beam selection (Qwen ASR style).
-if do_repeat_penality:
-    ort_session_Penality = _make_session(onnx_model_Penality)
-    in_name_Penality = _in_names(ort_session_Penality)
-    out_name_Penality = _out_names(ort_session_Penality)[0]
-    binding_Penality = ort_session_Penality.io_binding()
-    in_name_Penality_logits = in_name_Penality[0]
-    in_name_Penality_save_id = in_name_Penality[1]
-    num_penality_inputs = len(in_name_Penality)
-    # penality_range is baked into the graph via int(), so ORT may prune it as a dead input; guard the binds.
-    if num_penality_inputs > 2:
-        penality_value_dtype = _np_dtype(ort_session_Penality._inputs_meta[2])
-        penality_value_ort = _ort_from_data([REPEAT_PENALITY], penality_value_dtype)
-        binding_Penality.bind_ortvalue_input(in_name_Penality[2], penality_value_ort)
-    if num_penality_inputs > 3:
-        penality_range_ort = _ort_from_data([PENALITY_RANGE], np.int64)
-        binding_Penality.bind_ortvalue_input(in_name_Penality[3], penality_range_ort)
-
-# ---- Language / region target resolution (Dolphin-specific two-stage detection) ----
-language_region = LANGUAGE_REGION.get(TARGET_LANGUAGE, "NONE")
-if language_region == "NONE":
-    TARGET_LANGUAGE = "Auto-Auto"
-    print(f"\nThe language or region:{TARGET_LANGUAGE} not found. \nFallback to auto detection.")
-    language_region = LANGUAGE_REGION[TARGET_LANGUAGE]
-language_region = language_region.split("-")
-lang_id = f"<{language_region[0]}>"
-region_id = f"<{language_region[1]}>"
-
-if lang_id != "<auto>":
-    detect_language = False
-    lang_id = tokenizer.encode(lang_id)
-else:
-    detect_language = True
-
-if not detect_language:
-    if region_id != "<auto>":
-        detect_region = False
-        region_id = tokenizer.encode(region_id)
-    else:
-        detect_region = True
-else:
-    detect_region = True
-
-# ---- Fixed shared buffers (sized from model meta; the audio window is a fresh OrtValue per window) ----
-history_len_ort = _ort_from_data([0], np.int64)                    # history_len = 0 (each prefill / detection pass starts fresh).
-hidden_states_buf = _ort_zeros((decode_batch, 1, hidden_size), hidden_dtype)
-position_buf = _ort_zeros((1, 1, hidden_size), position_dtype)
-decode_mask_buf = _ort_zeros((1, 1, 1), mask_dtype)                # decode-phase mask is all-zeros (the new token sees every cached position).
-prefill_logits_buf = _ort_zeros((1, vocab_size), logits_dtype)
-decode_logits_buf = _ort_zeros((decode_batch, vocab_size), logits_dtype)
-max_idx_buf = _ort_zeros((1, 1), np.int32)                        # next-token (greedy) / stop-check (beam) buffer.
-
-detect_language_ids_buf = _ort_from_data([[39999]], np.int32)
-detect_region_ids_np = np.empty((1, 2), dtype=np.int32)
-detect_region_ids_np[0, 0] = 39999
-detect_region_ids_buf = _ort_zeros((1, 2), np.int32)
-input_ids_np = np.empty((1, 5), dtype=np.int32)
-input_ids_np[0, [0, 3, 4]] = [39999, 6, 324]
-input_ids_buf = _ort_zeros((1, 5), np.int32)
-ids_len_1_ort = _ort_from_data([1], np.int64)
-ids_len_2_ort = _ort_from_data([2], np.int64)
-input_ids_len_ort = _ort_from_data([input_ids_np.shape[-1]], np.int64)
-
-# Empty decoder self-attention caches (batch 1) reused for every detection / prefill pass.
-past_keys_Decoder = _ort_zeros((1, ort_session_Decoder._outputs_meta[0].shape[1], ort_session_Decoder._outputs_meta[0].shape[2], 0), kv_cache_dtype)
-past_values_Decoder = _ort_zeros((1, ort_session_Decoder._outputs_meta[num_layers].shape[1], 0, ort_session_Decoder._outputs_meta[num_layers].shape[3]), kv_cache_dtype)
+def probe_prefill(audio_buffer, audio_window, input_ids):
+    binding = PROBE_SESSION.io_binding()
+    keepalive = []
+    audio_meta = PROBE_INPUT_META["audio"]
+    audio_buffer.update_inplace(
+        array_for(
+            audio_meta,
+            audio_window,
+            axes={0: 1, 1: 1, 2: audio_window.shape[2]},
+        )
+    )
+    bind_feedback(binding, audio_meta, audio_buffer)
+    kv_device = "cpu" if DEVICE_TYPE == "dml" else DEVICE_TYPE
+    for name in PROBE_PLAN["state_inputs"]:
+        meta = PROBE_INPUT_META[name]
+        bind_array(
+            binding,
+            meta,
+            empty_self_kv(meta),
+            keepalive,
+            axes={0: 1, self_kv_sequence_axis(name): 0},
+            device=kv_device,
+        )
+    token_count = input_ids.shape[1]
+    bind_array(
+        binding,
+        PROBE_INPUT_META[PROBE_PLAN["token_input"]],
+        input_ids,
+        keepalive,
+        axes={0: 1, 1: token_count},
+    )
+    bind_scalar(binding, PROBE_INPUT_META["prefill_ids_len"], token_count, keepalive)
+    bind_scalar(binding, PROBE_INPUT_META["prefill_history_len"], 0, keepalive)
+    for name in PROBE_PLAN["save_inputs"]:
+        meta = PROBE_INPUT_META[name]
+        bind_array(
+            binding,
+            meta,
+            filled_for(meta, axes={0: 1, 1: 0}),
+            keepalive,
+            axes={0: 1, 1: 0},
+        )
+    if STRATEGY == "sampling":
+        bind_sampling_controls(binding, PROBE_INPUT_META, keepalive)
+    bind_device_outputs(binding, PROBE_PLAN["outputs"])
+    run(PROBE_SESSION, binding)
+    return binding.get_outputs()
 
 
-def run_prefill_logits(prompt_ort, ids_len_ort):
-    # Run Embed -> Prefill -> Decoder on a short prompt (empty self-caches + the current window's encoder cross-KV)
-    # and return the FULL decoder logits for the last prompt token. Used for the language / region detection passes.
-    _bind_inputs(binding_Decoder, in_name_Decoder[:num_layers], [past_keys_Decoder] * num_layers)
-    _bind_inputs(binding_Decoder, in_name_Decoder[num_layers:num_keys_values], [past_values_Decoder] * num_layers)
-    binding_Embed.bind_ortvalue_input(in_name_Embed0, prompt_ort)
-    _bind_device_outputs(binding_Embed, out_name_Embed)
-    _run(ort_session_Embed, binding_Embed)
-    prompt_embed = binding_Embed.get_outputs()[0]
-    _bind_inputs(binding_Prefill, in_name_Prefill, [ids_len_ort, history_len_ort])
-    _bind_device_outputs(binding_Prefill, out_name_Prefill)
-    _run(ort_session_Prefill, binding_Prefill)
-    prefill_out = binding_Prefill.get_outputs()
-    binding_Decoder.bind_ortvalue_input(in_name_Decoder_hidden, prompt_embed)
-    binding_Decoder.bind_ortvalue_input(in_name_Decoder_position, prefill_out[0])
-    binding_Decoder.bind_ortvalue_input(in_name_Decoder_mask, prefill_out[1])
-    _bind_device_outputs(binding_Decoder, out_name_Decoder_kv)
-    binding_Decoder.bind_ortvalue_output(out_name_Decoder_logits, prefill_logits_buf)
-    _run(ort_session_Decoder, binding_Decoder)
-    return prefill_logits_buf.numpy()
+def decode_static_inputs(binding, keepalive):
+    candidates = {
+        "penalty_penalty_range": [PENALTY_RANGE],
+    }
+    for name, value in candidates.items():
+        if name in DECODE_PLAN["inputs"]:
+            bind_scalar(binding, DECODE_INPUT_META[name], value[0], keepalive)
+    if STRATEGY == "sampling":
+        bind_sampling_controls(binding, DECODE_INPUT_META, keepalive)
 
-# Load the input audio
-for test in test_audio:
-    print("----------------------------------------------------------------------------------------------------------")
-    print(f"\nTest Input Audio: {test}")
-    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
-    audio_len = len(audio)
-    audio = prepare_audio_input(audio.reshape(1, 1, -1), input_audio_dtype)
-    if isinstance(shape_value_in, str):
-        INPUT_AUDIO_LENGTH = min(METADATA_INPUT_AUDIO_LENGTH, audio_len)
-    else:
-        INPUT_AUDIO_LENGTH = shape_value_in
-    if SLIDING_WINDOW <= 0:
-        stride_step = INPUT_AUDIO_LENGTH
-    else:
-        stride_step = SLIDING_WINDOW
-    if audio_len > INPUT_AUDIO_LENGTH:
-        num_windows = int(np.ceil((audio_len - INPUT_AUDIO_LENGTH) / stride_step)) + 1
-        total_length_needed = (num_windows - 1) * stride_step + INPUT_AUDIO_LENGTH
-        pad_amount = total_length_needed - audio_len
-        audio = np.concatenate((audio, np.zeros((1, 1, pad_amount), dtype=audio.dtype)), axis=-1)
-    elif audio_len < INPUT_AUDIO_LENGTH:
-        audio = np.concatenate((audio, np.zeros((1, 1, INPUT_AUDIO_LENGTH - audio_len), dtype=audio.dtype)), axis=-1)
-    aligned_len = audio.shape[-1]
 
-    slice_start = 0
-    slice_end = INPUT_AUDIO_LENGTH
-    num_decode = 0
-    audio_buffer = _ort_zeros((1, 1, INPUT_AUDIO_LENGTH), _audio_np_dtype)
-    # Start to run dolphin
+def decode_tokens(prefill_outputs, cross_kv_by_name, generate_limit):
+    state = prefill_outputs[:KV_NUM_TENSORS]
+    next_token = prefill_outputs[
+        PREFILL_OUTPUT_INDEX[PREFILL_PLAN["next_token_output"]]
+    ]
+    kv_sequence_length = prefill_outputs[
+        PREFILL_OUTPUT_INDEX[PREFILL_PLAN["kv_seq_output"]]
+    ]
+    selected = int(
+        prefill_outputs[
+            PREFILL_OUTPUT_INDEX[PREFILL_PLAN["max_output"]]
+        ].numpy().reshape(-1)[0]
+    )
+    saved_ids = (
+        prefill_outputs[PREFILL_OUTPUT_INDEX[PREFILL_PLAN["save_output"]]]
+        if PREFILL_PLAN["save_output"] is not None
+        else None
+    )
+    host_tokens = []
+    generated_count = 0
+    if selected not in STOP_TOKENS and generate_limit > 0:
+        generated_count = 1
+        if saved_ids is None:
+            host_tokens.append(selected)
+
+    bindings = [DECODE_SESSION.io_binding(), DECODE_SESSION.io_binding()]
+    static_keepalive = [[], []]
+    for binding, keepalive in zip(bindings, static_keepalive):
+        for name in DECODE_PLAN["cross_inputs"]:
+            bind_feedback(
+                binding,
+                DECODE_INPUT_META[name],
+                cross_kv_by_name[name],
+            )
+        decode_static_inputs(binding, keepalive)
+        bind_device_outputs(binding, DECODE_PLAN["outputs"])
+
+    penalty_input = "penalty_penalty_value"
+    penalty_off = penalty_on = None
+    if penalty_input in DECODE_PLAN["inputs"]:
+        penalty_meta = DECODE_INPUT_META[penalty_input]
+        penalty_off = ort_value(scalar_for(penalty_meta, 1.0))
+        penalty_on = ort_value(scalar_for(penalty_meta, REPEAT_PENALTY))
+        for keepalive in static_keepalive:
+            keepalive.extend((penalty_off, penalty_on))
+
+    decode_step = 0
     start_time = time.time()
-    while slice_end <= aligned_len:
-        # ---- Encoder (per-clip shared buffer keeps Dolphin's exact dynamic input length while avoiding per-window OrtValue churn) ----
-        audio_buffer.update_inplace(np.ascontiguousarray(audio[:, :, slice_start: slice_end]))
-        binding_Encoder.bind_ortvalue_input(in_name_Encoder0, audio_buffer)
-        _bind_device_outputs(binding_Encoder, out_name_Encoder)
-        _run(ort_session_Encoder, binding_Encoder)
-        en_kv = binding_Encoder.get_outputs()                              # f16 cross-attn K/V, valid for the whole window.
-        _bind_inputs(binding_Decoder, in_name_Decoder_en_kv, en_kv)
+    while generated_count < generate_limit and selected not in STOP_TOKENS:
+        binding_index = decode_step & 1
+        binding = bindings[binding_index]
+        bind_feedback(
+            binding,
+            DECODE_INPUT_META[DECODE_PLAN["token_input"]],
+            next_token,
+        )
+        bind_feedback(
+            binding,
+            DECODE_INPUT_META[DECODE_PLAN["kv_seq_input"]],
+            kv_sequence_length,
+        )
+        for name, value in zip(DECODE_PLAN["state_inputs"], state):
+            bind_feedback(
+                binding,
+                DECODE_INPUT_META[name],
+                value,
+            )
+        for name in DECODE_PLAN["save_inputs"]:
+            bind_feedback(binding, DECODE_INPUT_META[name], saved_ids)
+        if penalty_on is not None:
+            bind_feedback(
+                binding,
+                DECODE_INPUT_META[penalty_input],
+                penalty_on if generated_count >= PENALTY_RANGE else penalty_off,
+            )
 
-        # ---- Stage 1: language detection (SOS-only prompt, ids_len = 1) ----
-        if detect_language:
-            print("\nAutomatically detect which language it is.")
-            detect_logits = run_prefill_logits(detect_language_ids_buf, ids_len_1_ort)
-            lang_id = int(np.argmax(detect_logits[0, 7:145])) + 7
-        # ---- Stage 2: region detection ([sos, lang] prompt, ids_len = 2) ----
-        if detect_region:
-            print("\nAutomatically detect which region it is.")
-            detect_region_ids_np[0, 1] = lang_id
-            detect_region_ids_buf.update_inplace(detect_region_ids_np)
-            detect_logits = run_prefill_logits(detect_region_ids_buf, ids_len_2_ort)
-            region_id = int(np.argmax(detect_logits[0, 145:324])) + 145
+        binding.clear_binding_outputs()
+        bind_device_outputs(binding, DECODE_PLAN["outputs"])
+        run(DECODE_SESSION, binding)
+        outputs = binding.get_outputs()
+        state = outputs[:KV_NUM_TENSORS]
+        selected = int(
+            outputs[
+                DECODE_OUTPUT_INDEX[DECODE_PLAN["max_output"]]
+            ].numpy().reshape(-1)[0]
+        )
+        if DECODE_PLAN["save_output"] is not None:
+            saved_ids = outputs[
+                DECODE_OUTPUT_INDEX[DECODE_PLAN["save_output"]]
+            ]
+        next_token = outputs[
+            DECODE_OUTPUT_INDEX[DECODE_PLAN["next_token_output"]]
+        ]
+        kv_sequence_length = outputs[
+            DECODE_OUTPUT_INDEX[DECODE_PLAN["kv_seq_output"]]
+        ]
+        if selected not in STOP_TOKENS:
+            generated_count += 1
+            if saved_ids is None:
+                host_tokens.append(selected)
+        decode_step += 1
 
-        if detect_language or detect_region:
-            lang_str = tokenizer.decode(lang_id)
-            region_str = tokenizer.decode(region_id)
-            message = f"\nThis audio belongs to {lang_str}-{region_str}."
-            message = message.replace("<", "").replace(">", "")
-            print(message)
-        else:
-            print(f"\nThis audio belongs to {TARGET_LANGUAGE}.")
-
-        # ---- Final prompt prefill: [sos = 39999, lang, region, asr = 6, notimestamp = 324] ----
-        input_ids_np[0, 1] = lang_id
-        input_ids_np[0, 2] = region_id
-        input_ids_buf.update_inplace(input_ids_np)
-        generate_limit = MAX_SEQ_LEN - input_ids_np.shape[-1]
-        _bind_inputs(binding_Decoder, in_name_Decoder[:num_layers], [past_keys_Decoder] * num_layers)
-        _bind_inputs(binding_Decoder, in_name_Decoder[num_layers:num_keys_values], [past_values_Decoder] * num_layers)
-
-        binding_Embed.bind_ortvalue_input(in_name_Embed0, input_ids_buf)
-        _bind_device_outputs(binding_Embed, out_name_Embed)
-        _run(ort_session_Embed, binding_Embed)
-        prompt_embed = binding_Embed.get_outputs()[0]
-
-        _bind_inputs(binding_Prefill, in_name_Prefill, [input_ids_len_ort, history_len_ort])
-        _bind_device_outputs(binding_Prefill, out_name_Prefill)
-        _run(ort_session_Prefill, binding_Prefill)
-        prefill_out = binding_Prefill.get_outputs()
-        kv_seq_len_ort = prefill_out[2]
-
-        binding_Decoder.bind_ortvalue_input(in_name_Decoder_hidden, prompt_embed)
-        binding_Decoder.bind_ortvalue_input(in_name_Decoder_position, prefill_out[0])
-        binding_Decoder.bind_ortvalue_input(in_name_Decoder_mask, prefill_out[1])
-        _bind_device_outputs(binding_Decoder, out_name_Decoder_kv)
-        binding_Decoder.bind_ortvalue_output(out_name_Decoder_logits, prefill_logits_buf)
-
-        # Decode-phase position graph: kv_seq_len is incremented in place (input aliased to output).
-        binding_Decode.bind_ortvalue_input(in_name_Decode0, kv_seq_len_ort)
-        binding_Decode.bind_ortvalue_output(out_name_Decode_position, position_buf)
-        binding_Decode.bind_ortvalue_output(out_name_Decode_kv_seq_len, kv_seq_len_ort)
-
-        # Decode-phase embedding graph: next token -> shared hidden buffer.
-        if USE_BEAM_SEARCH:
-            binding_Embed.bind_ortvalue_input(in_name_Embed0, beam_ids_buf)
-        else:
-            binding_Embed.bind_ortvalue_input(in_name_Embed0, max_idx_buf)
-        binding_Embed.bind_ortvalue_output(out_name_Embed0, hidden_states_buf)
-
-        if USE_BEAM_SEARCH:
-            save_id_buf = _ort_zeros((BEAM_SIZE, 0), np.int32)             # initial empty per-beam history.
-            save_id = save_id_buf                                          # current on-device save_id (penalty / feedback).
-            latest_save_id = save_id_buf                                   # last beam save_id for final detokenisation.
-            binding_First_Beam.bind_ortvalue_input(in_name_First_Beam[beam_save_id_in_idx], save_id_buf)
-        else:
-            save_id = _ort_zeros((1, 0), np.int32)                         # on-device greedy history (used when penalty is on).
-            save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)         # host-side history (used by the argmax path).
-
-        num_decode = 0
-        is_prefill_step = True
-        while num_decode < generate_limit:
-            _run(ort_session_Decoder, binding_Decoder)
-            outputs_Decoder = binding_Decoder.get_outputs()
-            cur_logits_buf = prefill_logits_buf if is_prefill_step else decode_logits_buf
-
-            # Repetition penalty: a standalone in-place pass over the most recent tokens (Qwen ASR style).
-            if do_repeat_penality and (num_decode >= PENALITY_RANGE):
-                binding_Penality.bind_ortvalue_input(in_name_Penality_logits, cur_logits_buf)
-                binding_Penality.bind_ortvalue_input(in_name_Penality_save_id, save_id)
-                binding_Penality.bind_ortvalue_output(out_name_Penality, cur_logits_buf)
-                _run(ort_session_Penality, binding_Penality)
-
-            if USE_BEAM_SEARCH:
-                if num_decode < 1:
-                    _bind_inputs(binding_First_Beam, in_name_First_Beam_kv, outputs_Decoder[:num_keys_values])
-                    binding_First_Beam.bind_ortvalue_input(in_name_First_Beam_logits, cur_logits_buf)
-                    binding_First_Beam.bind_ortvalue_input(in_name_First_Beam_save_id, save_id)
-                    # Bind outputs in graph order; get_outputs() returns values in bind order, so the order must match the graph.
-                    _bind_device_outputs(binding_First_Beam, out_name_First_Beam_kv)                                         # caches 0..2L-1
-                    binding_First_Beam._iobinding.bind_output(out_name_First_Beam_save_id, _ort_device_obj)                  # save_id
-                    binding_First_Beam.bind_ortvalue_output(out_name_First_Beam_prob, beam_score_buf)                       # top_beam_prob
-                    binding_First_Beam.bind_ortvalue_output(out_name_First_Beam_ids, beam_ids_buf)                          # top_beam_indices (next token)
-                    binding_First_Beam.bind_ortvalue_output(out_name_First_Beam_max, max_idx_buf)                           # max_logits_idx (stop check)
-                    _run(ort_session_First_Beam, binding_First_Beam)
-                    outputs_Beam = binding_First_Beam.get_outputs()
-                else:
-                    _bind_inputs(binding_Second_Beam, in_name_Second_Beam_kv, outputs_Decoder[:num_keys_values])
-                    binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam_logits, cur_logits_buf)
-                    if num_decode < 2:
-                        binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam_prev_prob, beam_score_buf)
-                    # Bind outputs in graph order every step; get_outputs() returns values in bind order.
-                    _bind_device_outputs(binding_Second_Beam, out_name_Second_Beam_kv)                                       # caches 0..2L-1
-                    binding_Second_Beam._iobinding.bind_output(out_name_Second_Beam_save_id, _ort_device_obj)                # save_id
-                    binding_Second_Beam.bind_ortvalue_output(out_name_Second_Beam_prob, beam_score_buf)                     # top_beam_prob
-                    binding_Second_Beam.bind_ortvalue_output(out_name_Second_Beam_ids, beam_ids_buf)                        # top_beam_indices (next token)
-                    binding_Second_Beam.bind_ortvalue_output(out_name_Second_Beam_max, max_idx_buf)                         # max_logits_idx (stop check)
-                    _run(ort_session_Second_Beam, binding_Second_Beam)
-                    outputs_Beam = binding_Second_Beam.get_outputs()
-
-                save_id = outputs_Beam[beam_save_id_out_idx]
-                latest_save_id = save_id
-                max_logits_idx = max_idx_buf.numpy().flat[0]
-                if max_logits_idx in STOP_TOKEN:
-                    break
-
-                _bind_inputs(binding_Decoder, in_name_Decoder_self_kv, outputs_Beam[:num_keys_values])
-                binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam_save_id, save_id)
-            else:
-                if do_repeat_penality:
-                    binding_Greedy.bind_ortvalue_input(in_name_Greedy_logits, cur_logits_buf)
-                    binding_Greedy.bind_ortvalue_input(in_name_Greedy_save_id, save_id)
-                    binding_Greedy.bind_ortvalue_output(out_name_Greedy_max, max_idx_buf)
-                    binding_Greedy._iobinding.bind_output(out_name_Greedy_save_id, _ort_device_obj)
-                    _run(ort_session_Greedy, binding_Greedy)
-                    save_id = binding_Greedy.get_outputs()[1]
-                else:
-                    binding_Argmax.bind_ortvalue_input(in_name_Argmax_logits, cur_logits_buf)
-                    binding_Argmax.bind_ortvalue_output(out_name_Argmax_max, max_idx_buf)
-                    _run(ort_session_Argmax, binding_Argmax)
-
-                max_logits_idx = max_idx_buf.numpy().flat[0]
-                if max_logits_idx in STOP_TOKEN:
-                    break
-                if not do_repeat_penality:
-                    save_id_greedy[num_decode] = max_logits_idx
-                _bind_inputs(binding_Decoder, in_name_Decoder_self_kv, outputs_Decoder[:num_keys_values])
-
-            _bind_device_outputs(binding_Decoder, out_name_Decoder_kv)
-            if is_prefill_step:
-                binding_Decoder.bind_ortvalue_input(in_name_Decoder_hidden, hidden_states_buf)
-                binding_Decoder.bind_ortvalue_input(in_name_Decoder_position, position_buf)
-                binding_Decoder.bind_ortvalue_input(in_name_Decoder_mask, decode_mask_buf)
-                is_prefill_step = False
-            binding_Decoder.bind_ortvalue_output(out_name_Decoder_logits, decode_logits_buf)
-
-            _run(ort_session_Embed, binding_Embed)
-            _run(ort_session_Decode, binding_Decode)
-            num_decode += 1
-        slice_start += stride_step
-        slice_end = slice_start + INPUT_AUDIO_LENGTH
-    count_time = time.time() - start_time
-    rtf = count_time / max(audio_len / SAMPLE_RATE, 1e-6)
-
-    if USE_BEAM_SEARCH:
-        save_token_array = latest_save_id.numpy()[0]
-        for i, idx in enumerate(save_token_array):
-            if idx in STOP_TOKEN:
-                save_token_array = save_token_array[:i]
+    elapsed = time.time() - start_time
+    if saved_ids is not None:
+        host_tokens = []
+        for token in saved_ids.numpy()[0]:
+            token = int(token)
+            if token in STOP_TOKENS or len(host_tokens) >= generate_limit:
                 break
-    elif do_repeat_penality:
-        # Greedy with penalty keeps its token history on-device (GREEDY_SEARCH appends each step).
-        save_token_array = save_id.numpy()[0]
-        for i, idx in enumerate(save_token_array):
-            if idx in STOP_TOKEN:
-                save_token_array = save_token_array[:i]
-                break
+            host_tokens.append(token)
+    return host_tokens, decode_step, elapsed
+
+
+# ============================================================================
+# Dolphin-v1 encoder and language/region prompt setup
+# ============================================================================
+TOKENIZER = Tokenizer(VOCAB_PATH, BPE_MODEL_PATH)
+ENCODER_INPUT_META = PROBE_INPUT_META["audio"]
+ENCODER_INPUT_LENGTH = ENCODER_INPUT_META.shape[-1]
+AUDIO_NP_DTYPE = numpy_dtype(ENCODER_INPUT_META)
+
+language_prefix = list(LANGUAGE_ENTRY["prompt_token_ids"])
+PARTIAL_LANGUAGE_AUTO = (
+    LANGUAGE_CODE.endswith("-auto") and len(language_prefix) == 1
+)
+SPECIFY_LANGUAGE = len(language_prefix) == PROMPT_CONTROL_TOKEN_COUNT
+prompt_values = [SOS_TOKEN, *language_prefix]
+PROMPT_IDS = array_for(
+    PROBE_INPUT_META[PROBE_PLAN["token_input"]],
+    [prompt_values],
+    axes={0: 1, 1: len(prompt_values)},
+)
+
+
+def resolve_prompt(probe_outputs, cross_kv):
+    """Build Dolphin-v1's five-token ASR prompt, auto-detecting labels if needed."""
+    if SPECIFY_LANGUAGE:
+        language, _, region = LANGUAGE_CODE.partition("-")
+        return PROMPT_IDS, language, region
+
+    if PARTIAL_LANGUAGE_AUTO:
+        detected_language_id = language_prefix[0]
     else:
-        save_token_array = save_id_greedy[:num_decode]
-    text = tokenizer.decode_ids(save_token_array)
-    print(f"\nASR Result:\n{text}\n\nRTF: {rtf:.3f}   ({count_time:.3f}s for {audio_len / SAMPLE_RATE:.2f}s audio, {num_decode} tokens)")
-    print("----------------------------------------------------------------------------------------------------------")
+        language_logits = probe_outputs[
+            PROBE_OUTPUT_INDEX[PROBE_PLAN["logits_output"]]
+        ].numpy()[0]
+        detected_language_id = int(
+            np.argmax(
+                language_logits[LANGUAGE_TOKEN_START:LANGUAGE_TOKEN_END]
+            )
+            + LANGUAGE_TOKEN_START
+        )
+
+    region_probe = array_for(
+        PREFILL_INPUT_META[PREFILL_PLAN["token_input"]],
+        [[SOS_TOKEN, detected_language_id]],
+        axes={0: 1, 1: 2},
+    )
+    region_outputs = prefill(
+        region_probe,
+        cross_kv,
+        sampling_history=None,
+    )
+    region_logits = region_outputs[
+        PREFILL_OUTPUT_INDEX[PREFILL_PLAN["logits_output"]]
+    ].numpy()[0]
+    detected_region_id = int(
+        np.argmax(region_logits[REGION_TOKEN_START:REGION_TOKEN_END])
+        + REGION_TOKEN_START
+    )
+    prompt_ids = array_for(
+        PREFILL_INPUT_META[PREFILL_PLAN["token_input"]],
+        [[SOS_TOKEN, detected_language_id, detected_region_id, ASR_TOKEN, NOTIMESTAMP]],
+        axes={0: 1, 1: 5},
+    )
+    language_piece = TOKENIZER.decode(detected_language_id) or "?"
+    region_piece = TOKENIZER.decode(detected_region_id) or "?"
+    return prompt_ids, language_piece.strip("<>"), region_piece.strip("<>")
+
+
+# ============================================================================
+# Inference
+# ============================================================================
+TEST_AUDIO = list(model_audio_paths(DEMO_AUDIO_KEY))
+for test_path in TEST_AUDIO:
+    print("-" * 106)
+    print(f"\nTest Input Audio: {test_path}")
+    segment = (
+        AudioSegment.from_file(test_path)
+        .set_channels(1)
+        .set_frame_rate(SAMPLE_RATE)
+        .set_sample_width(2)
+    )
+    raw_audio = np.asarray(segment.get_array_of_samples(), dtype=np.int16)
+    audio_length = raw_audio.size
+    audio_prefix = resolve_shape(
+        ENCODER_INPUT_META, axes={0: 1, 1: 1, 2: audio_length}
+    )[:2]
+    audio = prepare_audio_input(
+        raw_audio.reshape(*audio_prefix, audio_length), AUDIO_NP_DTYPE
+    )
+    if is_dynamic_dim(ENCODER_INPUT_LENGTH):
+        input_audio_length = audio_length
+    else:
+        input_audio_length = int(ENCODER_INPUT_LENGTH)
+    audio_shape = resolve_shape(
+        ENCODER_INPUT_META, axes={0: 1, 1: 1, 2: input_audio_length}
+    )
+    stride = input_audio_length if SLIDING_WINDOW <= 0 else SLIDING_WINDOW
+    windows = (
+        1
+        if audio_length <= input_audio_length
+        else int(np.ceil((audio_length - input_audio_length) / stride)) + 1
+    )
+    aligned_length = (windows - 1) * stride + input_audio_length
+    if audio.shape[-1] < aligned_length:
+        audio = np.concatenate(
+            [
+                audio,
+                np.zeros(
+                    (*audio_shape[:2], aligned_length - audio.shape[-1]),
+                    dtype=numpy_dtype(ENCODER_INPUT_META),
+                ),
+            ],
+            axis=-1,
+        )
+
+    all_tokens = []
+    configured_language, _, configured_region = LANGUAGE_CODE.partition("-")
+    detected_language = configured_language if SPECIFY_LANGUAGE else "?"
+    detected_region = configured_region if SPECIFY_LANGUAGE else "?"
+    total_decode_steps = 0
+    total_decode_time = 0.0
+    start_time = time.time()
+    audio_buffer = ort_value(
+        filled_for(
+            ENCODER_INPUT_META, axes={0: 1, 1: 1, 2: input_audio_length}
+        )
+    )
+    for window_index in range(windows):
+        start_sample = window_index * stride
+        audio_window = array_for(
+            ENCODER_INPUT_META,
+            audio[:, :, start_sample:start_sample + input_audio_length],
+            axes={0: audio_shape[0], 1: audio_shape[1], 2: input_audio_length},
+        )
+        probe_tokens = (
+            PROMPT_IDS
+            if SPECIFY_LANGUAGE
+            else array_for(
+                PROBE_INPUT_META[PROBE_PLAN["token_input"]],
+                [[SOS_TOKEN]],
+                axes={0: 1, 1: 1},
+            )
+        )
+        probe_outputs = probe_prefill(audio_buffer, audio_window, probe_tokens)
+        cross_kv = {
+            decode_name: probe_outputs[PROBE_OUTPUT_INDEX[probe_name]]
+            for probe_name, decode_name in zip(PROBE_PLAN["cross_outputs"], PREFILL_PLAN["cross_inputs"])
+        }
+        prompt_ids, prompt_language, prompt_region = resolve_prompt(probe_outputs, cross_kv)
+        detected_language = prompt_language
+        detected_region = prompt_region
+        prefill_outputs = (
+            [
+                probe_outputs[PROBE_OUTPUT_INDEX[name]]
+                for name in PREFILL_PLAN["outputs"]
+            ]
+            if SPECIFY_LANGUAGE
+            else prefill(prompt_ids, cross_kv, sampling_history=None)
+        )
+        generate_limit = max(0, MAX_SEQ_LEN - prompt_ids.shape[-1])
+        tokens, decode_steps, decode_time = decode_tokens(
+            prefill_outputs, cross_kv, generate_limit
+        )
+        all_tokens.extend(tokens)
+        total_decode_steps += decode_steps
+        total_decode_time += decode_time
+
+    elapsed = time.time() - start_time
+    rtf = elapsed / (audio_length / SAMPLE_RATE)
+    text = TOKENIZER.decode_ids(all_tokens)
+    decode_rate = total_decode_steps / total_decode_time
+    print(f"\nDetected: {detected_language}-{detected_region}")
+    print(
+        f"\nASR Result:\n{text}\n\n"
+        f"RTF: {rtf:.3f}   ({elapsed:.3f}s for "
+        f"{audio_length / SAMPLE_RATE:.2f}s audio, {len(all_tokens)} text tokens; "
+        f"merged decode {decode_rate:.2f} token/s; 1 graph launch/token)"
+    )
+    print("-" * 106)

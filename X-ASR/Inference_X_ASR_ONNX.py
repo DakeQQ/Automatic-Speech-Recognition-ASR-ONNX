@@ -14,45 +14,60 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from Example_Audio import model_audio_paths
+from ORT_IO import (
+    array_for,
+    filled_for,
+    is_dynamic_dim,
+    load_special_token_ids,
+    metadata_by_name,
+    numpy_dtype,
+    resolve_shape,
+)
 
 
 # ============================================================================================
 #                                       User configuration
 # ============================================================================================
-# The tokens table (tokens.txt) is bundled inside the ONNX folder by the export / optimize step,
-# so inference is stand-alone (no external zipformer data path needed).
+# IMPORTANT: CLI options are intentionally limited to model/vocabulary paths.
+# Edit this section for demo, audio, streaming display, and ONNX Runtime behavior.
+# The default tokens.txt is bundled inside the ONNX folder, so no path override is
+# normally needed and inference remains stand-alone.
 
 TEST_AUDIO    = model_audio_paths("x_asr")
-PRINT_STREAMING_PARTIALS = True     # Demo mode: print one partial line after every encoded chunk.
-
-# The audio input dtype, audio frontend geometry, chunk geometry (decode_chunk_len), joiner_dim,
-# context_size, blank_id and chunk_ms are all
-# read automatically from the ONNX model metadata / tensor shapes at load time (XasrStreamingRunner.__init__),
-# so none of them need to be set here or kept in sync with Export_X_ASR.py.
+PRINT_STREAMING_PARTIALS = True         # Demo mode: print one partial line after every encoded chunk.
 
 # ONNX Runtime settings (house template)
-USE_NORMALISE_AUDIO = False         # Apply RMS loudness normalisation before feeding the model. The reference X-ASR pipeline keeps the decoded waveform amplitude unchanged.
-ORT_LOG       = False               # Verbose ORT logging (False = fastest).
-ORT_FP16      = False               # True only if the graph was converted to fp16.
-MAX_THREADS   = 0                   # inter/intra-op CPU threads; 0 = auto.
+USE_NORMALISE_AUDIO = False             # Apply RMS loudness normalisation before feeding the model. The reference X-ASR pipeline keeps the decoded waveform amplitude unchanged.
+ORT_LOG       = False                   # Verbose ORT logging (False = fastest).
+ORT_FP16      = False                   # True only if the graph was converted to fp16.
+MAX_THREADS   = 2                       # Measured optimum on the target i7-1165G7; 0 lets ORT choose automatically.
 DEVICE_ID     = 0
-ORT_Accelerate_Providers = []       # e.g. ['CUDAExecutionProvider'] / ['OpenVINOExecutionProvider'] / ['DmlExecutionProvider']
+ORT_Accelerate_Providers = ["CUDAExecutionProvider"]           # e.g. ['CUDAExecutionProvider'] / ['OpenVINOExecutionProvider'] / ['DmlExecutionProvider']
+CPU_DISABLE_MATMUL_ADD_FUSION = True    # ORT 1.27 wraps rank-3 MatMul+Add in costly Reshape/Gemm/Reshape chains.
+CPU_DISABLE_NCHWC = True                # NCHWc reorders regress mean/tail latency on the target i7-1165G7.
+CPU_EXTRA_DISABLED_OPTIMIZERS = [       # Individually benchmarked on the same CPU / ORT build.
+    "ConvAddActivationFusion",
+    "MatmulTransposeFusion",
+]
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Run X-ASR ONNX inference.")
     parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", type=Path, default=_SCRIPT_DIR / "X_ASR_Optimized", help="Folder containing ONNX graphs, for example X_ASR_Optimized or X_ASR_ONNX.")
+    parser.add_argument("--vocab-path", "--tokenizer-path", dest="vocab_path", type=Path, default=None, help="Optional tokens.txt path; defaults to tokens.txt in the model folder.")
     return parser.parse_args()
 
 
 _ARGS = _parse_args()
 onnx_folder = _ARGS.onnx_folder.expanduser().resolve()
-onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")
+VOCAB_PATH = (
+    _ARGS.vocab_path.expanduser().resolve()
+    if _ARGS.vocab_path is not None
+    else onnx_folder / "tokens.txt"
+)
+onnx_model_Metadata = str(onnx_folder / "ASR_Metadata.onnx")
 onnx_encoder = str(onnx_folder / "X_ASR_Encoder.onnx")
 onnx_decoder = str(onnx_folder / "X_ASR_Decoder.onnx")
 onnx_joiner = str(onnx_folder / "X_ASR_Joiner.onnx")
-
-_INV_INT16_SCALE = np.float32(1.0 / 32768.0)   # pre-computed [-1, 1] normalisation scale, reused every call
-
 
 # ============================================================================================
 #                    ONNX Runtime session / provider / device setup (house template)
@@ -133,39 +148,49 @@ def _resolve_provider():
 
 _SESS_OPTS = _build_session_opts()
 _DEVICE_STR, _ORT_DEVICE_TYPE, _PROVIDER_OPTS = _resolve_provider()
-_ORT_DEVICE = C.OrtDevice(_ORT_DEVICE_TYPE, C.OrtDevice.default_memory(), DEVICE_ID)
-_DISABLED_OPT = ["CastFloat16Transformer", "FuseFp16InitializerToFp32NodeTransformer"] if ORT_FP16 else None
+_CPU_EP_ONLY = not ORT_Accelerate_Providers or set(ORT_Accelerate_Providers) == {"CPUExecutionProvider"}
+_DISABLED_OPT = []
+if ORT_FP16:
+    _DISABLED_OPT.extend(["CastFloat16Transformer", "FuseFp16InitializerToFp32NodeTransformer"])
+_DISABLED_OPT = _DISABLED_OPT or None
+_ENCODER_DISABLED_OPT = list(_DISABLED_OPT or [])
+if _CPU_EP_ONLY and CPU_DISABLE_MATMUL_ADD_FUSION:
+    _ENCODER_DISABLED_OPT.append("MatMulAddFusion")
+if _CPU_EP_ONLY and CPU_DISABLE_NCHWC:
+    _ENCODER_DISABLED_OPT.append("NchwcTransformer")
+if _CPU_EP_ONLY:
+    _ENCODER_DISABLED_OPT.extend(CPU_EXTRA_DISABLED_OPTIMIZERS)
+_ENCODER_DISABLED_OPT = _ENCODER_DISABLED_OPT or None
 _RUN_OPTS = onnxruntime.RunOptions()
 _RUN_OPTS.log_severity_level = 0 if ORT_LOG else 4
 _RUN_OPTS.add_run_config_entry("disable_synchronize_execution_providers", "0")
 
 
-def _make_session(path):
+def _make_session(path, disabled_optimizers=_DISABLED_OPT):
     return onnxruntime.InferenceSession(
         path, sess_options=_SESS_OPTS,
         providers=ORT_Accelerate_Providers or ["CPUExecutionProvider"],
-        provider_options=_PROVIDER_OPTS, disabled_optimizers=_DISABLED_OPT,
+        provider_options=_PROVIDER_OPTS, disabled_optimizers=disabled_optimizers,
     )
-
-
-def _ort_zeros(shape, np_dtype):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(shape, dtype=np_dtype), _DEVICE_STR, DEVICE_ID)
 
 
 def _ort_from(arr):
     return onnxruntime.OrtValue.ortvalue_from_numpy(np.ascontiguousarray(arr), _DEVICE_STR, DEVICE_ID)
 
 
-def _np_dtype_from_meta(meta):
-    if "int64" in meta.type:
-        return np.int64
-    if "int32" in meta.type:
-        return np.int32
-    if "int16" in meta.type:
-        return np.int16
-    if "float16" in meta.type:
-        return np.float16
-    return np.float32
+def _resolve_batch_one(value_meta):
+    dynamic_axes = [
+        axis for axis, dim in enumerate(value_meta.shape) if is_dynamic_dim(dim)
+    ]
+    return resolve_shape(value_meta, axes={0: 1} if dynamic_axes else None)
+
+
+def _filled_batch_one(value_meta, fill_value=0):
+    shape = _resolve_batch_one(value_meta)
+    return filled_for(
+        value_meta, fill_value,
+        axes={0: shape[0]} if shape and is_dynamic_dim(value_meta.shape[0]) else None,
+    )
 
 
 def _run(session, binding):
@@ -211,114 +236,144 @@ def load_tokens(path):
 class XasrStreamingRunner:
     def __init__(self):
         self.meta = _make_session(onnx_model_Metadata)
-        self.enc = _make_session(onnx_encoder)
+        self.enc = _make_session(onnx_encoder, _ENCODER_DISABLED_OPT)
         self.dec = _make_session(onnx_decoder)
         self.joi = _make_session(onnx_joiner)
-        self.enc_in = [i.name for i in self.enc.get_inputs()]
-        self.enc_out = [o.name for o in self.enc.get_outputs()]
-        self.n_states = len(self.enc_in) - 1                      # 116
+        self.enc_input_meta = self.enc.get_inputs()
+        self.enc_output_meta = self.enc.get_outputs()
+        self.dec_input_meta = self.dec.get_inputs()
+        self.dec_output_meta = self.dec.get_outputs()
+        self.joi_input_meta = self.joi.get_inputs()
+        self.joi_output_meta = self.joi.get_outputs()
+        self.enc_inputs = metadata_by_name(self.enc_input_meta)
+        self.enc_outputs = metadata_by_name(self.enc_output_meta)
+        self.dec_inputs = metadata_by_name(self.dec_input_meta)
+        self.dec_outputs = metadata_by_name(self.dec_output_meta)
+        self.joi_inputs = metadata_by_name(self.joi_input_meta)
+        self.joi_outputs = metadata_by_name(self.joi_output_meta)
+        self.enc_in = [value.name for value in self.enc_input_meta]
+        self.enc_out = [value.name for value in self.enc_output_meta]
+        self.dec_in_names = [value.name for value in self.dec_input_meta]
+        self.dec_out_names = [value.name for value in self.dec_output_meta]
+        self.joi_in = [value.name for value in self.joi_input_meta]
+        self.joi_out_names = [value.name for value in self.joi_output_meta]
         # ---- self-configure from ONNX metadata + tensor shapes (nothing to keep in sync with export) ----
         model_meta = self.meta.get_modelmeta().custom_metadata_map or {}
+        special_token_ids = load_special_token_ids(model_meta)
 
-        def _required_meta_int(metadata, key, model_path):
-            value = metadata.get(key)
-            if value is None:
-                raise KeyError(
-                    f"Required metadata key '{key}' is missing from {model_path}. "
-                    f"Re-export with Export_X_ASR.py to stamp the model metadata."
-                )
-            return int(value)
+        indexed_keys = {
+            int(name.removeprefix("cached_key_"))
+            for name in self.enc_in
+            if name.startswith("cached_key_") and name.removeprefix("cached_key_").isdigit()
+        }
+        num_layers = len(indexed_keys)
+        expected_state_names = []
+        state_kinds = (
+            "cached_key", "cached_nonlin_attn", "cached_val1",
+            "cached_val2", "cached_conv1", "cached_conv2",
+        )
+        for layer in range(num_layers):
+            for kind in state_kinds:
+                expected_state_names.append(f"{kind}_{layer}")
+        expected_state_names.extend(("embed_states", "processed_lens"))
+        expected_state_outputs = [f"new_{name}" for name in expected_state_names]
+        self.n_states = len(expected_state_names)
+        self._state_input_meta = [self.enc_inputs[name] for name in expected_state_names]
+        self._state_output_meta = [self.enc_outputs[name] for name in expected_state_outputs]
 
-        audio_in = self.enc.get_inputs()[0]
-        self.sample_rate = _required_meta_int(model_meta, "sample_rate", onnx_model_Metadata)
-        self.chunk_ms = _required_meta_int(model_meta, "chunk_ms", onnx_model_Metadata)
-        self.window_length = _required_meta_int(model_meta, "window_length", onnx_model_Metadata)
-        self.hop_length = _required_meta_int(model_meta, "hop_length", onnx_model_Metadata)
+        audio_in = self.enc_inputs["audio"]
+        self.sample_rate = int(model_meta["sample_rate"])
+        self.audio_pcm_scale = int(model_meta["audio_pcm_scale"])
+        self.window_length = int(model_meta["window_length"])
+        self.hop_length = int(model_meta["hop_length"])
+        self.stream_stride_samples = int(model_meta["stream_stride_samples"])
+        self.tail_padding_samples = int(model_meta["tail_padding_samples"])
         self.inv_sample_rate = 1.0 / self.sample_rate
-        self.audio_chunk = audio_in.shape[2]                      # waveform samples per chunk (4880 @ 160ms)
-        meta_audio_chunk = _required_meta_int(model_meta, "audio_chunk_samples", onnx_model_Metadata)
-        if self.audio_chunk != meta_audio_chunk:
-            raise ValueError(
-                f"Encoder audio input shape says {self.audio_chunk} samples, but metadata audio_chunk_samples="
-                f"{meta_audio_chunk}. Re-export all X-ASR graphs together."
-            )
-        self.audio_np_dtype = _np_dtype_from_meta(audio_in)       # ONNX audio dtype: int16 / float32 / float16
-        self.input_audio_is_int16 = self.audio_np_dtype == np.int16
+        audio_shape = _resolve_batch_one(audio_in)
+        self.audio_chunk = audio_shape[2]                         # waveform samples per chunk (4880 @ 160ms)
+        self.audio_np_dtype = numpy_dtype(audio_in)               # ONNX audio dtype: int16 / float32 / float16
+        self.input_audio_is_int16 = self.audio_np_dtype == np.dtype(np.int16)
         self.T = (self.audio_chunk - self.window_length) // self.hop_length + 1
-        enc_out_meta = self.enc.get_outputs()[0]
-        enc_out_shape = [d if isinstance(d, int) else 1 for d in enc_out_meta.shape]
-        self.frame_advance = _required_meta_int(model_meta, "decode_chunk_len", onnx_model_Metadata)
-        self.context_size = self.dec.get_inputs()[0].shape[1]     # stateless predictor context (2)
-        self.joiner_dim = self.joi.get_inputs()[0].shape[1]       # joiner space dim (512)
-        self.blank_id = _required_meta_int(model_meta, "blank_id", onnx_model_Metadata)
-        print(f"\nModel metadata: {len(model_meta)} keys "
-              f"(sample_rate={self.sample_rate}, chunk_ms={self.chunk_ms}, "
-              f"window/hop={self.window_length}/{self.hop_length}, "
-              f"decode_chunk_len={self.frame_advance}, blank_id={self.blank_id}).")
+        enc_out_meta = self.enc_outputs["encoder_out"]
+        enc_out_shape = _resolve_batch_one(enc_out_meta)
+        # The public encoder output is already output-downsampled; its static time
+        # dimension is the exact number of source fbank frames advanced per chunk.
+        self.frame_advance = enc_out_shape[1]
+        self.stride_frames = self.stream_stride_samples // self.hop_length
+        self.chunk_ms = int(round(self.stream_stride_samples * 1000 / self.sample_rate))
+        dec_in_meta = self.dec_inputs["y"]
+        dec_out_meta = self.dec_outputs["decoder_out"]
+        joi_enc_meta = self.joi_inputs["encoder_out"]
+        joi_out_meta = self.joi_outputs["max_token_id"]
+        dec_in_shape = _resolve_batch_one(dec_in_meta)
+        joi_enc_shape = _resolve_batch_one(joi_enc_meta)
+        self.context_size = dec_in_shape[1]
+        self.joiner_dim = joi_enc_shape[1]
+        self.blank_id = special_token_ids["blank"]
+        self.sos_eos_id = special_token_ids["sos_eos"]
+        self.unknown_id = special_token_ids["unknown"]
+        self.decoder_start_id = special_token_ids["decoder_start"]
+        print(
+            f"\nModel metadata: {len(model_meta)} keys "
+            f"(sample_rate={self.sample_rate}, chunk_ms={self.chunk_ms}, "
+            f"window/hop={self.window_length}/{self.hop_length}, "
+            f"decode_chunk_len={self.frame_advance}, blank_id={self.blank_id})."
+        )
         # ---- pre-allocate every buffer once ----
-        self._x = _ort_zeros((1, 1, self.audio_chunk), self.audio_np_dtype)
-        self._state_zeros = [self._init_state_array(m) for m in self.enc.get_inputs()[1:]]
-        self._state_bank_a = [self._ort_zero_like_state(a) for a in self._state_zeros]
-        self._state_bank_b = [self._ort_zero_like_state(a) for a in self._state_zeros]
-        self._enc_out = _ort_zeros(enc_out_shape, _np_dtype_from_meta(enc_out_meta))
+        self._x = _ort_from(filled_for(audio_in, axes={0: 1} if is_dynamic_dim(audio_in.shape[0]) else None))
+        self._state_zeros = [_filled_batch_one(meta) for meta in self._state_input_meta]
+        self._state_inputs = [_ort_from(value) for value in self._state_zeros]
+        self._state_outputs = [
+            _ort_from(_filled_batch_one(meta)) for meta in self._state_output_meta
+        ]
+        self._enc_out = _ort_from(_filled_batch_one(enc_out_meta))
         # decoder / joiner shared buffers
-        self._y_np = np.zeros((1, self.context_size), dtype=np.int32)
-        self._y = _ort_zeros((1, self.context_size), np.int32)
-        self._joi_e = _ort_zeros((1, self.joiner_dim), np.float32)
-        self._joi_d = _ort_zeros((1, self.joiner_dim), np.float32)
-        self.dec_in = self.dec.get_inputs()[0].name
-        self.dec_out = self.dec.get_outputs()[0].name
-        self.joi_in = [i.name for i in self.joi.get_inputs()]
-        self.joi_out = self.joi.get_outputs()[0].name
-        self._tok_id = _ort_zeros((1,), np.int32)                # joiner greedy token id (bound once, read per frame)
+        self._y_np = _filled_batch_one(dec_in_meta)
+        self._y = _ort_from(self._y_np)
+        self._joi_e = _ort_from(_filled_batch_one(joi_enc_meta))
+        self._decoder_out = _ort_from(_filled_batch_one(dec_out_meta))
+        self.dec_in = dec_in_meta.name
+        self.dec_out = dec_out_meta.name
+        self.joi_out = joi_out_meta.name
+        self._tok_id = _ort_from(_filled_batch_one(joi_out_meta))
         self.dec_bind = self.dec.io_binding()
         self.joi_bind = self.joi.io_binding()
         # ---- bind every static shared buffer ONCE (updated in place / chained device->device) ----
-        # Encoder ping-pong is folded into TWO fully pre-bound bindings (A->B and B->A) that share the
-        # audio + encoder_out buffers, so a chunk just picks the binding by parity -- no per-chunk cache
-        # re-binding at all.
-        self.enc_bind_ab = self._build_enc_binding(self._state_bank_a, self._state_bank_b)
-        self.enc_bind_ba = self._build_enc_binding(self._state_bank_b, self._state_bank_a)
-        self._parity = 0
+        self.enc_bind = self._build_enc_binding()
         # Decoder: context ids in (updated in place); decoder_out is written straight into the joiner's
-        # decoder_out buffer (_joi_d), so there is no device->host->device hop between decoder and joiner.
+        # decoder output buffer, so there is no device->host->device hop between decoder and joiner.
         self.dec_bind.bind_ortvalue_input(self.dec_in, self._y)
-        self.dec_bind.bind_ortvalue_output(self.dec_out, self._joi_d)
+        self.dec_bind.bind_ortvalue_output(self.dec_out, self._decoder_out)
         # Joiner: per-frame encoder / decoder buffers in (updated in place / written by the decoder),
         # greedy token id out -> _tok_id.
         self.joi_bind.bind_ortvalue_input(self.joi_in[0], self._joi_e)
-        self.joi_bind.bind_ortvalue_input(self.joi_in[1], self._joi_d)
+        self.joi_bind.bind_ortvalue_input(self.joi_in[1], self._decoder_out)
         self.joi_bind.bind_ortvalue_output(self.joi_out, self._tok_id)
 
-    def _build_enc_binding(self, in_bank, out_bank):
-        # One fully pre-bound encoder binding: shared audio in + encoder_out out, plus the sliding caches
-        # read from in_bank and written to out_bank. Two of these (A->B, B->A) replace every per-chunk rebind.
+    def _build_enc_binding(self):
+        # Encoder inputs and outputs stay bound to distinct NodeArg-owned buffers.
         b = self.enc.io_binding()
         b.bind_ortvalue_input(self.enc_in[0], self._x)
         b.bind_ortvalue_output(self.enc_out[0], self._enc_out)
-        for nm, st in zip(self.enc_in[1:], in_bank):
-            b.bind_ortvalue_input(nm, st)
-        for nm, st in zip(self.enc_out[1:], out_bank):
-            b.bind_ortvalue_output(nm, st)
+        for index in range(self.n_states):
+            b.bind_ortvalue_input(
+                self._state_input_meta[index].name,
+                self._state_inputs[index],
+            )
+            b.bind_ortvalue_output(
+                self._state_output_meta[index].name,
+                self._state_outputs[index],
+            )
         return b
 
-    @staticmethod
-    def _init_state_array(meta):
-        shape = [d if isinstance(d, int) else 1 for d in meta.shape]
-        return np.zeros(shape, dtype=_np_dtype_from_meta(meta))
-
-    @staticmethod
-    def _ort_zero_like_state(arr):
-        return _ort_zeros(arr.shape, arr.dtype)
-
-    def prepare_audio_input(self, audio_int16: np.ndarray, target_rms: float = 8192.0) -> np.ndarray:
+    def prepare_audio_input(self, audio_int16: np.ndarray, target_rms: float = 4096.0) -> np.ndarray:
         # Fold the optional RMS loudness normalisation and the model-dtype conversion into a single pass
         # over the raw int16 PCM that pydub returns, casting to the model's audio dtype exactly once.
         #   int16 input: raw PCM (the encoder graph divides by 32768 internally).
         #   float32/float16 input: normalised to [-1, 1] here (÷32768), because the float graph skips the
         #   in-model division; float16 stores those values (the graph up-casts back to f32).
         if not USE_NORMALISE_AUDIO and self.input_audio_is_int16:
-            return np.ascontiguousarray(audio_int16, dtype=np.int16)
+            return np.ascontiguousarray(audio_int16, dtype=self.audio_np_dtype)
         audio = audio_int16.astype(np.float32)
         if USE_NORMALISE_AUDIO:
             rms = np.sqrt(np.mean(audio * audio, dtype=np.float32), dtype=np.float32)
@@ -326,18 +381,16 @@ class XasrStreamingRunner:
                 audio *= (target_rms / (rms + 1e-7))
                 np.clip(audio, -32768.0, 32767.0, out=audio)
         if self.input_audio_is_int16:
-            return audio.astype(np.int16)
-        audio *= _INV_INT16_SCALE   # fold the pre-computed ÷32768 scale into the same float buffer
+            return audio.astype(self.audio_np_dtype)
+        audio *= np.float32(1.0 / self.audio_pcm_scale)
         return audio.astype(self.audio_np_dtype)   # float32 (no-op) or float16
 
     def reset(self):
-        for bank in (self._state_bank_a, self._state_bank_b):
-            for state, zero in zip(bank, self._state_zeros):
-                state.update_inplace(zero)
-        self._parity = 0
+        for state, zero in zip(self._state_inputs, self._state_zeros):
+            state.update_inplace(zero)
 
     def _run_decoder(self, hyp):
-        # Refresh the predictor context; decoder_out is written in place into _joi_d (bound once in
+        # Refresh the predictor context; decoder_out is written into the producer-owned buffer (bound once in
         # __init__), so the joiner reads it with no device->host->device round-trip.
         self._y_np[0] = hyp[-self.context_size:]
         self._y.update_inplace(self._y_np)
@@ -348,22 +401,35 @@ class XasrStreamingRunner:
         fbank + sliding-cache ping-pong, returns encoder_out (T',512)."""
         # Fold the old host-staging buffer + copy into a single host->device write: the reflection-padded
         # window is already contiguous in the model dtype, so reshape is a view and no extra host copy is made.
-        self._x.update_inplace(np.ascontiguousarray(audio_chunk, dtype=self.audio_np_dtype).reshape(1, 1, -1))
-        # Ping-pong without re-binding: even chunks read bank A / write bank B, odd chunks the reverse.
-        _run(self.enc, self.enc_bind_ab if self._parity == 0 else self.enc_bind_ba)
-        self._parity ^= 1
+        audio_value = array_for(
+            self.enc_inputs[self.enc_in[0]],
+            np.ascontiguousarray(audio_chunk, dtype=self.audio_np_dtype).reshape(1, 1, -1),
+            axes={0: 1} if is_dynamic_dim(self.enc_inputs[self.enc_in[0]].shape[0]) else None,
+        )
+        self._x.update_inplace(audio_value)
+        _run(self.enc, self.enc_bind)
+        for state_input, state_output in zip(
+            self._state_inputs,
+            self._state_outputs,
+        ):
+            state_input.update_inplace(state_output)
         return self._enc_out.numpy()[0]                              # (T', 512)
 
     def greedy(self, encoder_out: np.ndarray, hyp):
         """Advance greedy transducer decoding over the frames of one encoder chunk. The joiner I/O
-        buffers are bound once in __init__; decoder_out already lives in _joi_d (written by _run_decoder)."""
+        buffers are bound once in __init__; decoder_out already lives in its producer-owned buffer."""
         for t in range(encoder_out.shape[0]):
-            self._joi_e.update_inplace(encoder_out[t:t + 1])
+            frame = array_for(
+                self.joi_inputs[self.joi_in[0]], encoder_out[t:t + 1],
+                axes={0: 1} if is_dynamic_dim(self.joi_inputs[self.joi_in[0]].shape[0]) else None,
+            )
+            self._joi_e.update_inplace(frame)
             _run(self.joi, self.joi_bind)
-            y = int(self._tok_id.numpy()[0])
+            token_ids = self._tok_id.numpy()
+            y = int(token_ids.flat[0])
             if y != self.blank_id:
                 hyp.append(y)
-                self._run_decoder(hyp)                         # refreshes _joi_d in place for the next frame
+                self._run_decoder(hyp)                         # refreshes decoder output for the next frame
         return hyp
 
     def _format_hyp(self, hyp, token_table) -> str:
@@ -375,19 +441,22 @@ class XasrStreamingRunner:
         # exactly like Kaldi snip_edges=False, then slide raw-audio windows so the encoder's in-graph Conv1d fbank
         # reproduces the training global fbank frame-for-frame. Yields a visible partial after each chunk.
         padded, num_frames = snip_edges_false_pad(
-            np.concatenate([waveform_1d, np.zeros(int(0.3 * self.sample_rate), dtype=waveform_1d.dtype)]),
+            np.concatenate([
+                waveform_1d,
+            np.zeros(self.tail_padding_samples, dtype=self.audio_np_dtype),
+            ]),
             self.window_length,
             self.hop_length,
         )
         self.reset()
-        hyp = [self.blank_id] * self.context_size
-        self._run_decoder(hyp)                                 # initial decoder_out -> _joi_d
+        hyp = [self.decoder_start_id] * (self.context_size - 1) + [self.blank_id]
+        self._run_decoder(hyp)                                 # initialize the decoder output buffer
         frame_pos = 0                                           # current frame index into the global fbank
         chunk_index = 0
         while num_frames - frame_pos >= self.T:
             start = frame_pos * self.hop_length
             encoder_out = self.encode_chunk(padded[start:start + self.audio_chunk])
-            frame_pos += self.frame_advance                    # decode_chunk_len fbank frames per chunk
+            frame_pos += self.stride_frames
             hyp = self.greedy(encoder_out, hyp)
             chunk_index += 1
             yield chunk_index, frame_pos * self.hop_length * self.inv_sample_rate, self._format_hyp(hyp, token_table)
@@ -406,8 +475,7 @@ if __name__ == "__main__":
     print("\n===== X-ASR ONNX inference =====")
     print("Loading exported models with IOBinding runtime ...")
     runner = XasrStreamingRunner()
-    # The tokens table is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
-    token_table = load_tokens(str(onnx_folder / "tokens.txt"))
+    token_table = load_tokens(str(VOCAB_PATH))
     print(f"Providers: {runner.enc.get_providers()}  |  audio_chunk={runner.audio_chunk}  T={runner.T}  states={runner.n_states}")
     print(f"Auto-detected from ONNX: audio_dtype={np.dtype(runner.audio_np_dtype).name}  frame_advance={runner.frame_advance}  "
           f"context_size={runner.context_size}  joiner_dim={runner.joiner_dim}  blank_id={runner.blank_id}")

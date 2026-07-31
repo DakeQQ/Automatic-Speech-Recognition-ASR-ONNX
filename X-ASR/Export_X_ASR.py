@@ -1,6 +1,8 @@
 import gc
-import subprocess
+import json
+import math
 import shutil
+import subprocess
 import sys
 import types
 from contextlib import contextmanager
@@ -9,6 +11,7 @@ from pathlib import Path
 import onnx
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 # ============================================================================================
@@ -16,7 +19,7 @@ import torch.nn as nn
 # ============================================================================================
 # Directory of the icefall Zipformer recipe that holds the pure-torch model modules
 # (zipformer.py, scaling.py, subsampling.py, decoder.py, joiner.py, scaling_converter.py).
-ZIPFORMER_DIR = "/home/DakeQQ/Downloads/X-ASR-main/X-ASR-zh-en/zipformer"
+ZIPFORMER_DIR = str(Path.home() / "Downloads" / "X-ASR-main" / "X-ASR-zh-en" / "zipformer")
 CHECKPOINT    = ZIPFORMER_DIR + "/checkpoint/fintuned_with_punctuation.pt"
 TOKENS_TXT    = ZIPFORMER_DIR + "/data/lang_5000_with_punctuation/tokens.txt"
 WEIGHT_KEY    = "model_avg"         # Which weight tensor set to export: "model_avg" (icefall's averaged weights, recommended) or "model".
@@ -25,8 +28,8 @@ WEIGHT_KEY    = "model_avg"         # Which weight tensor set to export: "model_
 DYNAMIC_AXES  = False               # Dynamic batch N (streaming still runs batch 1).
 CHUNK_MS      = 160                 # Streaming chunk latency in ms; picks the (chunk_size, left_context_frames) pair below.
 SAMPLE_RATE   = 16000               # Model parameter, do not edit.
-INPUT_AUDIO_DTYPE = "INT16"         # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. "INT16" feeds raw PCM (÷32768 in-graph); "F32"/"F16" feed audio pre-normalised to [-1, 1].
-OPSET         = 18
+INPUT_AUDIO_DTYPE = "F32"           # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. "INT16" feeds raw PCM (÷32768 in-graph); "F32"/"F16" feed audio pre-normalised to [-1, 1].
+OPSET         = 20
 
 NFFT          = 512                 # kaldi rounds the 400-sample (25 ms) frame up to the next power of two before the FFT.
 FEATURE_DIM   = 80                  # kaldi fbank mel bins, do not edit.
@@ -36,7 +39,7 @@ PRE_EMPHASIS  = 0.97                # kaldi pre-emphasis coefficient, do not edi
 
 onnx_folder = Path(__file__).resolve().parent / "X_ASR_ONNX"
 onnx_folder.mkdir(parents=True, exist_ok=True)
-onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")
+onnx_model_Metadata = str(onnx_folder / "ASR_Metadata.onnx")
 onnx_encoder = str(onnx_folder / "X_ASR_Encoder.onnx")
 onnx_decoder = str(onnx_folder / "X_ASR_Decoder.onnx")
 onnx_joiner = str(onnx_folder / "X_ASR_Joiner.onnx")
@@ -80,12 +83,12 @@ def _install_shims():
 _install_shims()
 sys.path.insert(0, ZIPFORMER_DIR)
 
-from subsampling import Conv2dSubsampling          
-from zipformer import Zipformer2                   
-from decoder import Decoder                         
-from joiner import Joiner                           
-from scaling import ScheduledFloat                      
-from scaling_converter import convert_scaled_to_non_scaled  
+from subsampling import Conv2dSubsampling  # pyright: ignore[reportMissingImports]
+from zipformer import Zipformer2  # pyright: ignore[reportMissingImports]
+from decoder import Decoder  # pyright: ignore[reportMissingImports]
+from joiner import Joiner  # pyright: ignore[reportMissingImports]
+from scaling import ScheduledFloat  # pyright: ignore[reportMissingImports]
+from scaling_converter import convert_scaled_to_non_scaled  # pyright: ignore[reportMissingImports]
 
 # ============================================================================================
 #                    Exact X-ASR-zh-en architecture (verified against the checkpoint)
@@ -99,7 +102,7 @@ ARCH = dict(
     downsampling_factor=(1, 2, 4, 8, 4, 2),
     num_encoder_layers=(2, 2, 4, 5, 4, 2),           # 19 layers total
     encoder_dim=(192, 256, 512, 768, 512, 256),
-    encoder_unmasked_dim=(192, 192, 256, 256, 256, 192),   # training-only (no params); default kept
+    encoder_unmasked_dim=(192, 192, 256, 320, 256, 192),   # training-only (no params); matches the released recipe
     query_head_dim=(32,) * 6,
     pos_head_dim=(4,) * 6,
     value_head_dim=(12,) * 6,
@@ -113,6 +116,11 @@ DECODER_DIM = 512
 JOINER_DIM = 512
 CONTEXT_SIZE = 2
 BLANK_ID = 0
+SOS_EOS_ID = 1
+UNKNOWN_ID = 4015
+DECODER_START_ID = -1
+MAX_SYMBOLS_PER_FRAME = 1
+TAIL_PADDING_SAMPLES = int(round(0.3 * SAMPLE_RATE))
 PAD_LENGTH = 7 + 2 * 3               # encoder_embed subsample (7) + ConvNeXt right pad (2*3)
 NUM_LAYERS_TOTAL = sum(ARCH["num_encoder_layers"])   # 19
 
@@ -178,13 +186,24 @@ class XasrEncoder(nn.Module):
         self.chunk_size = encoder.chunk_size[0]
         self.left_context_len = encoder.left_context_frames[0]
         self.pad_length = PAD_LENGTH
-        # Pre-compute the static per-chunk frame count and the constant length vector (no runtime shape reads).
+        # Pre-compute the static per-chunk frame count (no runtime shape reads).
         self.T = self.chunk_size * 2 + self.pad_length
-        self.register_buffer("_x_lens", torch.tensor([self.T], dtype=torch.int64), persistent=False)
-        # Pre-compute the [0..left_context_len) ramp used to build the initial-state mask (int64, reused).
-        self.register_buffer("_ctx_ramp", torch.arange(self.left_context_len, dtype=torch.int64).unsqueeze(0), persistent=False)
-        self.register_buffer("_ctx_ramp_reversed", torch.arange(self.left_context_len - 1, -1, -1, dtype=torch.int64).unsqueeze(0), persistent=False)
-        self.register_buffer("_current_mask", torch.zeros(1, self.chunk_size, dtype=torch.bool), persistent=False)
+        # One broadcast threshold replaces two Expands plus a Concat in every mask build.  A processed
+        # length is never negative, so -1 encodes the all-valid current chunk exactly.
+        mask_threshold = torch.cat([
+            torch.arange(self.left_context_len - 1, -1, -1, dtype=torch.int64),
+            torch.full((self.chunk_size,), -1, dtype=torch.int64),
+        ]).unsqueeze(0)
+        self.register_buffer("_mask_threshold", mask_threshold, persistent=True)
+        # Every Swoosh offset and all but one output constant are folded into adjacent biases below.
+        # Keeping the remaining scalar operands as shared buffers prevents hundreds of duplicate Constant nodes.
+        self.register_buffer("_swoosh_slope", torch.tensor(0.08, dtype=torch.float32), persistent=True)
+        self.register_buffer(
+            "_swoosh_r_folded_constant",
+            torch.tensor(0.313261687 + 0.08, dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer("_attention_mask_value", torch.tensor(-1000.0, dtype=torch.float32), persistent=True)
         # int16 audio is raw PCM (normalised to [-1, 1] in _fbank via ÷32768); f32/f16 audio is assumed
         # pre-normalised to [-1, 1], so the in-graph division is skipped.
         self.inv_int16 = float(1.0 / 32768.0)
@@ -192,7 +211,7 @@ class XasrEncoder(nn.Module):
         self._build_fbank_frontend()
         # Subsampled chunk length after Conv2dSubsampling: (T - 7) // 2 - 3 (== CHUNK_SIZE). Added as a
         # constant so new_processed_lens never depends on a runtime shape read.
-        self.register_buffer("_x_lens_sub", torch.tensor([(self.T - 7) // 2 - 3], dtype=torch.int64), persistent=False)
+        self.register_buffer("_x_lens_sub", torch.tensor([(self.T - 7) // 2 - 3], dtype=torch.int64), persistent=True)
         # Fold every geometry-dependent constant of the inlined streaming encoder into reusable buffers.
         self._precompute_encoder_constants()
 
@@ -220,20 +239,19 @@ class XasrEncoder(nn.Module):
             return folded - folded.mean(dim=1, keepdim=True)                              # per-frame DC removal (subtract the frame mean)
 
         fbank_kernel = torch.cat([fold_frontend(cos_basis), fold_frontend(sin_basis)], dim=0).unsqueeze(1)
-        self.register_buffer("fbank_kernel", fbank_kernel.contiguous(), persistent=False)   # (2 * fbank_freq, 1, WINDOW_LENGTH)
+        if self.input_audio_is_int16:
+            fbank_kernel = fbank_kernel * self.inv_int16
+        self.register_buffer("fbank_kernel", fbank_kernel.contiguous(), persistent=True)   # (2 * fbank_freq, 1, WINDOW_LENGTH)
         self.log_eps = float(torch.finfo(torch.float32).eps)                              # Kaldi's log floor (FLT_EPSILON)
         # Kaldi triangular mel filterbank (low_freq .. high_freq) over the NFFT spectrum, padded with a
         # zero Nyquist column and baked as a constant of shape (1, fbank_freq, FEATURE_DIM).
         mel_banks, _ = kaldi.get_mel_banks(FEATURE_DIM, NFFT, float(SAMPLE_RATE), 20.0, -400.0, 100.0, -500.0, 1.0)
-        self.register_buffer("mel_filters", torch.nn.functional.pad(mel_banks, (0, 1), value=0.0).transpose(0, 1).unsqueeze(0).contiguous(), persistent=False)
+        self.register_buffer("mel_filters", torch.nn.functional.pad(mel_banks, (0, 1), value=0.0).transpose(0, 1).unsqueeze(0).contiguous(), persistent=True)
 
     def _fbank(self, audio):
         # audio: (N, 1, audio_chunk_samples) waveform. INT16 raw PCM is normalised to [-1, 1] here (÷32768);
         # F32/F16 audio is assumed pre-normalised to [-1, 1], so the division is skipped. Returns (N, T, FEATURE_DIM).
-        if self.input_audio_is_int16:
-            audio = audio.float() * self.inv_int16
-        else:
-            audio = audio.float()
+        audio = audio.float()
         spectrum = torch.nn.functional.conv1d(audio, self.fbank_kernel, stride=self.hop_length)
         real_power, imag_power = torch.split(spectrum * spectrum, self.fbank_freq, dim=1)   # one square over 2*fbank_freq channels, then split (== real^2 / imag^2)
         power = (real_power + imag_power).transpose(1, 2)                                   # (N, T, fbank_freq)
@@ -252,7 +270,8 @@ class XasrEncoder(nn.Module):
         and folds to graph constants:
           * per-layer projected relative-position tables  (linear_pos(pos_emb) reshaped for the score matmul),
           * per-stack relative->absolute gather indices    (int32, batch-independent),
-          * per-conv chunk-scale tables                    (ChunkCausalDepthwiseConv1d._get_chunk_scale),
+          * per-conv fused streaming kernels               (causal + scaled chunkwise branches),
+          * shifted/folded Swoosh biases and shared attention/FF1 projections,
           * per-stack SimpleDownsample softmax weights,
           * the channel-conversion / full-dim-combine / output-downsample / subsampling geometry plans.
         All source sub-modules used here (encoder_pos, linear_pos, depthwise_conv, downsample.bias) are
@@ -285,21 +304,64 @@ class XasrEncoder(nn.Module):
                 t_idx = torch.arange(seq, dtype=torch.int64).unsqueeze(1)
                 c_idx = torch.arange(k_len, dtype=torch.int64).unsqueeze(0)
                 gidx = ((seq - 1 - t_idx) + c_idx).to(torch.int32).reshape(1, 1, seq, k_len)
-                self.register_buffer(f"_gidx_{s}", gidx.contiguous(), persistent=False)
+                if not DYNAMIC_AXES:
+                    gidx = gidx.expand(heads, 1, seq, k_len)
+                self.register_buffer(f"_gidx_{s}", gidx.contiguous(), persistent=True)
                 if ds != 1:
                     mask_idx = torch.arange(0, self.left_context_len + self.chunk_size, ds, dtype=torch.int32)
-                    self.register_buffer(f"_kpm_idx_{s}", mask_idx.contiguous(), persistent=False)
+                    self.register_buffer(f"_kpm_idx_{s}", mask_idx.contiguous(), persistent=True)
                 if is_downsampled:
-                    self.register_buffer(f"_dsw_{s}", module.downsample.bias.detach().softmax(dim=0).contiguous(), persistent=False)
+                    self.register_buffer(f"_dsw_{s}", module.downsample.bias.detach().softmax(dim=0).contiguous(), persistent=True)
+                    upsample_idx = torch.arange(seq, dtype=torch.int32).unsqueeze(1).expand(seq, ds).reshape(-1)
+                    self.register_buffer(f"_us_idx_{s}", upsample_idx.contiguous(), persistent=True)
                 self._stack_gl_offset.append(gl)
                 layer_refs = []
                 for l in range(n_layers):
                     layer = inner.layers[l]
                     # linear_pos(pos_emb) -> (heads, 1, phd, seq_len2): removes 19x linear_pos + reshape + permute.
                     pp = layer.self_attn_weights.linear_pos(pos_emb).reshape(-1, seq_len2, heads, phd).permute(2, 0, 3, 1)
-                    self.register_buffer(f"_pp_{gl}", pp.detach().contiguous(), persistent=False)
-                    self.register_buffer(f"_cs1_{gl}", layer.conv_module1.depthwise_conv._get_chunk_scale(seq).detach().contiguous(), persistent=False)
-                    self.register_buffer(f"_cs2_{gl}", layer.conv_module2.depthwise_conv._get_chunk_scale(seq).detach().contiguous(), persistent=False)
+                    self.register_buffer(f"_pp_{gl}", pp.detach().contiguous(), persistent=True)
+                    # self_attn_weights.in_proj and feed_forward1.in_proj consume the same tensor.  Concatenate
+                    # their immutable rows so one MatMul+Add replaces two, and bake FF1's Swoosh-L offset.
+                    saw = layer.self_attn_weights
+                    ff1 = layer.feed_forward1
+                    attn_ff1_w = torch.cat([saw.in_proj.weight.detach(), ff1.in_proj.weight.detach()], dim=0)
+                    attn_ff1_b = torch.cat([
+                        saw.in_proj.bias.detach(),
+                        ff1.in_proj.bias.detach() - 4.0,
+                    ], dim=0)
+                    self.register_buffer(f"_attn_ff1_w_{gl}", attn_ff1_w.contiguous(), persistent=True)
+                    self.register_buffer(f"_attn_ff1_b_{gl}", attn_ff1_b.contiguous(), persistent=True)
+                    self.register_buffer(
+                        f"_ff1_out_b_{gl}", self._fold_swoosh_output_bias(ff1.out_proj, 4.0, 0.035), persistent=True
+                    )
+                    for ff_num in (2, 3):
+                        ff = getattr(layer, f"feed_forward{ff_num}")
+                        self.register_buffer(
+                            f"_ff{ff_num}_in_b_{gl}", (ff.in_proj.bias.detach() - 4.0).contiguous(), persistent=True
+                        )
+                        self.register_buffer(
+                            f"_ff{ff_num}_out_b_{gl}", self._fold_swoosh_output_bias(ff.out_proj, 4.0, 0.035), persistent=True
+                        )
+                    # For fixed streaming geometry, causal and scaled chunkwise depthwise convolutions are
+                    # one immutable linear map.  The Swoosh-R offset is folded into the fused convolution bias.
+                    for conv_num in (1, 2):
+                        conv = getattr(layer, f"conv_module{conv_num}")
+                        dc = conv.depthwise_conv
+                        chunk_scale = dc._get_chunk_scale(seq).detach()
+                        conv_w, conv_b = self._fuse_streaming_depthwise_conv(dc, chunk_scale, seq)
+                        self.register_buffer(f"_conv{conv_num}_w_{gl}", conv_w, persistent=True)
+                        self.register_buffer(f"_conv{conv_num}_b_{gl}", (conv_b - 1.0).contiguous(), persistent=True)
+                        self.register_buffer(
+                            f"_conv{conv_num}_out_b_{gl}", self._fold_swoosh_output_bias(conv.out_proj, 1.0, 0.313261687), persistent=True
+                        )
+                    bypass_scale = layer.bypass.bypass_scale.detach()
+                    self.register_buffer(
+                        f"_norm_bypass_scale_{gl}",
+                        (layer.norm.log_scale.detach().exp() * math.sqrt(embed_dim) * bypass_scale).contiguous(),
+                        persistent=True,
+                    )
+                    self.register_buffer(f"_norm_residual_scale_{gl}", 1.0 - bypass_scale, persistent=True)
                     layer_refs.append(layer)
                     gl += 1
                 self._layer_refs.append(layer_refs)
@@ -322,7 +384,7 @@ class XasrEncoder(nn.Module):
                 else:
                     pad_channels = nc - enter
                     self._cnc_plan.append(("pad", pad_channels))
-                    self.register_buffer(f"_cnc_pad_{s}", torch.zeros(self.chunk_size, 1, pad_channels), persistent=False)
+                    self.register_buffer(f"_cnc_pad_{s}", torch.zeros(self.chunk_size, 1, pad_channels), persistent=True)
             # Full-dim combine plan (_get_full_dim_output): take each dim from the most-recent stack that has it.
             dims = [int(d) for d in enc.encoder_dim]
             plan = [(self._num_stacks - 1, 0, dims[-1], True)]
@@ -333,7 +395,7 @@ class XasrEncoder(nn.Module):
                     cur = dims[i]
             self._full_plan = plan
             # Output SimpleDownsample (softmax bias weights) + its static reshape geometry.
-            self.register_buffer("_dso_w", enc.downsample_output.bias.detach().softmax(dim=0).contiguous(), persistent=False)
+            self.register_buffer("_dso_w", enc.downsample_output.bias.detach().softmax(dim=0).contiguous(), persistent=True)
             self._output_ds = int(enc.output_downsampling_factor)
             self._output_dim = max(dims)
             self._output_dseq = self.chunk_size // self._output_ds
@@ -344,6 +406,92 @@ class XasrEncoder(nn.Module):
             self._sub_groups = cx.depthwise_conv.groups
             self._sub_conv_T = (self.T - 7) // 2 - self._sub_pad0
             self._sub_feat = self.encoder_embed.out_width * self.encoder_embed.layer3_channels
+            self.register_buffer(
+                "_sub_norm_scale",
+                self.encoder_embed.out_norm.log_scale.detach().exp() * math.sqrt(self.encoder_embed.out_norm.num_channels),
+                persistent=True,
+            )
+            # Inline the subsampling activations and fold each Swoosh offset/constant into neighboring
+            # convolution biases.  The third Swoosh output feeds a nonlinear residual block, so its final
+            # constant remains explicit; all earlier constants disappear from the graph.
+            conv0, conv1, conv2 = self.encoder_embed.conv[0], self.encoder_embed.conv[4], self.encoder_embed.conv[7]
+            swoosh_r_constant = 0.313261687 + 0.08
+            self.register_buffer("_sub_b0", (conv0.bias.detach() - 1.0).contiguous(), persistent=True)
+            self.register_buffer(
+                "_sub_b1",
+                (conv1.bias.detach().double() - swoosh_r_constant * conv1.weight.detach().double().sum((1, 2, 3)) - 1.0).float().contiguous(),
+                persistent=True,
+            )
+            self.register_buffer(
+                "_sub_b2",
+                (conv2.bias.detach().double() - swoosh_r_constant * conv2.weight.detach().double().sum((1, 2, 3)) - 1.0).float().contiguous(),
+                persistent=True,
+            )
+            self.register_buffer(
+                "_cx_pw1_b", (cx.pointwise_conv1.bias.detach() - 4.0).contiguous(), persistent=True
+            )
+            self.register_buffer(
+                "_cx_pw2_b",
+                (
+                    cx.pointwise_conv2.bias.detach().double()
+                    - (0.035 + 0.08 * 4.0) * cx.pointwise_conv2.weight.detach().double().sum((1, 2, 3))
+                ).float().contiguous(),
+                persistent=True,
+            )
+
+    @staticmethod
+    def _fold_swoosh_output_bias(proj, offset, constant):
+        folded_constant = constant + 0.08 * offset
+        bias = proj.bias.detach().double() - folded_constant * proj.weight.detach().double().sum(dim=1)
+        return bias.float().contiguous()
+
+    @staticmethod
+    def _fuse_streaming_depthwise_conv(dc, chunk_scale, seq):
+        """Collapse one fixed-length causal+chunkwise depthwise pair into one grouped Conv1d."""
+        left = dc.kernel_size // 2
+        channels = dc.causal_conv.weight.shape[0]
+        fused = torch.zeros(channels, seq, left + seq, dtype=torch.float64)
+        causal_w = dc.causal_conv.weight.detach().double()[:, 0]
+        chunk_w = dc.chunkwise_conv.weight.detach().double()[:, 0]
+        scale = chunk_scale.double()
+        for t in range(seq):
+            fused[:, t, t:t + left + 1] += causal_w
+            for k in range(2 * left + 1):
+                current_index = t + k - left
+                if 0 <= current_index < seq:
+                    fused[:, t, left + current_index] += chunk_w[:, k] * scale[:, t]
+        bias = dc.causal_conv.bias.detach().double()[:, None].expand(channels, seq).clone()
+        if dc.chunkwise_conv.bias is not None:
+            bias += dc.chunkwise_conv.bias.detach().double()[:, None] * scale
+        return (
+            fused.reshape(channels * seq, 1, left + seq).float().contiguous(),
+            bias.reshape(channels * seq).float().contiguous(),
+        )
+
+    def _swoosh_base(self, shifted):
+        return F.softplus(shifted) - shifted * self._swoosh_slope
+
+    def _swoosh_r_shifted(self, shifted):
+        return self._swoosh_base(shifted) - self._swoosh_r_folded_constant
+
+    def _feed_forward_shifted(self, ff, shifted, output_bias):
+        return F.linear(self._swoosh_base(shifted), ff.out_proj.weight, output_bias)
+
+    def _feed_forward(self, ff, x, input_bias, output_bias):
+        shifted = F.linear(x, ff.in_proj.weight, input_bias)
+        return self._feed_forward_shifted(ff, shifted, output_bias)
+
+    @staticmethod
+    def _bias_norm(norm, x, output_scale):
+        centered = x - norm.bias
+        scales = torch.linalg.vector_norm(centered, dim=norm.channel_dim, keepdim=True).reciprocal()
+        return x * (scales * output_scale)
+
+    @staticmethod
+    def _bias_norm_bypass(norm, src_orig, src, norm_bypass_scale, residual_scale):
+        centered = src - norm.bias
+        scales = torch.linalg.vector_norm(centered, dim=norm.channel_dim, keepdim=True).reciprocal()
+        return src_orig * residual_scale + (src * scales) * norm_bypass_scale
 
     def _subsample(self, x, cached_left_pad):
         # Inlined Conv2dSubsampling.streaming_forward: the front Conv2d stack is a plain Sequential (called
@@ -352,39 +500,47 @@ class XasrEncoder(nn.Module):
         ee = self.encoder_embed
         cx = ee.convnext
         x = x.unsqueeze(1)                                              # (N, 1, 29, 80)
-        x = ee.conv(x)                                                  # (N, 128, 11, 19)
+        conv0, conv1, conv2 = ee.conv[0], ee.conv[4], ee.conv[7]
+        x = F.conv2d(x, conv0.weight, self._sub_b0, conv0.stride, conv0.padding, conv0.dilation, conv0.groups)
+        x = self._swoosh_base(x)
+        x = F.conv2d(x, conv1.weight, self._sub_b1, conv1.stride, conv1.padding, conv1.dilation, conv1.groups)
+        x = self._swoosh_base(x)
+        x = F.conv2d(x, conv2.weight, self._sub_b2, conv2.stride, conv2.padding, conv2.dilation, conv2.groups)
+        x = self._swoosh_r_shifted(x)                                  # (N, 128, 11, 19)
         T = self._sub_conv_T                                           # 8
         bypass = x[:, :, :T, :]
         x = torch.cat([cached_left_pad, x], dim=2)                     # prepend cached left pad
         new_cached_left_pad = x[:, :, T:T + self._sub_pad0, :]
-        x = torch.nn.functional.conv2d(x, cx.depthwise_conv.weight, cx.depthwise_conv.bias, padding=(0, self._sub_pad1), groups=self._sub_groups)
-        x = cx.pointwise_conv1(x)
-        x = cx.activation(x)                                           # SwooshL
-        x = cx.pointwise_conv2(x)
+        x = F.conv2d(x, cx.depthwise_conv.weight, cx.depthwise_conv.bias, padding=(0, self._sub_pad1), groups=self._sub_groups)
+        x = F.conv2d(x, cx.pointwise_conv1.weight, self._cx_pw1_b)
+        x = self._swoosh_base(x)
+        x = F.conv2d(x, cx.pointwise_conv2.weight, self._cx_pw2_b)
         x = bypass + x                                                 # (N, 128, 8, 19)
         x = x.transpose(1, 2).reshape(-1, T, self._sub_feat)          # (N, 8, 2432); -1 keeps N dynamic
         x = ee.out(x)                                                 # (N, 8, 192)
-        return ee.out_norm(x), new_cached_left_pad
+        return self._bias_norm(ee.out_norm, x, self._sub_norm_scale), new_cached_left_pad
 
-    def _build_mask(self, N, processed_lens):
+    def _build_mask(self, processed_lens):
         # Padding mask over [left_context | current_chunk]; the left part masks not-yet-seen context. The
         # current-chunk part is always all-valid (zeros), so the conv-module mask is a no-op and dropped.
-        current = self._current_mask.expand(N, self.chunk_size)
-        ramp = self._ctx_ramp_reversed.expand(N, self.left_context_len)
-        processed_mask = processed_lens.unsqueeze(1) <= ramp
+        processed_mask = processed_lens.unsqueeze(1) <= self._mask_threshold
         new_processed_lens = processed_lens + self._x_lens_sub
-        return torch.cat([processed_mask, current], dim=1), new_processed_lens
+        return processed_mask, new_processed_lens
 
-    def _attn_weights(self, layer, gl, meta, src, cached_key, kpm, N):
+    def _attn_weights(self, layer, gl, meta, src, cached_key, kpm):
         # RelPositionMultiheadAttentionWeights.streaming_forward, inlined: one fused in_proj -> (q, k, p)
         # via split; the projected relative-position table is precomputed, and rel->absolute uses a
         # precomputed int32 gather. The head_dim**-0.25 scale is already baked into in_proj (ScaledLinear).
         # Reshapes use -1 for the batch axis (no shape reads); N is threaded in only for the gather expand.
-        saw = layer.self_attn_weights
         heads, qhd, phd = meta["heads"], meta["qhd"], meta["phd"]
         seq, left, k_len = meta["seq"], meta["left"], meta["k_len"]
         qdim = qhd * heads
-        q, k, p = torch.split(saw.in_proj(src), [qdim, qdim, heads * phd], dim=-1)
+        ff1_dim = layer.feed_forward1.in_proj.out_features
+        q, k, p, ff1_shifted = torch.split(
+            F.linear(src, getattr(self, f"_attn_ff1_w_{gl}"), getattr(self, f"_attn_ff1_b_{gl}")),
+            [qdim, qdim, heads * phd, ff1_dim],
+            dim=-1,
+        )
         k = torch.cat([cached_key, k], dim=0)                          # (k_len, N, qdim)
         new_cached_key = k[-left:]
         q = q.reshape(seq, -1, heads, qhd).permute(2, 1, 0, 3)         # (h, N, seq, qhd)
@@ -392,11 +548,13 @@ class XasrEncoder(nn.Module):
         k = k.reshape(k_len, -1, heads, qhd).permute(2, 1, 3, 0)       # (h, N, qhd, k_len)
         attn_scores = torch.matmul(q, k)                              # (h, N, seq, k_len)
         pos_scores = torch.matmul(p, getattr(self, f"_pp_{gl}"))      # (h, N, seq, seq_len2)
-        idx = getattr(self, f"_gidx_{meta['s']}").expand(heads, N, seq, k_len)
+        idx = getattr(self, f"_gidx_{meta['s']}")
+        if DYNAMIC_AXES:
+            idx = idx.expand(heads, src.shape[1], seq, k_len)
         pos_scores = torch.gather(pos_scores, 3, idx)                 # relative -> absolute (h, N, seq, k_len)
         attn_scores = attn_scores + pos_scores
-        attn_scores = attn_scores.masked_fill(kpm.unsqueeze(1), -1000.0)
-        return attn_scores.softmax(dim=-1), new_cached_key
+        attn_scores = torch.where(kpm.unsqueeze(1), self._attention_mask_value, attn_scores)
+        return attn_scores.softmax(dim=-1), new_cached_key, ff1_shifted
 
     def _self_attn(self, sa, meta, src, attn_weights, cached_val):
         # SelfAttention.streaming_forward, inlined: value in_proj -> cache concat -> attn-weighted sum.
@@ -422,19 +580,18 @@ class XasrEncoder(nn.Module):
         x = x.permute(2, 1, 0, 3).reshape(seq, -1, hidden) * y        # (seq, N, hidden)
         return na.out_proj(x), new_cached_x
 
-    def _conv_module(self, conv, chunk_scale, meta, src, cache):
+    def _conv_module(self, conv, fused_weight, fused_bias, output_bias, meta, src, cache):
         # ConvolutionModule.streaming_forward, inlined: GLU gate, then the ChunkCausalDepthwiseConv1d
         # streaming (causal branch + chunk-scaled chunkwise branch). The src_key_padding_mask masked_fill
         # is dropped: the current-chunk mask is always all-False.
         ed, left_pad = meta["embed_dim"], meta["conv_left_pad"]
-        dc = conv.depthwise_conv
         x, s = torch.split(conv.in_proj(src), ed, dim=2)              # (seq, N, ed) each
         x = (x * conv.sigmoid(s)).permute(1, 2, 0)                    # (N, ed, seq)
         x = torch.cat([cache, x], dim=2)                              # prepend cached left pad
         new_cache = x[..., -left_pad:]
-        x_chunk = dc.chunkwise_conv(x[..., left_pad:]) * chunk_scale
-        x = (x_chunk + dc.causal_conv(x)).permute(2, 0, 1)           # (seq, N, ed)
-        return conv.out_proj(x), new_cache
+        x = F.conv1d(x, fused_weight, fused_bias, groups=ed).reshape(-1, ed, meta["seq"])
+        x = x.permute(2, 0, 1)                                       # (seq, N, ed)
+        return F.linear(self._swoosh_base(x), conv.out_proj.weight, output_bias), new_cache
 
     def _simple_downsample(self, meta, src):
         # SimpleDownsample.forward, inlined (pad is always 0 for a streaming chunk): weighted sum over ds.
@@ -443,23 +600,25 @@ class XasrEncoder(nn.Module):
         return (src * getattr(self, f"_dsw_{meta['s']}").reshape(1, ds, 1, 1)).sum(dim=1)
 
     def _simple_upsample(self, meta, src):
-        # SimpleUpsample.forward, inlined: repeat each frame `ds` times along the time axis.
-        ds, C = meta["ds"], meta["embed_dim"]
-        return src.unsqueeze(1).expand(-1, ds, -1, -1).reshape(meta["seq"] * ds, -1, C)
+        # SimpleUpsample.forward via one precomputed int32 gather; avoids Expand materialization.
+        return torch.index_select(src, 0, getattr(self, f"_us_idx_{meta['s']}"))
 
     @staticmethod
     def _bypass(bypass_module, src_orig, src):
         # BypassModule.forward, inlined: learnable per-channel bypass on the non-residual term.
         return src_orig + (src - src_orig) * bypass_module.bypass_scale
 
-    def _convert_channels(self, x, s, N):
+    def _convert_channels(self, x, s):
         # convert_num_channels, inlined via a static per-stack plan (slice to shrink / zero-pad to grow).
         mode, param = self._cnc_plan[s]
         if mode == "none":
             return x
         if mode == "slice":
             return x[..., :param]
-        return torch.cat([x, getattr(self, f"_cnc_pad_{s}").expand(self.chunk_size, N, param)], dim=-1)
+        pad = getattr(self, f"_cnc_pad_{s}")
+        if DYNAMIC_AXES:
+            pad = pad.expand(self.chunk_size, x.shape[1], param)
+        return torch.cat([x, pad], dim=-1)
 
     def _full_dim(self, outputs):
         # _get_full_dim_output, inlined via a static plan of (stack, lo, hi) slices concatenated on the channel axis.
@@ -472,31 +631,54 @@ class XasrEncoder(nn.Module):
         x = x.reshape(self._output_dseq, ds, -1, self._output_dim)   # (d_seq, ds, N, C); -1 keeps N dynamic
         return (x * self._dso_w.reshape(1, -1, 1, 1)).sum(dim=1)
 
-    def _encoder_layer(self, meta, gl, layer, src, layer_states, kpm, N):
+    def _encoder_layer(self, meta, gl, layer, src, layer_states, kpm):
         # Zipformer2EncoderLayer.streaming_forward, inlined. Feedforward / BiasNorm / bypass leaf modules
         # are called directly (their tracing branch is already minimal and exact).
         cached_key, cached_nonlin, cached_val1, cached_val2, cached_conv1, cached_conv2 = layer_states
         src_orig = src
-        attn_weights, new_key = self._attn_weights(layer, gl, meta, src, cached_key, kpm, N)
-        src = src + layer.feed_forward1(src)
+        attn_weights, new_key, ff1_shifted = self._attn_weights(layer, gl, meta, src, cached_key, kpm)
+        src = src + self._feed_forward_shifted(
+            layer.feed_forward1, ff1_shifted, getattr(self, f"_ff1_out_b_{gl}")
+        )
         na, new_nonlin = self._nonlin_attn(layer.nonlin_attention, meta, src, attn_weights[0:1], cached_nonlin)
         src = src + na
         sa, new_val1 = self._self_attn(layer.self_attn1, meta, src, attn_weights, cached_val1)
         src = src + sa
-        sc, new_conv1 = self._conv_module(layer.conv_module1, getattr(self, f"_cs1_{gl}"), meta, src, cached_conv1)
+        sc, new_conv1 = self._conv_module(
+            layer.conv_module1,
+            getattr(self, f"_conv1_w_{gl}"),
+            getattr(self, f"_conv1_b_{gl}"),
+            getattr(self, f"_conv1_out_b_{gl}"),
+            meta, src, cached_conv1,
+        )
         src = src + sc
-        src = src + layer.feed_forward2(src)
+        src = src + self._feed_forward(
+            layer.feed_forward2, src,
+            getattr(self, f"_ff2_in_b_{gl}"), getattr(self, f"_ff2_out_b_{gl}"),
+        )
         src = self._bypass(layer.bypass_mid, src_orig, src)
         sa, new_val2 = self._self_attn(layer.self_attn2, meta, src, attn_weights, cached_val2)
         src = src + sa
-        sc, new_conv2 = self._conv_module(layer.conv_module2, getattr(self, f"_cs2_{gl}"), meta, src, cached_conv2)
+        sc, new_conv2 = self._conv_module(
+            layer.conv_module2,
+            getattr(self, f"_conv2_w_{gl}"),
+            getattr(self, f"_conv2_b_{gl}"),
+            getattr(self, f"_conv2_out_b_{gl}"),
+            meta, src, cached_conv2,
+        )
         src = src + sc
-        src = src + layer.feed_forward3(src)
-        src = layer.norm(src)                                         # BiasNorm (tracing branch is exact)
-        src = self._bypass(layer.bypass, src_orig, src)
+        src = src + self._feed_forward(
+            layer.feed_forward3, src,
+            getattr(self, f"_ff3_in_b_{gl}"), getattr(self, f"_ff3_out_b_{gl}"),
+        )
+        src = self._bias_norm_bypass(
+            layer.norm, src_orig, src,
+            getattr(self, f"_norm_bypass_scale_{gl}"),
+            getattr(self, f"_norm_residual_scale_{gl}"),
+        )
         return src, [new_key, new_nonlin, new_val1, new_val2, new_conv1, new_conv2]
 
-    def _stack_forward(self, s, x, stack_states, kpm, N):
+    def _stack_forward(self, s, x, stack_states, kpm):
         # One encoder stack: plain Zipformer2Encoder (ds == 1) or DownsampledZipformer2Encoder
         # (downsample -> layers -> upsample -> bypass combine). The mask is subsampled by ds per stack.
         # The full-length axis is a constant chunk_size, so the upsample trim needs no shape read.
@@ -505,16 +687,16 @@ class XasrEncoder(nn.Module):
         if meta["is_downsampled"]:
             src_orig = x
             x = self._simple_downsample(meta, x)
-            x, new_states = self._run_layers(s, meta, x, stack_states, kpm_s, N)
-            x = self._simple_upsample(meta, x)[:self.chunk_size]
+            x, new_states = self._run_layers(s, meta, x, stack_states, kpm_s)
+            x = self._simple_upsample(meta, x)
             return self._bypass(meta["module"].out_combiner, src_orig, x), new_states
-        return self._run_layers(s, meta, x, stack_states, kpm_s, N)
+        return self._run_layers(s, meta, x, stack_states, kpm_s)
 
-    def _run_layers(self, s, meta, x, stack_states, kpm_s, N):
+    def _run_layers(self, s, meta, x, stack_states, kpm_s):
         gl0 = self._stack_gl_offset[s]
         new_states = []
         for l, layer in enumerate(self._layer_refs[s]):
-            x, layer_new = self._encoder_layer(meta, gl0 + l, layer, x, stack_states[l * 6:(l + 1) * 6], kpm_s, N)
+            x, layer_new = self._encoder_layer(meta, gl0 + l, layer, x, stack_states[l * 6:(l + 1) * 6], kpm_s)
             new_states += layer_new
         return x, new_states
 
@@ -523,17 +705,16 @@ class XasrEncoder(nn.Module):
         # Fully inlined streaming encoder: fbank -> subsampling -> 6 Zipformer2 stacks -> full-dim combine ->
         # output downsample -> encoder_proj (fused into joiner space).
         x = self._fbank(audio)                                        # (N, T=29, 80)
-        N = x.shape[0]
         x, new_cached_embed_left_pad = self._subsample(x, states[-2])  # (N, 8, 192)
-        kpm, new_processed_lens = self._build_mask(N, states[-1])     # (N, 104)
+        kpm, new_processed_lens = self._build_mask(states[-1])        # (N, 104)
         x = x.transpose(0, 1)                                        # (T, N, C) time-major
         outputs = []
         new_states = []
         offset = 0
         for s in range(self._num_stacks):
             n6 = self._stack_meta[s]["n_layers"] * 6
-            x = self._convert_channels(x, s, N)
-            x, stack_new = self._stack_forward(s, x, states[offset:offset + n6], kpm, N)
+            x = self._convert_channels(x, s)
+            x, stack_new = self._stack_forward(s, x, states[offset:offset + n6], kpm)
             outputs.append(x)
             new_states += stack_new
             offset += n6
@@ -550,34 +731,25 @@ class XasrDecoder(nn.Module):
         super().__init__()
         self.context_size = decoder.context_size
         self.decoder_dim = decoder.embedding.embedding_dim
-        self._fold_embedding_conv(decoder)
+        # Keep one compact embedding table plus the tiny trained grouped convolution.  The former
+        # two-table fold duplicated the 5000x512 embedding and cost an avoidable 10.24 MB.
+        embedding_table = torch.cat([
+            decoder.embedding.weight.detach(),
+            torch.zeros(1, self.decoder_dim, dtype=decoder.embedding.weight.dtype),
+        ])
+        self.register_buffer("embedding_table", embedding_table.contiguous(), persistent=True)
+        self.register_buffer("zero_token_id", torch.tensor(0, dtype=torch.int32), persistent=True)
+        self.register_buffer("invalid_token_id", torch.tensor(decoder.vocab_size, dtype=torch.int32), persistent=True)
+        self.conv = decoder.conv
         self.decoder_proj = decoder_proj
 
-    def _fold_embedding_conv(self, decoder):
-        assert self.context_size == CONTEXT_SIZE, (self.context_size, CONTEXT_SIZE)
-        assert self.context_size > 1, self.context_size
-        conv = decoder.conv
-        assert conv.bias is None
-        groups = conv.groups
-        in_per_group = conv.in_channels // groups
-        out_per_group = conv.out_channels // groups
-        assert conv.in_channels == conv.out_channels == self.decoder_dim
-        assert conv.kernel_size[0] == self.context_size
-        embed = decoder.embedding.weight.detach().reshape(decoder.vocab_size, groups, in_per_group)
-        weight = conv.weight.detach().reshape(groups, out_per_group, in_per_group, self.context_size)
-        tables = torch.einsum("vgi,goik->kvgo", embed, weight).reshape(
-            self.context_size, decoder.vocab_size, self.decoder_dim
-        )
-        self.register_buffer("context_table0", tables[0].contiguous(), persistent=False)
-        self.register_buffer("context_table1", tables[1].contiguous(), persistent=False)
-
     def forward(self, y):
-        # y: (N, context_size) int32 token ids.  context_size is fixed, so embedding+Conv1d is
-        # pre-folded into one contribution table per context position.
-        y0, y1 = torch.split(y, 1, dim=1)
-        decoder_out = self.context_table0.index_select(0, y0.reshape(-1))
-        decoder_out = decoder_out + self.context_table1.index_select(0, y1.reshape(-1))
-        decoder_out = torch.relu(decoder_out)
+        # Map every negative startup ID to the appended zero row, preserving the upstream decoder's
+        # clamp-and-mask contract with one Where + one Gather and no runtime integer Cast.
+        safe_y = torch.where(y >= self.zero_token_id, y, self.invalid_token_id)
+        embedding = F.embedding(safe_y, self.embedding_table).transpose(1, 2)
+        decoder_out = F.conv1d(embedding, self.conv.weight, groups=self.conv.groups).squeeze(2)
+        decoder_out = F.relu(decoder_out)
         return self.decoder_proj(decoder_out)                          # (N, joiner_dim)
 
 
@@ -629,8 +801,10 @@ def _encoder_io_spec(init_states):
     return input_names, output_names, dyn
 
 
-def _add_meta(path, meta):
+def _add_meta(path, meta, *, replace=False):
     m = onnx.load(path, load_external_data=False)
+    if replace:
+        del m.metadata_props[:]
     existing = {prop.key: prop for prop in m.metadata_props}
     for k, v in meta.items():
         key, value = str(k), str(v)
@@ -639,6 +813,35 @@ def _add_meta(path, meta):
         else:
             m.metadata_props.add(key=key, value=value)
     onnx.save(m, path)
+
+
+def write_metadata_carrier(onnx_path, metadata):
+    _add_meta(
+        onnx_path,
+        {str(key): str(value) for key, value in metadata.items()},
+        replace=True,
+    )
+
+
+def _compact_json(value):
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _make_metadata(enc: XasrEncoder) -> dict:
+    return {
+        "sample_rate": str(SAMPLE_RATE),
+        "audio_pcm_scale": "32768",
+        "window_length": str(WINDOW_LENGTH),
+        "hop_length": str(HOP_LENGTH),
+        "stream_stride_samples": str((enc.T - enc.pad_length) * HOP_LENGTH),
+        "tail_padding_samples": str(TAIL_PADDING_SAMPLES),
+        "special_token_ids": _compact_json({
+            "blank": BLANK_ID,
+            "sos_eos": SOS_EOS_ID,
+            "unknown": UNKNOWN_ID,
+            "decoder_start": DECODER_START_ID,
+        }),
+    }
 
 
 def export_all():
@@ -658,42 +861,7 @@ def export_all():
     init_states = enc.get_init_states(1)
     in_names, out_names, dyn = _encoder_io_spec(init_states)
 
-    left_context_len = [LEFT_CONTEXT_FRAMES // k for k in ARCH["downsampling_factor"]]
-    common_meta = {
-        "x_asr_metadata_version": 1,
-        "producer": "Export_X_ASR.py",
-        "sample_rate": SAMPLE_RATE,
-        "chunk_ms": CHUNK_MS,
-        "chunk_size": CHUNK_SIZE,
-        "left_context_frames": LEFT_CONTEXT_FRAMES,
-        "decode_chunk_len": CHUNK_SIZE * 2,
-        "audio_chunk_samples": enc.audio_chunk_samples,
-        "input_audio_dtype": INPUT_AUDIO_DTYPE,
-        "num_mels": FEATURE_DIM,
-        "nfft_stft": NFFT,
-        "window_length": WINDOW_LENGTH,
-        "hop_length": HOP_LENGTH,
-        "pre_emphasis": PRE_EMPHASIS,
-        "vocab_size": VOCAB_SIZE,
-        "context_size": CONTEXT_SIZE,
-        "decoder_dim": DECODER_DIM,
-        "joiner_dim": JOINER_DIM,
-        "blank_id": BLANK_ID,
-        "num_layers_total": NUM_LAYERS_TOTAL,
-    }
-    enc_meta = {
-        **common_meta,
-        "model_type": "zipformer2", "version": "1", "model_author": "k2-fsa",
-        "comment": "X-ASR streaming zipformer2 (encoder_proj fused)",
-        "decode_chunk_len": CHUNK_SIZE * 2, "T": enc.T, "audio_chunk_samples": enc.audio_chunk_samples,
-        "num_encoder_layers": ",".join(map(str, ARCH["num_encoder_layers"])),
-        "encoder_dims": ",".join(map(str, ARCH["encoder_dim"])),
-        "cnn_module_kernels": ",".join(map(str, ARCH["cnn_module_kernel"])),
-        "left_context_len": ",".join(map(str, left_context_len)),
-        "query_head_dims": ",".join(map(str, ARCH["query_head_dim"])),
-        "value_head_dims": ",".join(map(str, ARCH["value_head_dim"])),
-        "num_heads": ",".join(map(str, ARCH["num_heads"])),
-    }
+    enc_meta = _make_metadata(enc)
 
     with torch.inference_mode():
         metadata_marker = torch.zeros((1,), dtype=torch.int64)
@@ -702,7 +870,7 @@ def export_all():
             input_names=["metadata_marker"], output_names=["metadata_marker_out"],
             dynamic_axes=None, opset_version=OPSET, dynamo=False,
         )
-        _add_meta(onnx_model_Metadata, enc_meta)
+        write_metadata_carrier(onnx_model_Metadata, enc_meta)
         del metadata_marker
 
         if INPUT_AUDIO_DTYPE == "INT16":
@@ -735,22 +903,9 @@ def export_all():
             do_constant_folding=True, opset_version=OPSET, dynamo=False,
         )
 
-    print(f"\n[Metadata] Stamped {len(enc_meta)} keys into {Path(onnx_model_Metadata).name}:")
-    for _key in sorted(enc_meta):
-        print(f"    {_key} = {enc_meta[_key]}")
-
     del encoder_embed, encoder, decoder, joiner, enc, dec, joi
     gc.collect()
     return init_states
-
-
-def run_exported_inference():
-    print("\nExport done. Running ONNX Runtime demo via Inference_X_ASR_ONNX.py ...")
-    subprocess.run(
-        [sys.executable, str(Path(__file__).resolve().parent / "Inference_X_ASR_ONNX.py"), "--onnx-folder", str(onnx_folder)],
-        check=True,
-    )
-
 
 if __name__ == "__main__":
     print("\n===== X-ASR ONNX export =====")
@@ -760,9 +915,16 @@ if __name__ == "__main__":
     for _asset in ("tokens.txt",):
         _src = Path(TOKENS_TXT)
         _dst = onnx_folder / _asset
-        try:
-            shutil.copy2(_src, _dst)
-            print(f"[Tokenizer] Copied {_asset} -> {onnx_folder}")
-        except Exception as _exc:  # noqa: BLE001 - a failed copy must not abort the auto demo
-            print(f"[Tokenizer] Skipped {_asset} ({_exc})")
-    run_exported_inference()
+        shutil.copy2(_src, _dst)
+        print(f"[Tokenizer] Copied {_asset} -> {onnx_folder}")
+    print("\nExport done.\n")
+    if subprocess.call(
+        [
+            sys.executable,
+            str(onnx_folder.parent / "Inference_X_ASR_ONNX.py"),
+            "--onnx-folder",
+            str(onnx_folder),
+        ],
+        cwd=str(onnx_folder.parent),
+    ) != 0:
+        raise RuntimeError("X-ASR inference failed after export.")

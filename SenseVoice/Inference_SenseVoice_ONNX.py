@@ -14,41 +14,62 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from Example_Audio import model_audio_paths
-
+from ORT_IO import (
+    array_for,
+    filled_for,
+    is_dynamic_dim,
+    load_supported_languages,
+    numpy_dtype,
+    resolve_supported_language,
+)
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Run SenseVoice ONNX inference.")
     parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", type=Path, default=_SCRIPT_DIR / "SenseVoice_Optimized", help="Folder containing ONNX graphs, for example SenseVoice_Optimized or SenseVoice_ONNX.")
+    parser.add_argument("--tokenizer-path", type=Path, default=None, help="Optional SentencePiece model; defaults to the bundled model in the ONNX folder.")
     return parser.parse_args()
 
 
 _ARGS = _parse_args()
 onnx_folder = _ARGS.onnx_folder.expanduser().resolve()
-onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")
+onnx_model_Metadata = str(onnx_folder / "ASR_Metadata.onnx")
 onnx_model_A = str(onnx_folder / "SenseVoiceSmall.onnx")
-test_audio = model_audio_paths("sensevoice")[0]                                                  # The test audio path.
+TOKENIZER_PATH = (
+    _ARGS.tokenizer_path.expanduser().resolve()
+    if _ARGS.tokenizer_path is not None
+    else onnx_folder / "chn_jpn_yue_eng_ko_spectok.bpe.model"
+)
 
 
+# ============================== User configuration ==============================
+# IMPORTANT: CLI options are intentionally limited to model/tokenizer paths.
+# Edit this section for demo, language, audio, and ONNX Runtime behavior.
+test_audio = model_audio_paths("sensevoice")[0]  # The test audio path.
 ORT_Accelerate_Providers = []           # If you have accelerate devices for : ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                         # else keep empty.
 # The audio input dtype is auto-detected from the model's audio input tensor in the ONNX model
 # (kaldi fbank keeps the int16 numeric range, so "float16"/"float" carry int16-range values, no ÷32768); no manual setting needed.
-USE_NORMALISE_AUDIO = True              # Apply RMS loudness normalisation before feeding the model. SenseVoice normalises the input by default.
-TARGET_LANGUAGE = 2                     # Choose one of indices ['auto' = 0, 'zh' = 1, 'en' = 2, 'yue' = 3, 'ja' = 4, 'ko' = 5, 'nospeech' = 6]
+USE_NORMALISE_AUDIO = False             # Apply RMS loudness normalisation before feeding the model. SenseVoice normalises the input by default.
+TARGET_LANGUAGE = "en"                  # Code/alias from artifact metadata: auto, zh, en, yue, ja, ko, or nospeech.
 SLIDING_WINDOW = 0                      # Set the sliding window step for test audio reading; use 0 to disable.
 
 
 # The SentencePiece tokenizer model is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
 tokenizer = SentencePieceProcessor()
-tokenizer.Load(str(onnx_folder / "chn_jpn_yue_eng_ko_spectok.bpe.model"))
+tokenizer.Load(str(TOKENIZER_PATH))
 
 
-def prepare_audio_input(audio_int16: np.ndarray, input_audio_dtype: str, target_rms: float = 8192.0) -> np.ndarray:
+def prepare_audio_input(
+    audio_int16: np.ndarray,
+    input_audio_dtype: str,
+    *,
+    audio_pcm_scale: int,
+    target_rms: float = 4096.0,
+) -> np.ndarray:
     # Fold the optional RMS loudness normalisation and the model-dtype conversion into a
     # single pass over the raw int16 PCM that pydub returns, casting to the model's audio input
     # dtype exactly once. `input_audio_dtype` is derived from the ONNX model's audio input tensor.
-    # The Kaldi fbank front-end consumes the int16 numeric range directly, so the float variants
-    # carry int16-range values (there is NO ÷32768 here).
+    # The metadata divisor defines the float graph's immutable PCM convention.
     if not USE_NORMALISE_AUDIO and input_audio_dtype == "INT16":
         return np.ascontiguousarray(audio_int16, dtype=np.int16)
     audio = audio_int16.astype(np.float32)
@@ -59,6 +80,7 @@ def prepare_audio_input(audio_int16: np.ndarray, input_audio_dtype: str, target_
             np.clip(audio, -32768.0, 32767.0, out=audio)
     if input_audio_dtype == "INT16":
         return audio.astype(np.int16)
+    audio *= np.float32(1.0 / audio_pcm_scale)
     if input_audio_dtype == "F16":
         return audio.astype(np.float16)   # NOTE: int16-range in f16 is lossy (~±16 ULP near 32768)
     return audio                          # F32: int16-range values as float32 (kaldi keeps this range)
@@ -175,49 +197,53 @@ ort_session_A = onnxruntime.InferenceSession(
     disabled_optimizers=disabled_optimizers,
 )
 print(f"\nUsable Providers: {ort_session_A.get_providers()}")
-shape_value_in = ort_session_A._inputs_meta[0].shape[-1]
 in_name_A = ort_session_A.get_inputs()
 out_name_A = ort_session_A.get_outputs()
+audio_input_meta = in_name_A[0]
+language_input_meta = in_name_A[1]
+shape_value_in = audio_input_meta.shape[-1]
 in_name_A0 = in_name_A[0].name
 in_name_A1 = in_name_A[1].name
 out_name_A0 = out_name_A[0].name
-out_name_A1 = out_name_A[1].name
 io_binding_A = ort_session_A.io_binding()
 
 # The audio input dtype is taken straight from the model's audio input tensor in the ONNX model,
 # so it always matches how the model was exported (kaldi fbank keeps the int16 numeric range;
 # "float16"/"float" carry int16-range values with no ÷32768).
-_audio_input_type = ort_session_A._inputs_meta[0].type
-input_audio_dtype = "INT16" if "int16" in _audio_input_type else ("F16" if "float16" in _audio_input_type else "F32")
+audio_np_dtype = numpy_dtype(audio_input_meta)
+input_audio_dtype = (
+    "INT16" if audio_np_dtype == np.dtype(np.int16) else
+    "F16" if audio_np_dtype == np.dtype(np.float16) else "F32"
+)
 
 _model_meta = ort_session_Metadata.get_modelmeta().custom_metadata_map or {}
 
-def _meta_int(key):
-    value = _model_meta.get(key)
-    if value is None:
-        raise KeyError(
-            f"Required metadata key '{key}' is missing from {onnx_model_Metadata}. "
-            f"Re-export with Export_SenseVoice.py to stamp the model metadata."
-        )
-    return int(value)
+SAMPLE_RATE = int(_model_meta["sample_rate"])
+AUDIO_PCM_SCALE = int(_model_meta["audio_pcm_scale"])
 
-
-INPUT_AUDIO_LENGTH = _meta_int("input_audio_length")
-SAMPLE_RATE = _meta_int("sample_rate")
-BLANK_ID = _meta_int("blank_id")
-print(f"\nModel metadata: {len(_model_meta)} keys "
-      f"(input_audio_length={INPUT_AUDIO_LENGTH}, sample_rate={SAMPLE_RATE}, blank_id={BLANK_ID}).")
+SUPPORTED_LANGUAGES = load_supported_languages(_model_meta)
+LANGUAGE, LANGUAGE_ENTRY = resolve_supported_language(
+    SUPPORTED_LANGUAGES,
+    TARGET_LANGUAGE,
+)
+LANGUAGE_SELECTOR_INDEX = LANGUAGE_ENTRY.get("selector_index")
+print(f"\nModel metadata: sample_rate={SAMPLE_RATE}, "
+    f"language={LANGUAGE}, selector_index={LANGUAGE_SELECTOR_INDEX}.")
 
 
 # Load the input audio
 print(f"\nTest Input Audio: {test_audio}")
 audio = np.array(AudioSegment.from_file(test_audio).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
 audio_len = len(audio)
-audio = prepare_audio_input(audio.reshape(1, 1, -1), input_audio_dtype)
-if isinstance(shape_value_in, str):
-    input_audio_length = min(INPUT_AUDIO_LENGTH, audio_len)  # The LFR index buffer is exported for this maximum length.
+audio = prepare_audio_input(
+    audio.reshape(1, 1, -1),
+    input_audio_dtype,
+    audio_pcm_scale=AUDIO_PCM_SCALE,
+)
+if is_dynamic_dim(shape_value_in):
+    input_audio_length = audio_len
 else:
-    input_audio_length = shape_value_in
+    input_audio_length = int(shape_value_in)
 if SLIDING_WINDOW <= 0:
     stride_step = input_audio_length
 else:
@@ -237,25 +263,43 @@ aligned_len = audio.shape[-1]
 # Start to run SenseVoice
 slice_start = 0
 slice_end = input_audio_length
-language_idx = np.array([TARGET_LANGUAGE], dtype=np.int32)
+language_idx = filled_for(
+    language_input_meta,
+    LANGUAGE_SELECTOR_INDEX,
+    axes={0: 1},
+)
 print("\nRunning the SenseVoice by ONNX Runtime.")
 text = ""
 
-# Reuse one pre-allocated input buffer for every sliding window (update_inplace keeps the bound
-# input zero-copy); the language id stays constant for the clip and ORT allocates the variable-length
-# token output on the target device.
-audio_buffer = onnxruntime.OrtValue.ortvalue_from_numpy(
-    np.zeros((1, 1, input_audio_length), dtype=audio.dtype), device_type, DEVICE_ID
-)
-language_buffer = onnxruntime.OrtValue.ortvalue_from_numpy(language_idx, device_type, DEVICE_ID)
-io_binding_A.bind_ortvalue_input(in_name_A0, audio_buffer)
-io_binding_A.bind_ortvalue_input(in_name_A1, language_buffer)
-io_binding_A._iobinding.bind_output(out_name_A0, _ort_device_obj)
-io_binding_A._iobinding.bind_output(out_name_A1, _ort_device_obj)
+# CPUExecutionProvider can consume each NumPy window in place. Accelerators keep one device input
+# buffer and update it per window; the language id remains device-resident for the whole clip.
+if device_type == "cpu":
+    audio_buffer = None
+    io_binding_A.bind_cpu_input(in_name_A1, language_idx)
+else:
+    audio_buffer = onnxruntime.OrtValue.ortvalue_from_numpy(
+        filled_for(audio_input_meta, axes={0: 1, 1: 1, 2: input_audio_length}),
+        device_type,
+        DEVICE_ID,
+    )
+    language_buffer = onnxruntime.OrtValue.ortvalue_from_numpy(language_idx, device_type, DEVICE_ID)
+    io_binding_A.bind_ortvalue_input(in_name_A0, audio_buffer)
+    io_binding_A.bind_ortvalue_input(in_name_A1, language_buffer)
 
 start_time = time.time()
 while slice_end <= aligned_len:
-    audio_buffer.update_inplace(np.ascontiguousarray(audio[:, :, slice_start: slice_end]))
+    audio_window = array_for(
+        audio_input_meta,
+        audio[:, :, slice_start: slice_end],
+        axes={0: 1, 1: 1, 2: input_audio_length},
+    )
+    if audio_buffer is None:
+        io_binding_A.bind_cpu_input(in_name_A0, audio_window)
+    else:
+        audio_buffer.update_inplace(audio_window)
+    # Device-auto outputs retain their previous allocation. Rebind before every run because the
+    # compact CTC token count is data-dependent and can change between sliding windows.
+    io_binding_A._iobinding.bind_output(out_name_A0, _ort_device_obj)
     ort_session_A.run_with_iobinding(io_binding_A, run_options=run_options)
     token_ids = io_binding_A.get_outputs()[0].numpy()
     text += tokenizer.decode([token_ids.tolist()])[0]

@@ -1,99 +1,66 @@
 import gc
+import json
+import shutil
 import subprocess
 import sys
-import os
+import tempfile
+from pathlib import Path
 import torch
 import torchaudio
 from STFT_Process import STFT_Process                                             # The custom STFT/ISTFT can be exported in ONNX format.
 from transformers import AutoFeatureExtractor, AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
 
 
-model_path = "/home/DakeQQ/Downloads/whisper-large-v3-turbo"    # Source Whisper model (HF) download path.
+model_path = str(Path.home() / "Downloads" / "whisper-large-v3-turbo")  # Source Whisper model (HF) download path.
 
-# -- Exported ONNX graph paths: core pipeline (Embed keeps token ids out of the float decoder; Prefill / Decode build position embedding + causal mask) --
-onnx_folder               = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Whisper_ONNX")   # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
-os.makedirs(onnx_folder, exist_ok=True)
-onnx_model_Metadata       = os.path.join(onnx_folder, "ASR_Matadata.onnx")
-onnx_model_Encoder        = os.path.join(onnx_folder, "Whisper_Encoder.onnx")
-onnx_model_Decoder        = os.path.join(onnx_folder, "Whisper_Decoder.onnx")
-onnx_model_Embed          = os.path.join(onnx_folder, "Whisper_Decoder_Embed.onnx")
-onnx_model_Prefill        = os.path.join(onnx_folder, "Whisper_Position_Mask_Prefill.onnx")
-onnx_model_Decode         = os.path.join(onnx_folder, "Whisper_Position_Mask_Decode.onnx")
+SCRIPT_DIR = Path(__file__).resolve().parent
+ONNX_DIR = SCRIPT_DIR / "Whisper_ONNX"
+_raw_onnx_temp = tempfile.TemporaryDirectory(prefix="whisper_export_")
+_raw_onnx_dir = Path(_raw_onnx_temp.name)
 
-# -- Exported ONNX graph paths: beam / greedy search, repetition-penalty reset, no-speech detection --
-onnx_model_Greedy         = os.path.join(onnx_folder, "Whisper_Greedy_Search.onnx")
-onnx_model_Argmax         = os.path.join(onnx_folder, "Whisper_Argmax.onnx")
-onnx_model_First_Beam     = os.path.join(onnx_folder, "Whisper_First_Beam_Search.onnx")
-onnx_model_Second_Beam    = os.path.join(onnx_folder, "Whisper_Second_Beam_Search.onnx")
-onnx_model_Penality       = os.path.join(onnx_folder, "Whisper_Apply_Penality.onnx")
-onnx_model_No_Speech      = os.path.join(onnx_folder, "Whisper_No_Speech_Detection.onnx")
-
-# -- Decoding strategy --
-USE_BEAM_SEARCH       = False           # Use beam search (True) or greedy search (False).
-BEAM_SIZE             = 3               # Number of beams in searching.
-TOP_K                 = 3               # Top-k candidates considered during decoding.
-MAX_BEAM_SIZE         = 10              # Max beams supported by the exported model.
-MAX_SEQ_LEN           = 448             # Maximum decoded sequence length; must be <= 448.
-
-# -- Repetition penalty --
-REPEAT_PENALITY       = 0.8             # Range 0.0 - 1.0; "1.0" means no penalty.
-PENALITY_RANGE        = 20              # Penalizes the most recent output; "30" means the last 30 tokens.
-REMOVE_REPEATED_PARTS = False           # Non-Whisper cleanup for runaway repetition;
-
-# -- Language / task --
-TARGET_LANGUAGE       = "en"            # A language listed in the get_language_id function's language_map.
-TASK                  = "transcribe"    # One of: ['transcribe', 'translate'].
-DETECT_LANGUAGE       = True            # Whisper-style auto language detection; overrides TARGET_LANGUAGE when True.
-
-# -- No-speech detection --
-NO_SPEECH_DETECTION   = True            # Skip silent / non-speech windows using the <|nospeech|> probability.
-NO_SPEECH_THRESHOLD   = 0.6             # Whisper default; higher = stricter silence rejection.
-
-# -- Audio / STFT front-end --
-INPUT_AUDIO_LENGTH    = 480000          # Whisper's default 30-second chunk; overwritten from preprocessor_config when available.
-SAMPLE_RATE           = 16000           # Model sample rate, do not edit.
-WINDOW_TYPE           = "hann"          # Window function used in the STFT.
-NFFT_STFT             = 400             # Number of FFT components for the STFT; edit carefully.
-WINDOW_LENGTH         = 400             # Length of windowing; edit carefully.
-HOP_LENGTH            = 160             # Samples between successive STFT frames; edit carefully.
-PRE_EMPHASIZE         = 0.97            # Audio pre-emphasis coefficient.
-INPUT_AUDIO_DTYPE     = "INT16"         # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. "INT16" feeds raw PCM (÷32768 in-graph); "F32"/"F16" feed audio pre-normalised to [-1, 1].
-COMPUTE_IN_F32        = False           # F16 KV-cache compute precision. False = minimum-cast f16 attention (self + cross Q@K/mask/softmax/attn@V run in f16 on the f16 caches; the context is cast back to f32). True = keep the f16 KV *storage* (cache I/O dtype unchanged) but upcast K/V (and the mask, internally) to f32 at the attention use points, keeping Q/softmax in f32 (f16 storage, f32 compute).
-# N_MELS              = 80              # Set from the Whisper model config (num_mel_bins); edit carefully.
-
-# -- Export --
-OPSET                 = 18              # ONNX opset version.
+import Shared_Merged
 
 
-if HOP_LENGTH > INPUT_AUDIO_LENGTH:
-    HOP_LENGTH = INPUT_AUDIO_LENGTH
+MODEL_FILE_NAMES = dict(Shared_Merged.DEFAULT_MODEL_FILE_NAMES)
 
+# Split graphs are temporary merge constituents. Encoder / NoSpeech / Metadata are copied to ONNX_DIR.
+onnx_model_Metadata       = str(_raw_onnx_dir / MODEL_FILE_NAMES["metadata"])
+onnx_model_Encoder        = str(_raw_onnx_dir / MODEL_FILE_NAMES["encoder"])
+onnx_model_Decoder        = str(_raw_onnx_dir / MODEL_FILE_NAMES["main"])
+onnx_model_Embed          = str(_raw_onnx_dir / MODEL_FILE_NAMES["embed"])
+onnx_model_Prefill        = str(_raw_onnx_dir / MODEL_FILE_NAMES["position_prefill"])
+onnx_model_Decode         = str(_raw_onnx_dir / MODEL_FILE_NAMES["position_decode"])
 
-model_path_lower = model_path.lower()
-if ("v3" in model_path_lower) or ("crisperwhisper" in model_path_lower) or ("anime" in model_path_lower) or ("belle" in model_path_lower) or ("turbo" in model_path_lower) or ("distil" in model_path_lower):
-    is_v3 = True
-    if 'v0.3' in model_path_lower:
-        custom_vocab = True
-    else:
-        custom_vocab = False
-    print("\nExport the Whisper-V3")
-else:
-    is_v3 = False
-    custom_vocab = False
-    print("\nExport the Whisper-V2")
+# -- Exported ONNX graph paths: token selection, repetition penalty, and no-speech detection --
+onnx_model_Begin_Suppress = str(_raw_onnx_dir / MODEL_FILE_NAMES["begin_suppress"])
+onnx_model_Greedy         = str(_raw_onnx_dir / MODEL_FILE_NAMES["greedy"])
+onnx_model_Argmax         = str(_raw_onnx_dir / MODEL_FILE_NAMES["argmax"])
+onnx_model_Sampling       = str(_raw_onnx_dir / MODEL_FILE_NAMES["sampling"])
+onnx_model_Penalty        = str(_raw_onnx_dir / MODEL_FILE_NAMES["penalty"])
+onnx_model_No_Speech      = str(_raw_onnx_dir / MODEL_FILE_NAMES["no_speech"])
+
+# -- Export configuration --
+INPUT_AUDIO_DTYPE          = "F32"      # ONNX audio input dtype: "INT16", "F32", or "F16".
+USE_FP16_KV                = True       # Keep cache, cross-KV, position, and mask storage in FP16 for normal deployment exports.
+COMPUTE_IN_F32             = False      # FP16-cache-only option: upcast attention compute while retaining FP16 storage.
+KV_DTYPE                   = torch.float16 if USE_FP16_KV else torch.float32
+REORDER_DOWNPROJ_FOR_QUANT = True       # Apply the exact fc1/fc2 channel reorder.
+REORDER_OPROJ_FOR_QUANT    = True       # Apply the exact self-attention V/o_proj channel reorder.
+REORDER_KEY                = "absmean"
+OPSET                      = 20
 
 
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 feature_extractor = AutoFeatureExtractor.from_pretrained(model_path)
 generation_config = GenerationConfig.from_pretrained(model_path)
-INPUT_AUDIO_LENGTH = int(getattr(feature_extractor, "n_samples", INPUT_AUDIO_LENGTH))
-NFFT_STFT = int(getattr(feature_extractor, "n_fft", NFFT_STFT))
-HOP_LENGTH = int(getattr(feature_extractor, "hop_length", HOP_LENGTH))
-SAMPLE_RATE = int(getattr(feature_extractor, "sampling_rate", SAMPLE_RATE))
+INPUT_AUDIO_LENGTH = int(getattr(feature_extractor, "n_samples", 480000))
+NFFT_STFT = int(getattr(feature_extractor, "n_fft", 400))
+HOP_LENGTH = int(getattr(feature_extractor, "hop_length", 160))
+SAMPLE_RATE = int(getattr(feature_extractor, "sampling_rate", 16000))
 WINDOW_LENGTH = NFFT_STFT
+WINDOW_TYPE = "hann"
 if HOP_LENGTH > INPUT_AUDIO_LENGTH:
     HOP_LENGTH = INPUT_AUDIO_LENGTH
-MAX_INPUT_AUDIO_LENGTH = INPUT_AUDIO_LENGTH
 no_timestamps_id = int(getattr(generation_config, "no_timestamps_token_id", tokenizer.convert_tokens_to_ids("<|notimestamps|>")))    # 50364 (v3) / 50363 (v2): selects non-timestamp transcription.
 no_speech_id = int(tokenizer.convert_tokens_to_ids("<|nospeech|>") or (no_timestamps_id - 1))                                      # 50363 (v3) / 50362 (v2): Whisper's silence-detection token.
 begin_suppress_token_ids = tuple(int(token_id) for token_id in (getattr(generation_config, "begin_suppress_tokens", None) or ()))
@@ -201,9 +168,6 @@ _LANGUAGE_DATA = {
 }
 
 
-_FULL_NAME_TO_CODE = {data['full_name']: code for code, data in _LANGUAGE_DATA.items()}
-
-
 _ALIAS_TO_CODE = {
     'united states': 'en', 'us': 'en',
     'united kingdom': 'en', 'uk': 'en', 'gb': 'en',
@@ -216,81 +180,17 @@ _ALIAS_TO_CODE = {
 }
 
 
-def get_language_id(language_input, custom_vocab=False, generation_config=None):
-    normalized_input = language_input.lower().strip()
-    lang_code = None
-    if normalized_input in _LANGUAGE_DATA:
-        lang_code = normalized_input
-    elif normalized_input in _FULL_NAME_TO_CODE:
-        lang_code = _FULL_NAME_TO_CODE[normalized_input]
-    elif normalized_input in _ALIAS_TO_CODE:
-        lang_code = _ALIAS_TO_CODE[normalized_input]
-    if lang_code:
-        if generation_config is not None and hasattr(generation_config, "lang_to_id"):
-            lang_token = f"<|{lang_code}|>"
-            if lang_token in generation_config.lang_to_id:
-                return int(generation_config.lang_to_id[lang_token])
-        language_info = _LANGUAGE_DATA[lang_code]
-        id_key = 'custom_id' if custom_vocab else 'id'
-        return language_info.get(id_key)
-    return None
-
-
-def get_task_id(task_input, is_v3, custom_vocab=False, generation_config=None):
-    task_input = task_input.lower()
-    if generation_config is not None and hasattr(generation_config, "task_to_id"):
-        start_token = getattr(generation_config, "decoder_start_token_id", None)
-        stop_token = getattr(generation_config, "eos_token_id", None)
-        if start_token is not None and stop_token is not None and task_input in generation_config.task_to_id:
-            return int(start_token), [int(stop_token)], int(generation_config.task_to_id[task_input])
-    if custom_vocab:
-        stop_token = 18871
-        start_token = 18872
-        task_map = {
-            'translate': 18973,
-            'transcribe': 18974
-        }
-        return start_token, [stop_token], task_map[task_input]
-    stop_token = 50257
-    start_token = 50258
-    if is_v3:
-        task_map = {
-            'translate': 50359,
-            'transcribe':  50360
-        }
-        return start_token, [stop_token], task_map[task_input]
-    else:
-        task_map = {
-            'translate': 50358,
-            'transcribe': 50359
-        }
-        return start_token, [stop_token], task_map[task_input]
-
-
-def remove_repeated_parts(ids, repeat_words_threshold, ids_len):
-    if ids_len <= repeat_words_threshold:
-        return ids
-    side_L = repeat_words_threshold // 2
-    side_R = side_L + 1
-    boundary = ids_len - side_L
-    for i in range(side_L, boundary):
-        for j in range(i + repeat_words_threshold, boundary):
-            check = []
-            for k in range(-side_L, side_R):
-                if ids[j + k] == ids[i + k]:
-                    check.append(True)
-                else:
-                    check.append(False)
-                    break
-            if False not in check:
-                return ids[: j - side_L]
-    return ids
-
-
 def build_model_metadata(*sections):
     def _norm(value):
         if isinstance(value, bool):
             return "1" if value else "0"
+        if isinstance(value, (dict, list)):
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         return str(value)
 
     merged = {}
@@ -301,17 +201,11 @@ def build_model_metadata(*sections):
     return merged
 
 
-def write_onnx_metadata(onnx_path, metadata):
-    import onnx
-    model = onnx.load(onnx_path, load_external_data=False)
-    existing = {prop.key: prop for prop in model.metadata_props}
-    for key, value in metadata.items():
-        if key in existing:
-            existing[key].value = value
-        else:
-            model.metadata_props.add(key=key, value=value)
-    onnx.save(model, onnx_path)
-
+def write_metadata_carrier(onnx_path, metadata):
+    Shared_Merged.replace_onnx_metadata(
+        onnx_path,
+        {str(key): str(value) for key, value in metadata.items()},
+    )
 
 
 def _bias_or_zero(linear):
@@ -331,9 +225,24 @@ def absorb_layer_norm_affine(norm, linear):
     norm.bias = None
 
 
+class BEGIN_SUPPRESS(torch.nn.Module):
+    """Apply Whisper's begin-only suppression before the first decode head."""
+
+    def __init__(self, token_ids, vocab_size):
+        super(BEGIN_SUPPRESS, self).__init__()
+        bias = torch.zeros((1, vocab_size), dtype=torch.float32)
+        valid_ids = [int(token_id) for token_id in token_ids if 0 <= int(token_id) < vocab_size]
+        if valid_ids:
+            bias[:, valid_ids] = float("-inf")
+        self.register_buffer("bias", bias)
+
+    def forward(self, logits):
+        return logits + self.bias
+
+
 class GREEDY_SEARCH(torch.nn.Module):
     # Pure argmax that also appends the chosen token to the running save_id history (Qwen ASR style).
-    # Used when a repetition penalty is active so APPLY_PENALITY can read the on-device history.
+    # Used when a repetition penalty is active so APPLY_PENALTY can read the on-device history.
     def __init__(self):
         super(GREEDY_SEARCH, self).__init__()
 
@@ -351,6 +260,53 @@ class ARGMAX(torch.nn.Module):
         return torch.argmax(logits, dim=-1, keepdim=True).int()
 
 
+class TOPK_TOPP_SAMPLING(torch.nn.Module):
+    NEG_INF = float("-inf")
+    GUMBEL_EPS = 1.0e-7
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer(
+            "neg_inf", torch.tensor(self.NEG_INF, dtype=torch.float32), persistent=False
+        )
+        self.register_buffer(
+            "gumbel_min", torch.tensor(self.GUMBEL_EPS, dtype=torch.float32), persistent=False
+        )
+        self.register_buffer(
+            "gumbel_max",
+            torch.tensor(1.0 - self.GUMBEL_EPS, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def forward(self, logits, temperature, top_k, top_p, repetition_penalty, previous_ids):
+        inv_penalty = torch.reciprocal(repetition_penalty)
+        prev_logits = torch.gather(logits, 1, previous_ids)
+        prev_scores = torch.where(
+            prev_logits < 0.0,
+            prev_logits * repetition_penalty,
+            prev_logits * inv_penalty,
+        )
+        scores = torch.scatter(logits, 1, previous_ids, prev_scores)
+        scores = scores * torch.reciprocal(temperature)
+
+        sorted_scores, sorted_indices = torch.topk(
+            scores, k=top_k, dim=-1, largest=True, sorted=True
+        )
+        sorted_probs = torch.softmax(sorted_scores, dim=-1)
+        sorted_cumsum = torch.cumsum(sorted_probs, dim=-1)
+        keep_topp = (sorted_cumsum - sorted_probs) <= top_p
+        sorted_scores = torch.where(keep_topp, sorted_scores, self.neg_inf)
+
+        noise = torch.clamp(
+            torch.rand_like(sorted_scores), self.gumbel_min, self.gumbel_max
+        )
+        gumbel = -torch.log(-torch.log(noise))
+        winner = torch.argmax(sorted_scores + gumbel, dim=-1, keepdim=True)
+        sampled_id = torch.gather(sorted_indices, 1, winner).int()
+        save_id = torch.cat([previous_ids, sampled_id], dim=-1)
+        return sampled_id, save_id
+
+
 class METADATA_CARRIER(torch.nn.Module):
     def __init__(self):
         super(METADATA_CARRIER, self).__init__()
@@ -359,17 +315,19 @@ class METADATA_CARRIER(torch.nn.Module):
         return marker
 
 
-class APPLY_PENALITY(torch.nn.Module):
+class APPLY_PENALTY(torch.nn.Module):
     # Sliding-window repetition penalty (Qwen ASR style): multiply the logits of the most recent
-    # `penality_range` tokens by `penality_value`. penality_range is baked into the graph at export
-    # via int(), so the runtime input only needs to match the export value.
+    # `penalty_range` tokens by `penalty_value`. The merged runtime binds penalty_value=1.0
+    # before the history window fills, then switches to the configured multiplier; this preserves
+    # the split runtime's conditional invocation without another graph launch.
     def __init__(self):
-        super(APPLY_PENALITY, self).__init__()
+        super(APPLY_PENALTY, self).__init__()
 
-    def forward(self, logits, save_id, penality_value, penality_range):
-        penality_range_val = int(penality_range.item())
-        target_indices = save_id[:, -penality_range_val:].long()
-        penalised = logits.gather(1, target_indices) * penality_value
+    def forward(self, logits, save_id, penalty_value, penalty_range):
+        # Keep penalty_range tensor-valued so it remains a runtime ONNX input. The legacy
+        # exporter lowers the negative bound directly to Neg + Slice without `.item()`.
+        target_indices = save_id[:, -penalty_range:].long()
+        penalised = logits.gather(1, target_indices) * penalty_value
         return logits.scatter(1, target_indices, penalised)
 
 
@@ -390,80 +348,29 @@ class NO_SPEECH_DETECTION(torch.nn.Module):
         return torch.softmax(logits + self.unsuppress_bias, dim=-1)[:, self.no_speech_token]
 
 
-class FIRST_BEAM_SEARCH(torch.nn.Module):
-    # First beam step (Qwen ASR style): expand the single prefilled sequence into `beam_size` beams.
-    # Scores are log-probabilities via logits - logsumexp(logits); no repetition penalty here (it is a
-    # separate APPLY_PENALITY pass on the logits beforehand).
-    def __init__(self, num_layers):
-        super(FIRST_BEAM_SEARCH, self).__init__()
-        self.num_keys_values = num_layers + num_layers
-        self.save_keys_values = [None] * self.num_keys_values
-
-    def forward(self, *all_inputs):
-        logits = all_inputs[-3]
-        save_id = all_inputs[-2]
-        beam_size = all_inputs[-1]
-        row_logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
-        top_beam_logits, top_beam_indices = torch.topk(logits, dim=-1, k=beam_size, sorted=True, largest=True)
-        top_beam_prob = top_beam_logits - row_logsumexp
-        for i in range(self.num_keys_values):
-            kv = all_inputs[i]
-            self.save_keys_values[i] = kv.repeat(beam_size, *([1] * (kv.dim() - 1)))
-        top_beam_indices = top_beam_indices.transpose(0, 1).int()
-        save_id = torch.cat([save_id, top_beam_indices], dim=-1)
-        max_logits_idx = top_beam_indices[[0]]
-        return *self.save_keys_values, save_id, top_beam_prob.transpose(0, 1), top_beam_indices, max_logits_idx
-
-
-class SECOND_BEAM_SEARCH(torch.nn.Module):
-    # Subsequent beam steps (Qwen ASR style): accumulate log-prob scores, pick the global top-`beam_size`
-    # continuations from the top-`topK` per beam, and reorder the K/V caches / save_id via index_select.
-    def __init__(self, num_layers):
-        super(SECOND_BEAM_SEARCH, self).__init__()
-        self.num_keys_values = num_layers + num_layers
-        self.save_keys_values = [None] * self.num_keys_values
-
-    def forward(self, *all_inputs):
-        logits = all_inputs[-5]
-        save_id = all_inputs[-4]
-        previous_prob = all_inputs[-3]
-        beam_size = all_inputs[-2]
-        topK = all_inputs[-1]
-        row_logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
-        top_k_logits, top_k_indices = torch.topk(logits, k=topK, dim=-1, largest=True, sorted=True)
-        top_k_prob = top_k_logits - row_logsumexp
-        current_prob = (top_k_prob + previous_prob).view(-1)
-        top_beam_prob, flat_beam_indices = torch.topk(current_prob, k=beam_size, dim=-1, largest=True, sorted=True)
-        beam_index = flat_beam_indices // topK
-        top_beam_indices = top_k_indices.view(-1)[flat_beam_indices]
-        for i in range(self.num_keys_values):
-            self.save_keys_values[i] = torch.index_select(all_inputs[i], dim=0, index=beam_index)
-        gathered_save_id = torch.index_select(save_id, dim=0, index=beam_index)
-        top_beam_indices = top_beam_indices.unsqueeze(-1).int()
-        max_logits_idx = top_beam_indices[[0]]
-        save_id = torch.cat([gathered_save_id, top_beam_indices], dim=-1)
-        return *self.save_keys_values, save_id, top_beam_prob.unsqueeze(-1), top_beam_indices, max_logits_idx
-
-
 class WHISPER_ENCODER(torch.nn.Module):
-    def __init__(self, whisper, stft_model, nfft_stft, n_mels, sample_rate, pre_emphasis, num_layers_de):
+    def __init__(self, whisper, stft_model, nfft_stft, n_mels, sample_rate, num_layers_de):
         super(WHISPER_ENCODER, self).__init__()
         self.encoder = whisper.encoder
         self.decoder = whisper.decoder
         self.stft_model = stft_model
-        self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 0, sample_rate // 2, n_mels, sample_rate, "slaney", 'slaney')).transpose(0, 1).unsqueeze(0)
-        self.save_encoder_key = [None] * num_layers_de
-        self.save_encoder_value = [None] * num_layers_de
-        self.inv_int16 = float(1.0 / 32768.0)
+        self.register_buffer(
+            'fbank',
+            torchaudio.functional.melscale_fbanks(
+                nfft_stft // 2 + 1, 0, sample_rate // 2, n_mels, sample_rate, "slaney", 'slaney'
+            ).transpose(0, 1).unsqueeze(0),
+        )
+        self.num_layers_de = num_layers_de
         # int16 audio is raw PCM (normalised in forward via ÷32768); f32/f16 audio is
-        # assumed pre-normalised to [-1, 1], so the in-graph division is skipped.
+        # assumed pre-normalised to [-1, 1]. The immutable scale is folded into the
+        # Conv1d DFT kernel so no full-waveform Mul remains in the captured graph.
         self.input_audio_is_int16 = (INPUT_AUDIO_DTYPE == "INT16")
-        self.pre_emphasis = float(pre_emphasis)
         self.num_heads = self.encoder.layers[0].self_attn.num_heads
         self.head_dim = self.encoder.layers[0].self_attn.head_dim
         self.hidden_size = self.encoder.layers[0].self_attn.out_proj.in_features
         self.cross_num_heads = self.decoder.layers[0].encoder_attn.num_heads
         self.cross_head_dim = self.decoder.layers[0].encoder_attn.head_dim
+        self.cross_hidden_size = self.cross_num_heads * self.cross_head_dim
         self._fuse_weights()
 
     def _fuse_weights(self):
@@ -483,30 +390,43 @@ class WHISPER_ENCODER(torch.nn.Module):
                 absorb_layer_norm_affine(encoder_layer.final_layer_norm, encoder_layer.fc1)
                 attn.qkv = qkv
                 del attn.q_proj, attn.k_proj, attn.v_proj
-            # Cross-attention keys/values are produced here from the encoder output; fuse k/v into one Linear
-            # and fold the cross-attention d**-0.25 scale into the key half.
+            # All decoder layers project the same final encoder state. Concatenate every layer's
+            # K projection followed by every V projection into one Linear. This removes L-1 large
+            # MatMul/Add/Cast pipelines while retaining the exact per-layer output cache contract.
             cross_scale = float(self.cross_head_dim ** -0.25)
+            key_weights = []
+            key_biases = []
+            value_weights = []
+            value_biases = []
             for decoder_layer in self.decoder.layers:
                 cross_attn = decoder_layer.encoder_attn
-                kv = torch.nn.Linear(cross_attn.k_proj.in_features, cross_attn.k_proj.out_features * 2, bias=True)
-                kv.weight.copy_(torch.cat([cross_attn.k_proj.weight, cross_attn.v_proj.weight], dim=0))
-                kv.bias.copy_(torch.cat([_bias_or_zero(cross_attn.k_proj), _bias_or_zero(cross_attn.v_proj)], dim=0))
-                kv.weight.data[:cross_attn.k_proj.out_features].mul_(cross_scale)   # fold cross scale into k
-                cross_attn.kv = kv
+                key_weights.append(cross_attn.k_proj.weight.detach() * cross_scale)
+                key_biases.append(_bias_or_zero(cross_attn.k_proj).detach() * cross_scale)
+                value_weights.append(cross_attn.v_proj.weight.detach())
+                value_biases.append(_bias_or_zero(cross_attn.v_proj).detach())
+
+            first_cross_attn = self.decoder.layers[0].encoder_attn
+            self.cross_kv = torch.nn.Linear(
+                first_cross_attn.k_proj.in_features,
+                self.num_layers_de * self.cross_hidden_size * 2,
+                bias=True,
+                device=first_cross_attn.k_proj.weight.device,
+                dtype=first_cross_attn.k_proj.weight.dtype,
+            )
+            self.cross_kv.weight.copy_(torch.cat(key_weights + value_weights, dim=0))
+            self.cross_kv.bias.copy_(torch.cat(key_biases + value_biases, dim=0))
+            for decoder_layer in self.decoder.layers:
+                cross_attn = decoder_layer.encoder_attn
                 del cross_attn.k_proj, cross_attn.v_proj
 
     def forward(self, audio):
-        if self.input_audio_is_int16:
-            audio = audio.float() * self.inv_int16                               # Raw PCM -> [-1, 1]; matches Whisper (no DC offset / pre-emphasis / gain normalization).
-        else:
-            audio = audio.float()                                                # f32/f16 input is already normalised to [-1, 1].
-        real_part, imag_part = self.stft_model(audio)                 # Whisper STFT uses center padding with reflect mode.
-        power = (real_part * real_part + imag_part * imag_part)[:, :, :-1]        # Power spectrum; Whisper drops the final STFT frame: stft[..., :-1].
+        audio = audio.float()
+        power = self.stft_model(audio)                                            # Packed STFT computes power directly and omits Whisper's discarded final frame.
         mel_features = torch.matmul(self.fbank, power).clamp(min=1e-10).log10()
         mel_features = torch.maximum(mel_features, mel_features.max() - 8.0)
         mel_features = (mel_features + 4.0) * 0.25
         hidden_states = torch.nn.functional.gelu(self.encoder.conv2(torch.nn.functional.gelu(self.encoder.conv1(mel_features)))).transpose(1, 2)
-        hidden_states = hidden_states + self.encoder.embed_positions.weight[:hidden_states.shape[1]].float()
+        hidden_states = hidden_states + self.encoder.embed_positions.weight[:hidden_states.shape[1]]
         for encoder_layer in self.encoder.layers:
             hidden_states_norm = encoder_layer.self_attn_layer_norm(hidden_states)
             qkv = encoder_layer.self_attn.qkv(hidden_states_norm).view(-1, 3 * self.num_heads, self.head_dim).transpose(0, 1)
@@ -516,12 +436,15 @@ class WHISPER_ENCODER(torch.nn.Module):
             hidden_states_attn += hidden_states
             hidden_states = hidden_states_attn + encoder_layer.fc2(encoder_layer.activation_fn(encoder_layer.fc1(encoder_layer.final_layer_norm(hidden_states_attn))))
         hidden_states = self.encoder.layer_norm(hidden_states)
-        for i, decoder_layer in enumerate(self.decoder.layers):
-            cross_kv = decoder_layer.encoder_attn.kv(hidden_states).half().view(-1, 2 * self.cross_num_heads, self.cross_head_dim).transpose(0, 1)
-            k, v = cross_kv.split(self.cross_num_heads, dim=0)                   # each (num_heads, T, head_dim)
-            self.save_encoder_key[i] = k.transpose(1, 2)                  # f16 cross-attention key   (num_heads, head_dim, T)
-            self.save_encoder_value[i] = v                                # f16 cross-attention value (num_heads, T, head_dim)
-        return *self.save_encoder_key, *self.save_encoder_value
+        cross_kv = self.cross_kv(hidden_states).to(KV_DTYPE)
+        keys, values = cross_kv.split(self.num_layers_de * self.cross_hidden_size, dim=-1)
+        # Audio batch is statically one in the encoder contract. Flattening that singleton with
+        # signal length avoids dynamic batch-shape construction before the two aggregate layouts.
+        keys = keys.reshape(-1, self.num_layers_de, self.cross_num_heads, self.cross_head_dim)
+        values = values.reshape(-1, self.num_layers_de, self.cross_num_heads, self.cross_head_dim)
+        keys = keys.permute(1, 2, 3, 0).unbind(dim=0)                      # L * (heads, head_dim, signal_len)
+        values = values.permute(1, 2, 0, 3).unbind(dim=0)                  # L * (heads, signal_len, head_dim)
+        return *keys, *values
 
 
 class WHISPER_DECODER_EMBED(torch.nn.Module):
@@ -539,15 +462,21 @@ class WHISPER_PREFILL(torch.nn.Module):
     # Prefill-phase position-embedding + causal-mask generator (mirrors Qwen's Rotary_Mask_Prefill).
     # Consumes the int lengths and emits float position embedding + float attention mask so the decoder
     # main graph stays integer-free.
-    def __init__(self, decoder, max_seq_len):
+    def __init__(self, decoder, max_seq_len, attention_dtype):
         super(WHISPER_PREFILL, self).__init__()
-        self.register_buffer('position_weight', decoder.embed_positions.weight.unsqueeze(0).half())
-        self.register_buffer('attention_mask', (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128)
+        self.register_buffer('position_weight', decoder.embed_positions.weight.unsqueeze(0).to(KV_DTYPE))
+        self.register_buffer(
+            'attention_mask',
+            torch.triu(
+                torch.full((1, max_seq_len, max_seq_len), -128.0, dtype=attention_dtype),
+                diagonal=1,
+            ),
+        )
 
     def forward(self, ids_len, history_len):
         kv_seq_len = history_len + ids_len
         position_embed = self.position_weight[:, history_len: kv_seq_len].float()
-        attention_mask = self.attention_mask[:, :ids_len, :kv_seq_len].half()
+        attention_mask = self.attention_mask[:, :ids_len, :kv_seq_len]
         return position_embed, attention_mask, kv_seq_len
 
 
@@ -557,7 +486,7 @@ class WHISPER_DECODE(torch.nn.Module):
     # as a static buffer at runtime and no mask is produced here.
     def __init__(self, decoder):
         super(WHISPER_DECODE, self).__init__()
-        self.register_buffer('position_weight', decoder.embed_positions.weight.unsqueeze(0).half())
+        self.register_buffer('position_weight', decoder.embed_positions.weight.unsqueeze(0).to(KV_DTYPE))
 
     def forward(self, kv_seq_len):
         kv_seq_len_next = kv_seq_len + 1
@@ -572,22 +501,25 @@ class WHISPER_DECODER(torch.nn.Module):
         self.decoder = whisper.model.decoder
         self.suppress_tokens = suppress_tokens
         self.num_layers_de = num_layers_de
-        self.compute_in_f32 = COMPUTE_IN_F32
+        self.compute_in_f32 = not USE_FP16_KV or COMPUTE_IN_F32
         self.idx_en_key = self.num_layers_de + self.num_layers_de            # en cross-attn keys start (2 * L)
         self.idx_en_value = self.idx_en_key + self.num_layers_de             # en cross-attn values start (3 * L)
         self.idx_hidden = self.idx_en_value + self.num_layers_de             # token-embedding input (4 * L)
         self.idx_position = self.idx_hidden + 1                              # position-embedding input (4 * L + 1)
-        self.save_de_keys = [None] * self.num_layers_de
-        self.save_de_values = [None] * self.num_layers_de
         self.num_heads = self.decoder.layers[0].self_attn.num_heads
         self.head_dim = self.decoder.layers[0].self_attn.head_dim
         self.hidden_size = self.decoder.layers[0].self_attn.out_proj.in_features
         self.cross_num_heads = self.decoder.layers[0].encoder_attn.num_heads
         self.cross_head_dim = self.decoder.layers[0].encoder_attn.head_dim
-        self.suppress_tokens_penality = torch.zeros((1, self.whisper.proj_out.out_features), dtype=torch.float32)
+        suppress_tokens_penalty = torch.zeros((1, self.whisper.proj_out.out_features), dtype=torch.float32)
         if self.suppress_tokens is not None:
-            self.suppress_tokens_penality[:, self.suppress_tokens] = float(-128.0)
+            suppress_tokens_penalty[:, self.suppress_tokens] = float(-128.0)
+        self.register_buffer('suppress_tokens_penalty', suppress_tokens_penalty)
         self._fuse_weights()
+        if REORDER_DOWNPROJ_FOR_QUANT:
+            self._reorder_downproj_for_quant(REORDER_KEY)
+        if REORDER_OPROJ_FOR_QUANT:
+            self._reorder_oproj_for_quant(REORDER_KEY)
 
     def _fuse_weights(self):
         # Fuse self-attention q/k/v into one Linear (fold d**-0.25 into q & k, absorb self_attn_layer_norm),
@@ -614,6 +546,68 @@ class WHISPER_DECODER(torch.nn.Module):
                 absorb_layer_norm_affine(decoder_layer.encoder_attn_layer_norm, cross_attn.q_proj)
                 absorb_layer_norm_affine(decoder_layer.final_layer_norm, decoder_layer.fc1)
 
+    @staticmethod
+    def _channel_stat(weight, key, dims):
+        absolute = weight.abs()
+        if key == "rms":
+            return (weight * weight).mean(dim=dims).sqrt()
+        if key == "L4":
+            return absolute.pow(4).mean(dim=dims).pow(0.25)
+        if key == "std":
+            if isinstance(dims, tuple):
+                keep_dim = weight.shape[-1]
+                return weight.reshape(-1, keep_dim).std(0)
+            return weight.std(dim=dims)
+        if key != "absmean":
+            raise ValueError(f"Unsupported REORDER_KEY: {key!r}")
+        return absolute.mean(dim=dims)
+
+    def _reorder_downproj_for_quant(self, key):
+        """Permute fc1 outputs and fc2 inputs by the same intermediate-channel order."""
+        with torch.no_grad():
+            for decoder_layer in self.decoder.layers:
+                fc1 = decoder_layer.fc1
+                fc2 = decoder_layer.fc2
+                permutation = torch.argsort(self._channel_stat(fc2.weight, key, 0))
+                fc1.weight.copy_(fc1.weight[permutation])
+                if fc1.bias is not None:
+                    fc1.bias.copy_(fc1.bias[permutation])
+                fc2.weight.copy_(fc2.weight[:, permutation])
+
+    def _reorder_oproj_for_quant(self, key):
+        """Permute each self-attention V head and the matching o_proj input columns."""
+        num_heads = self.num_heads
+        head_dim = self.head_dim
+        hidden_size = self.hidden_size
+        with torch.no_grad():
+            for decoder_layer in self.decoder.layers:
+                attention = decoder_layer.self_attn
+                output_weight = attention.out_proj.weight
+                output_by_head = output_weight.view(output_weight.shape[0], num_heads, head_dim)
+                permutations = [
+                    torch.argsort(self._channel_stat(output_by_head[:, head, :], key, 0))
+                    for head in range(num_heads)
+                ]
+
+                reordered_output = output_by_head.clone()
+                for head, permutation in enumerate(permutations):
+                    reordered_output[:, head, :] = output_by_head[:, head, permutation]
+                output_weight.copy_(reordered_output.reshape_as(output_weight))
+
+                qkv = attention.qkv
+                value_weight = qkv.weight[2 * hidden_size:].view(num_heads, head_dim, qkv.in_features)
+                reordered_value_weight = value_weight.clone()
+                for head, permutation in enumerate(permutations):
+                    reordered_value_weight[head] = value_weight[head, permutation]
+                qkv.weight[2 * hidden_size:].copy_(reordered_value_weight.reshape(hidden_size, qkv.in_features))
+
+                if qkv.bias is not None:
+                    value_bias = qkv.bias[2 * hidden_size:].view(num_heads, head_dim)
+                    reordered_value_bias = value_bias.clone()
+                    for head, permutation in enumerate(permutations):
+                        reordered_value_bias[head] = value_bias[head, permutation]
+                    qkv.bias[2 * hidden_size:].copy_(reordered_value_bias.reshape(hidden_size))
+
     def forward(self, *all_inputs):
         # Pure float graph: token embedding + position embedding are produced by the separate Embed / Prefill /
         # Decode graphs and arrive here as float tensors, so the decode path has no integer I/O.
@@ -623,6 +617,8 @@ class WHISPER_DECODER(torch.nn.Module):
         # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
         # dtype unchanged) and upcast to f32 ONCE here, shared by every layer. Minimum-cast path uses it as-is (f16).
         attn_mask = attention_mask.float() if self.compute_in_f32 else attention_mask
+        save_de_keys = []
+        save_de_values = []
         for idx, decoder_layer in enumerate(self.decoder.layers):
             hidden_states_norm = decoder_layer.self_attn_layer_norm(hidden_states)
             # Self-attention. OFF (minimum-cast): cast the fused QKV DOWN to f16 before the split so
@@ -636,12 +632,12 @@ class WHISPER_DECODER(torch.nn.Module):
             qkv = qkv.view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
             q, k, v = qkv.split(self.num_heads, dim=1)                            # each (batch, num_heads, ids_len, head_dim)
             if self.compute_in_f32:
-                k = k.half()   # f16 K storage (no-op in the minimum-cast path: qkv is already f16)
-                v = v.half()   # f16 V storage
+                k = k.to(KV_DTYPE)
+                v = v.to(KV_DTYPE)
             k = torch.cat((all_inputs[idx], k.transpose(-1, -2)), dim=-1)  # f16 key cache (batch, num_heads, head_dim, kv_seq_len)
             v = torch.cat((all_inputs[idx + self.num_layers_de], v), dim=-2)  # f16 value cache
-            self.save_de_keys[idx] = k
-            self.save_de_values[idx] = v
+            save_de_keys.append(k)
+            save_de_values.append(v)
             if self.compute_in_f32:
                 attn = torch.matmul(torch.nn.functional.softmax(torch.matmul(q, k.float()) + attn_mask, dim=-1), v.float()).transpose(1, 2).reshape(batch_size, -1, self.hidden_size)
             else:
@@ -664,33 +660,79 @@ class WHISPER_DECODER(torch.nn.Module):
         hidden_states = self.decoder.layer_norm(hidden_states[:, -1])
         logits = self.whisper.proj_out(hidden_states)
         if self.suppress_tokens is not None:
-            logits = logits + self.suppress_tokens_penality
-        return *self.save_de_keys, *self.save_de_values, logits
+            logits = logits + self.suppress_tokens_penalty
+        return *save_de_keys, *save_de_values, logits
 
 
 print('\nExport start...\n')
+_raw_onnx_dir.mkdir(parents=True, exist_ok=True)
 with torch.inference_mode():
-    try:
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(model_path, dtype=torch.float32, low_cpu_mem_usage=True, use_safetensors=False).eval()
-    except:
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(model_path, dtype=torch.float32, low_cpu_mem_usage=True, use_safetensors=True).eval()
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        model_path,
+        dtype=torch.float32,
+        low_cpu_mem_usage=True,
+    ).eval()
     HIDDEN_SIZE = model.config.d_model
-    NUM_HEAD_EN = model.model.config.encoder_attention_heads
     NUM_HEAD_DE = model.model.config.decoder_attention_heads
-    HEAD_DIM_EN = model.model.encoder.layers._modules['0'].self_attn.head_dim
     HEAD_DIM_DE = model.model.decoder.layers._modules['0'].self_attn.head_dim
     NUM_LAYER_DE = model.config.decoder_layers
     N_MELS = model.config.num_mel_bins
     VOCAB_SIZE = model.config.vocab_size
-    STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1
-    if MAX_SEQ_LEN > model.config.max_target_positions:
-        MAX_SEQ_LEN = model.config.max_target_positions
+    supported_languages = {}
+    aliases_by_code = {}
+    for alias, code in _ALIAS_TO_CODE.items():
+        aliases_by_code.setdefault(code, []).append(alias)
+    canonical_language_codes = {
+        token[2:-2] for token in generation_config.lang_to_id
+    }
+    for token, token_id in generation_config.lang_to_id.items():
+        code = token[2:-2]
+        language_data = _LANGUAGE_DATA.get(code)
+        supported_languages[code] = {
+            "name": language_data["full_name"].title(),
+            "aliases": sorted(
+                set([language_data["full_name"], *aliases_by_code.get(code, [])])
+                - {code}
+                - canonical_language_codes
+            ),
+            "token_id": int(token_id),
+            "prompt_token_ids": [],
+        }
+    task_ids = {
+        str(task): int(token_id)
+        for task, token_id in (getattr(generation_config, "task_to_id", None) or {}).items()
+    }
+    special_token_ids = {
+        "bos": int(tokenizer.bos_token_id),
+        "decoder_start": int(generation_config.decoder_start_token_id),
+        "eos": int(generation_config.eos_token_id),
+        "pad": int(tokenizer.pad_token_id),
+        "unknown": int(tokenizer.unk_token_id),
+        "stop": [int(generation_config.eos_token_id)],
+        "no_speech": no_speech_id,
+        "no_timestamps": no_timestamps_id,
+        "tasks": task_ids,
+    }
+    STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH
+    ENCODER_SIGNAL_LENGTH = (STFT_SIGNAL_LENGTH + 1) // 2
+    MAX_SEQ_LEN = int(model.config.max_target_positions)
 
     # Attention scaling (d**-0.25 on q & k) is now folded into the fused qkv/kv weights inside the
     # WHISPER_ENCODER / WHISPER_DECODER modules, so no separate pre-scaling loop is needed here.
 
-    custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, win_length=WINDOW_LENGTH, hop_len=HOP_LENGTH, max_frames=0, window_type=WINDOW_TYPE, pad_mode='reflect', center_pad=True).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
-    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
+    custom_stft = STFT_Process(
+        model_type='stft_B_power',
+        n_fft=NFFT_STFT,
+        win_length=WINDOW_LENGTH,
+        hop_len=HOP_LENGTH,
+        max_frames=0,
+        window_type=WINDOW_TYPE,
+        pad_mode='reflect',
+        center_pad=True,
+        input_scale=(1.0 / 32768.0) if INPUT_AUDIO_DTYPE == "INT16" else 1.0,
+        drop_last_frame=True,
+    ).eval()
+    whisper_encoder = WHISPER_ENCODER(model.model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, NUM_LAYER_DE)
 
     output_names = []
     _audio_export_dtype = {"INT16": torch.int16, "F32": torch.float32, "F16": torch.float16}[INPUT_AUDIO_DTYPE]
@@ -751,7 +793,8 @@ with torch.inference_mode():
     del embed_input_ids
 
     # ── Prefill position-embedding + causal-mask graph (mirrors Qwen Rotary_Mask_Prefill) ────────────
-    whisper_prefill = WHISPER_PREFILL(model.model.decoder, MAX_SEQ_LEN)
+    attention_mask_dtype = KV_DTYPE
+    whisper_prefill = WHISPER_PREFILL(model.model.decoder, MAX_SEQ_LEN, attention_mask_dtype)
     prefill_ids_len = torch.tensor([4], dtype=torch.int64)
     prefill_history_len = torch.tensor([0], dtype=torch.int64)
     torch.onnx.export(
@@ -792,14 +835,14 @@ with torch.inference_mode():
 
     # ── Decoder main graph (pure float: token + position embeddings and the mask arrive as inputs) ──
     whisper_decoder = WHISPER_DECODER(model, suppress_tokens, NUM_LAYER_DE)
-    save_encoder_key = torch.zeros((NUM_HEAD_DE, HEAD_DIM_DE, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float16)
-    save_encoder_value = torch.zeros((NUM_HEAD_DE, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_DE), dtype=torch.float16)
-    batch_size = 3  # Dummy batch value for the export trace.
-    past_key_de = torch.zeros((batch_size, NUM_HEAD_DE, HEAD_DIM_DE, 0), dtype=torch.float16)
-    past_value_de = torch.zeros((batch_size, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
+    save_encoder_key = torch.zeros((NUM_HEAD_DE, HEAD_DIM_DE, ENCODER_SIGNAL_LENGTH), dtype=KV_DTYPE)
+    save_encoder_value = torch.zeros((NUM_HEAD_DE, ENCODER_SIGNAL_LENGTH, HEAD_DIM_DE), dtype=KV_DTYPE)
+    batch_size = 1  # Production decoding is batch one; the sequence axes remain dynamic.
+    past_key_de = torch.zeros((batch_size, NUM_HEAD_DE, HEAD_DIM_DE, 0), dtype=KV_DTYPE)
+    past_value_de = torch.zeros((batch_size, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=KV_DTYPE)
     hidden_states_de = torch.ones((batch_size, 1, HIDDEN_SIZE), dtype=torch.float32)
     position_embed_de = torch.ones((1, 1, HIDDEN_SIZE), dtype=torch.float32)
-    attention_mask = torch.zeros((1, 1, 1), dtype=torch.float16)   # f16 mask matches the minimum-cast f16 attention scores
+    attention_mask = torch.zeros((1, 1, 1), dtype=attention_mask_dtype)
 
     input_names = []
     all_inputs = []
@@ -869,6 +912,25 @@ with torch.inference_mode():
     del output_names
     del dynamic_axes
 
+    begin_suppress = BEGIN_SUPPRESS(begin_suppress_token_ids, VOCAB_SIZE)
+    begin_logits = torch.ones((1, VOCAB_SIZE), dtype=torch.float32)
+    torch.onnx.export(
+        begin_suppress,
+        (begin_logits,),
+        onnx_model_Begin_Suppress,
+        input_names=['logits_in'],
+        output_names=['logits_out'],
+        dynamic_axes={
+            'logits_in': {0: 'batch'},
+            'logits_out': {0: 'batch'},
+        },
+        do_constant_folding=True,
+        opset_version=OPSET,
+        dynamo=False,
+    )
+    del begin_suppress
+    del begin_logits
+
     no_speech_detection = NO_SPEECH_DETECTION(no_speech_id, suppress_tokens, VOCAB_SIZE)
     no_speech_logits = torch.ones((1, VOCAB_SIZE), dtype=torch.float32)
     torch.onnx.export(
@@ -888,15 +950,12 @@ with torch.inference_mode():
     del no_speech_detection
     del no_speech_logits
 
-    beam_size = torch.tensor([BEAM_SIZE], dtype=torch.int64)
-    topK = torch.tensor([TOP_K], dtype=torch.int64)
-    logits = torch.ones((BEAM_SIZE, VOCAB_SIZE), dtype=torch.float32)
-    save_id = torch.zeros((BEAM_SIZE, 10), dtype=torch.int32)            # 10 = dummy history length
-    previous_prob = torch.zeros((BEAM_SIZE, 1), dtype=torch.float32)
-    penality_value = torch.tensor([REPEAT_PENALITY], dtype=torch.float32)
-    penality_range = torch.tensor([PENALITY_RANGE], dtype=torch.int64)
+    logits = torch.ones((1, VOCAB_SIZE), dtype=torch.float32)
+    save_id = torch.zeros((1, 10), dtype=torch.int32)  # Representative dynamic history.
+    penalty_value = torch.ones((1,), dtype=torch.float32)
+    penalty_range = torch.ones((1,), dtype=torch.int64)
 
-    # ── Greedy Search (argmax + save_id history; used together with APPLY_PENALITY) ──────────────────
+    # ── Greedy Search (argmax + save_id history; used together with APPLY_PENALTY) ──────────────────
     torch.onnx.export(
         GREEDY_SEARCH(),
         (logits[[0]], save_id[[0]]),
@@ -930,12 +989,12 @@ with torch.inference_mode():
         dynamo=False
     )
 
-    # ── Apply Penality (sliding-window repetition penalty on the logits) ─────────────────────────────
+    # ── Apply Penalty (sliding-window repetition penalty on the logits) ─────────────────────────────
     torch.onnx.export(
-        APPLY_PENALITY(),
-        (logits, save_id, penality_value, penality_range),
-        onnx_model_Penality,
-        input_names=['logits_in', 'save_id_in', 'penality_value', 'penality_range'],
+        APPLY_PENALTY(),
+        (logits, save_id, penalty_value, penalty_range),
+        onnx_model_Penalty,
+        input_names=['logits_in', 'save_id_in', 'penalty_value', 'penalty_range'],
         output_names=['logits_out'],
         dynamic_axes={
             'logits_in': {0: 'batch'},
@@ -947,112 +1006,45 @@ with torch.inference_mode():
         dynamo=False
     )
 
-    # ── First Beam Search ────────────────────────────────────────────────────────────────────────────
-    first_beam_search = FIRST_BEAM_SEARCH(NUM_LAYER_DE)
-    past_keys_greedy = past_key_de[[0]]
-    past_values_greedy = past_value_de[[0]]
-
-    all_inputs = []
-    input_names = []
-    output_names = []
-    dynamic_axes = {}
-    for i in range(NUM_LAYER_DE):
-        name = f'in_key_layer_{i}'
-        input_names.append(name)
-        all_inputs.append(past_keys_greedy)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len'}
-        name = f'out_key_layer_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len_plus_ids_len'}
-    for i in range(NUM_LAYER_DE):
-        name = f'in_value_layer_{i}'
-        input_names.append(name)
-        all_inputs.append(past_values_greedy)
-        dynamic_axes[name] = {0: 'batch', 2: 'history_len'}
-        name = f'out_value_layer_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 2: 'history_len_plus_ids_len'}
-    input_names.append('logits')
-    all_inputs.append(logits[[0]])
-    input_names.append('save_id_in')
-    all_inputs.append(save_id)
-    input_names.append('beam_size')
-    all_inputs.append(beam_size)
-    output_names.append('save_id_out')
-    output_names.append('top_beam_prob')
-    output_names.append('top_beam_indices')
-    output_names.append('max_logits_idx')
-    dynamic_axes['logits'] = {0: 'batch'}
-    dynamic_axes['save_id_in'] = {0: 'batch', 1: 'history_len'}
-    dynamic_axes['save_id_out'] = {0: 'batch', 1: 'history_len'}
-    dynamic_axes['top_beam_prob'] = {0: 'batch'}
-    dynamic_axes['top_beam_indices'] = {0: 'batch'}
-    dynamic_axes['max_logits_idx'] = {0: 'batch'}
-
+    # ── Top-K / Top-P sampling with standard repetition penalty ─────────────────────────────────────
+    sampling_temperature = torch.tensor([0.8], dtype=torch.float32)
+    sampling_top_k = torch.tensor([50], dtype=torch.int32)
+    sampling_top_p = torch.tensor([0.95], dtype=torch.float32)
+    sampling_repetition_penalty = torch.tensor([1.0], dtype=torch.float32)
     torch.onnx.export(
-        first_beam_search,
-        tuple(all_inputs),
-        onnx_model_First_Beam,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
-        do_constant_folding=True,
+        TOPK_TOPP_SAMPLING(),
+        (
+            logits,
+            sampling_temperature,
+            sampling_top_k,
+            sampling_top_p,
+            sampling_repetition_penalty,
+            save_id,
+        ),
+        onnx_model_Sampling,
+        input_names=[
+            'logits', 'temperature', 'top_k', 'top_p',
+            'repetition_penalty', 'previous_ids'
+        ],
+        output_names=['sampled_id', 'save_id_out'],
+        dynamic_axes={
+            'previous_ids': {1: 'history_len'},
+            'save_id_out': {1: 'history_len'},
+        },
         opset_version=OPSET,
-        dynamo=False
+        dynamo=False,
     )
 
-    # ── Second Beam Search (same output layout as First Beam) ────────────────────────────────────────
-    all_inputs = []
-    input_names = []
-    for i in range(NUM_LAYER_DE):
-        name = f'in_key_layer_{i}'
-        input_names.append(name)
-        all_inputs.append(past_key_de)
-    for i in range(NUM_LAYER_DE):
-        name = f'in_value_layer_{i}'
-        input_names.append(name)
-        all_inputs.append(past_value_de)
-    input_names.append('logits')
-    all_inputs.append(logits)
-    input_names.append('save_id_in')
-    all_inputs.append(save_id)
-    input_names.append('previous_prob')
-    all_inputs.append(previous_prob)
-    input_names.append('beam_size')
-    all_inputs.append(beam_size)
-    input_names.append('topK')
-    all_inputs.append(topK)
-    dynamic_axes['previous_prob'] = {0: 'batch'}
-
-    second_beam_search = SECOND_BEAM_SEARCH(NUM_LAYER_DE)
-    torch.onnx.export(
-        second_beam_search,
-        tuple(all_inputs),
-        onnx_model_Second_Beam,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
-        do_constant_folding=True,
-        opset_version=OPSET,
-        dynamo=False
-    )
-
-    del first_beam_search
-    del second_beam_search
     del past_key_de
     del past_value_de
-    del past_keys_greedy
-    del past_values_greedy
     del logits
-    del previous_prob
     del save_id
-    del penality_value
-    del penality_range
-    del topK
-    del input_names
-    del output_names
-    del dynamic_axes
-    del all_inputs
+    del penalty_value
+    del penalty_range
+    del sampling_temperature
+    del sampling_top_k
+    del sampling_top_p
+    del sampling_repetition_penalty
     gc.collect()
 
     metadata_marker = torch.zeros((1,), dtype=torch.int64)
@@ -1070,70 +1062,79 @@ with torch.inference_mode():
 
     onnx_metadata = build_model_metadata(
         {
-            "whisper_metadata_version": 1,
-            "producer": "Export_Whisper.py",
-            "model_variant": "v3" if is_v3 else "v2",
-            "custom_vocab": custom_vocab,
-            "compute_in_f32": COMPUTE_IN_F32,
-        },
-        {
-            "num_decoder_layers": NUM_LAYER_DE,
-            "num_encoder_heads": NUM_HEAD_EN,
-            "num_decoder_heads": NUM_HEAD_DE,
-            "encoder_head_dim": HEAD_DIM_EN,
-            "decoder_head_dim": HEAD_DIM_DE,
-            "hidden_size": HIDDEN_SIZE,
-            "vocab_size": VOCAB_SIZE,
-            "num_mels": N_MELS,
-            "nfft_stft": NFFT_STFT,
-            "window_length": WINDOW_LENGTH,
-            "hop_length": HOP_LENGTH,
-            "window_type": WINDOW_TYPE,
-            "pre_emphasis": PRE_EMPHASIZE,
+            "audio_pcm_scale": 32768,
             "max_seq_len": MAX_SEQ_LEN,
             "sample_rate": SAMPLE_RATE,
-            "input_audio_length": INPUT_AUDIO_LENGTH,
-            "input_audio_dtype": INPUT_AUDIO_DTYPE,
-            "no_timestamps_token_id": no_timestamps_id,
-            "no_speech_token_id": no_speech_id,
-            "begin_suppress_token_ids": ",".join(str(t) for t in begin_suppress_token_ids),
-            "suppress_token_ids": ",".join(str(t) for t in (suppress_tokens.tolist() if suppress_tokens is not None else [])),
+            "special_token_ids": special_token_ids,
+            "supported_languages": supported_languages,
         },
     )
 
-    _metadata_targets = [onnx_model_Metadata]
-    _written, _skipped = [], []
-    for _target in _metadata_targets:
-        if not os.path.exists(_target):
-            continue
-        try:
-            write_onnx_metadata(_target, onnx_metadata)
-            _written.append(os.path.basename(_target))
-        except Exception as _exc:  # noqa: BLE001 - one bad graph must not abort export
-            _skipped.append(f"{os.path.basename(_target)} ({_exc})")
+    write_metadata_carrier(onnx_model_Metadata, onnx_metadata)
 
-    print(f"\n[Metadata] Stamped {len(onnx_metadata)} keys into {len(_written)} ONNX graph(s):")
-    for _key in sorted(onnx_metadata):
-        print(f"    {_key} = {onnx_metadata[_key]}")
-    if _skipped:
-        print("[Metadata] Skipped (kept usable, metadata not written):")
-        for _entry in _skipped:
-            print(f"    {_entry}")
     gc.collect()
 
-# ── Save the tokenizer + generation config into the ONNX folder so the exported folder runs ──
+for _folder in (_raw_onnx_dir, ONNX_DIR):
+    Shared_Merged.delete_obsolete_strategy_artifacts(
+        _folder,
+        model_file_names=MODEL_FILE_NAMES,
+    )
+if ONNX_DIR.exists():
+    shutil.rmtree(ONNX_DIR)
+ONNX_DIR.mkdir(parents=True)
+print("\n[SharedMerged] Building Whisper strategy graphs + shared initializer bundle ...")
+_bundle = Shared_Merged.build_shared_merged_bundle(
+    _raw_onnx_dir,
+    out_folder=ONNX_DIR,
+    model_file_names=MODEL_FILE_NAMES,
+)
+_standalones = Shared_Merged.copy_runtime_standalones(
+    _raw_onnx_dir,
+    ONNX_DIR,
+    model_file_names=MODEL_FILE_NAMES,
+)
+_embed_dedup = _bundle["embed_dedup"]
+_shared_stats = _bundle["shared_stats"]
+if _embed_dedup.get("applied"):
+    print(
+        "    Tied Embed/LM-head table deduplicated: "
+        f"{_embed_dedup['bytes_eliminated']} bytes; inserted {_embed_dedup['inserted_node']}"
+    )
+else:
+    print(f"    Tied Embed/LM-head dedup skipped: {_embed_dedup.get('reason', 'not applicable')}")
+print(
+    "    Shared initializer physical dedup: "
+    f"{_shared_stats['initializer_count']} logical -> {_shared_stats['unique_data_count']} unique "
+    f"({_shared_stats['logical_data_bytes']} -> {_shared_stats['physical_data_bytes']} bytes)"
+)
+for _name, _path in _bundle["graphs"].items():
+    print(f"    {_name} ({Path(_path).stat().st_size} bytes)")
+write_metadata_carrier(
+    ONNX_DIR / MODEL_FILE_NAMES["metadata"], onnx_metadata
+)
+print(
+    f"    {MODEL_FILE_NAMES['shared_initializers_data']} "
+    f"({Path(_bundle['shared_data']).stat().st_size} bytes)"
+)
+print(f"    Copied {len(_standalones)} runtime standalone graph(s): NoSpeech, Metadata")
+
+_raw_onnx_temp.cleanup()
+
+# ── Save the tokenizer + generation config into the final merged folder so it runs ──
 # inference stand-alone (no external Whisper model path needed at inference time).
-try:
-    _tokenizer_dir = os.path.join(onnx_folder, "tokenizer")
-    tokenizer.save_pretrained(_tokenizer_dir)
-    generation_config.save_pretrained(_tokenizer_dir)
-    print(f"[Tokenizer] Saved tokenizer + generation config -> {_tokenizer_dir}")
-except Exception as _exc:  # noqa: BLE001 - a failed save must not abort the auto demo
-    print(f"[Tokenizer] Skipped tokenizer bundle ({_exc})")
+_tokenizer_dir = str(ONNX_DIR / "tokenizer")
+tokenizer.save_pretrained(_tokenizer_dir)
+generation_config.save_pretrained(_tokenizer_dir)
+print(f"[Tokenizer] Saved tokenizer + generation config -> {_tokenizer_dir}")
 
 print('\nExport done!\n')
-print('Running ONNX Runtime demo via Inference_Whisper_ONNX.py ...')
-subprocess.run(
-    [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "Inference_Whisper_ONNX.py"), "--onnx-folder", onnx_folder],
-    check=True,
-)
+if subprocess.call(
+    [
+        sys.executable,
+        str(SCRIPT_DIR / "Inference_Whisper_ONNX.py"),
+        "--onnx-folder",
+        str(ONNX_DIR),
+    ],
+    cwd=str(SCRIPT_DIR),
+) != 0:
+    raise RuntimeError("Whisper inference failed after export.")

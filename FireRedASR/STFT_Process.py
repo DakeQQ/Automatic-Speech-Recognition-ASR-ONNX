@@ -1,13 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import numpy as np
-import onnxruntime as ort
+"""Production STFT/ISTFT module used by FireRedASR exporter integrations."""
+
 import torch
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. Configuration
-# ─────────────────────────────────────────────────────────────────────────────
-DYNAMIC_AXES = True                  # Default dynamic axes is input audio (signal) length.
+# Default constructor and window parameters.
 NFFT = 512                           # Number of FFT components for the STFT process
 WIN_LENGTH = 400                     # Length of the window function (can be different from NFFT)
 HOP_LENGTH = 160                     # Number of samples between successive frames in the STFT
@@ -15,18 +12,6 @@ INPUT_AUDIO_LENGTH  = 16000          # dummy length for export / test
 MAX_SIGNAL_LENGTH   = 2048           # Maximum number of frames for the audio length after STFT processed. Set a appropriate larger value for long audio input, such as 4096.
 WINDOW_TYPE         = 'hann'         # bartlett | blackman | hamming | hann | kaiser
 PAD_MODE            = 'constant'     # reflect | constant
-
-STFT_TYPE  = "stft_B"                # # stft_A: output real_part only;  stft_B: outputs real_part & imag_part
-ISTFT_TYPE = "istft_B"               # istft_A: Inputs = [magnitude, phase];  istft_B: Inputs = [real_part, imag_part], The dtype of imag_part is float format.
-
-export_path_stft  = f"{STFT_TYPE}.onnx"
-export_path_istft = f"{ISTFT_TYPE}.onnx"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Pre-computations / helpers
-# ─────────────────────────────────────────────────────────────────────────────
-HALF_NFFT          = NFFT // 2
-STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1
 
 # clip parameters to sensible ranges
 NFFT       = min(NFFT, INPUT_AUDIO_LENGTH)
@@ -58,12 +43,6 @@ def create_padded_window(win_length, n_fft, window_type):
     return win[start:start + n_fft]
 
 
-WINDOW = create_padded_window(WIN_LENGTH, NFFT, WINDOW_TYPE)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Model
-# ─────────────────────────────────────────────────────────────────────────────
 class STFT_Process(torch.nn.Module):
     def __init__(self,
                  model_type,
@@ -134,11 +113,7 @@ class STFT_Process(torch.nn.Module):
 
     # ───── dispatcher ──────────────────────────────────────────────────────
     def forward(self, *args):
-        if self.model_type == 'stft_A':  return self.stft_A_forward(*args)
-        if self.model_type == 'stft_B':  return self.stft_B_forward(*args)
-        if self.model_type == 'istft_A': return self.istft_A_forward(*args)
-        if self.model_type == 'istft_B': return self.istft_B_forward(*args)
-        raise ValueError(self.model_type)
+        return getattr(self, f'{self.model_type}_forward')(*args)
 
     # ───── STFT (A & B) ────────────────────────────────────────────────────
     def _pad_input(self, x, mode):
@@ -173,142 +148,3 @@ class STFT_Process(torch.nn.Module):
         return inv[:, :, s:e] * self.window_sum_inv[s:e]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4.  Test helpers  (A & B variants)
-# ─────────────────────────────────────────────────────────────────────────────
-def test_onnx_stft_A(x):
-    torch_out = torch.view_as_real(torch.stft(
-        x.squeeze(0),
-        n_fft=NFFT, hop_length=HOP_LENGTH, win_length=WIN_LENGTH,
-        return_complex=True,
-        window=WINDOW_FUNCTIONS.get(WINDOW_TYPE, DEFAULT_WINDOW_FN)(WIN_LENGTH),
-        pad_mode=PAD_MODE, center=True
-    ))
-    pt_real = torch_out[..., 0].squeeze().numpy()
-
-    sess = ort.InferenceSession(export_path_stft)
-    ort_real = sess.run(None, {sess.get_inputs()[0].name: x.numpy()})[0].squeeze()
-    print("\nSTFT Result (A): mean |Δ| =", np.abs(pt_real - ort_real).mean())
-
-
-def test_onnx_stft_B(x):
-    torch_out = torch.view_as_real(torch.stft(
-        x.squeeze(0),
-        n_fft=NFFT, hop_length=HOP_LENGTH, win_length=WIN_LENGTH,
-        return_complex=True,
-        window=WINDOW_FUNCTIONS.get(WINDOW_TYPE, DEFAULT_WINDOW_FN)(WIN_LENGTH),
-        pad_mode=PAD_MODE, center=True
-    ))
-    pt_r = torch_out[..., 0].squeeze().numpy()
-    pt_i = torch_out[..., 1].squeeze().numpy()
-
-    sess = ort.InferenceSession(export_path_stft)
-    ort_r, ort_i = sess.run(None, {sess.get_inputs()[0].name: x.numpy()})
-    diff = 0.5 * (np.abs(pt_r - ort_r.squeeze()).mean() +
-                  np.abs(pt_i - ort_i.squeeze()).mean())
-    print("\nSTFT Result (B): mean |Δ| =", diff)
-
-
-def test_onnx_istft_A(mag, phase):
-    complex_spec = torch.polar(mag, phase)
-    pt_audio = torch.istft(
-        complex_spec,
-        n_fft=NFFT, hop_length=HOP_LENGTH, win_length=WIN_LENGTH,
-        window=WINDOW_FUNCTIONS.get(WINDOW_TYPE, DEFAULT_WINDOW_FN)(WIN_LENGTH)
-    ).squeeze().numpy()
-
-    sess = ort.InferenceSession(export_path_istft)
-    ort_audio = sess.run(None, {
-        sess.get_inputs()[0].name: mag.numpy(),
-        sess.get_inputs()[1].name: phase.numpy()
-    })[0].squeeze()
-    print("\nISTFT Result (A): mean |Δ| =", np.abs(pt_audio - ort_audio).mean())
-
-
-def test_onnx_istft_B(real, imag):
-    pt_audio = torch.istft(
-        torch.complex(real, imag),
-        n_fft=NFFT, hop_length=HOP_LENGTH, win_length=WIN_LENGTH,
-        window=WINDOW_FUNCTIONS.get(WINDOW_TYPE, DEFAULT_WINDOW_FN)(WIN_LENGTH)
-    ).squeeze().numpy()
-
-    sess = ort.InferenceSession(export_path_istft)
-    ort_audio = sess.run(None, {
-        sess.get_inputs()[0].name: real.numpy(),
-        sess.get_inputs()[1].name: imag.numpy()
-    })[0].squeeze()
-    print("\nISTFT Result (B): mean |Δ| =", np.abs(pt_audio - ort_audio).mean())
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5.  Export & quick verification
-# ─────────────────────────────────────────────────────────────────────────────
-def main():
-    with torch.inference_mode():
-        print(f"\nConfig  NFFT={NFFT}, WIN_LEN={WIN_LENGTH}, HOP={HOP_LENGTH}")
-        # ─── STFT export ───────────────────────────────────────────────────
-        stft_model   = STFT_Process(STFT_TYPE).eval()
-        dummy_audio  = torch.randn(1, 1, INPUT_AUDIO_LENGTH)
-
-        dyn_axes_sft = {'input_audio': {2: 'audio_len'}}
-        if STFT_TYPE == 'stft_A':
-            out_names = ['real']
-            dyn_axes_sft['real'] = {2: 'signal_len'}
-        else:
-            out_names = ['real', 'imag']
-            dyn_axes_sft['real'] = dyn_axes_sft['imag'] = {2: 'signal_len'}
-
-        torch.onnx.export(
-            stft_model, (dummy_audio,), export_path_stft,
-            input_names=['input_audio'], output_names=out_names,
-            dynamic_axes=dyn_axes_sft if DYNAMIC_AXES else None,
-            opset_version=17, do_constant_folding=True
-        )
-        # ─── ISTFT export ──────────────────────────────────────────────────
-        istft_model = STFT_Process(ISTFT_TYPE).eval()
-
-        if ISTFT_TYPE == 'istft_A':
-            dummy_mag   = torch.randn(1, HALF_NFFT + 1, STFT_SIGNAL_LENGTH)
-            dummy_phase = torch.randn_like(dummy_mag)
-            dummy_inp   = (dummy_mag, dummy_phase)
-            in_names    = ['magnitude', 'phase']
-            dyn_axes_ist = {
-                'magnitude': {2: 'signal_len'},
-                'phase'    : {2: 'signal_len'},
-                'output_audio': {2: 'audio_len'}
-            }
-        else:  # istft_B
-            dummy_real = torch.randn(1, HALF_NFFT + 1, STFT_SIGNAL_LENGTH)
-            dummy_imag = torch.randn_like(dummy_real)
-            dummy_inp  = (dummy_real, dummy_imag)
-            in_names   = ['real', 'imag']
-            dyn_axes_ist = {
-                'real'  : {2: 'signal_len'},
-                'imag'  : {2: 'signal_len'},
-                'output_audio': {2: 'audio_len'}
-            }
-
-        torch.onnx.export(
-            istft_model, dummy_inp, export_path_istft,
-            input_names=in_names, output_names=['output_audio'],
-            dynamic_axes=dyn_axes_ist if DYNAMIC_AXES else None,
-            opset_version=17, do_constant_folding=True
-        )
-
-        # ─── quick comparisons ────────────────────────────────────────────
-        print("\nTesting Custom STFT against torch.stft …")
-        if STFT_TYPE == 'stft_A':
-            test_onnx_stft_A(dummy_audio)
-        else:
-            test_onnx_stft_B(dummy_audio)
-
-        print("\nTesting Custom ISTFT against torch.istft …")
-        if ISTFT_TYPE == 'istft_A':
-            test_onnx_istft_A(*dummy_inp)
-        else:
-            test_onnx_istft_B(*dummy_inp)
-
-
-if __name__ == "__main__":
-    main()
-    

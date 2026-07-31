@@ -1,7 +1,9 @@
 import gc
+import json
+import shutil
 import subprocess
 import sys
-import os
+import tempfile
 from pathlib import Path
 from typing import Tuple
 
@@ -17,6 +19,7 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel
+from torch.onnx import symbolic_helper
 
 from STFT_Process import STFT_Process
 
@@ -26,11 +29,11 @@ from STFT_Process import STFT_Process
 # The forced aligner is NON auto-regressive (NAR): given an audio clip and its
 # transcript it classifies, in ONE forward pass, a timestamp bucket at every
 # "<timestamp>" position. There is therefore NO KV cache, NO decode loop and NO
-# beam/greedy search — a dramatic simplification over the ASR decoder.
+# autoregressive token-selection loop — a dramatic simplification over the ASR decoder.
 #
 # Pipeline (mirrors qwen_asr/inference/qwen3_forced_aligner.py):
-#   1. tokenize transcript -> word_list, build
-#      "<|audio_start|><|audio_pad|><|audio_end|>" + "w1<ts><ts>w2<ts><ts>..."
+#   1. split the transcript into word units, tokenize lexical text, and insert
+#      metadata-owned audio/timestamp IDs into the host prompt explicitly
 #   2. Embed graph          : text/timestamp ids   -> token embeddings
 #   3. Encoder graph        : audio(int16)+text_emb -> [audio_start, audio, audio_end, text]
 #   4. Rotary+Mask graph    : ids_len               -> cos, sin, causal mask
@@ -42,50 +45,60 @@ from STFT_Process import STFT_Process
 # ══════════════════════════════════════════════════════════════════════════════
 # Paths
 # ══════════════════════════════════════════════════════════════════════════════
-download_path               = r'/home/DakeQQ/Downloads/Qwen3-ForcedAligner-0.6B'             # Local Qwen3-ForcedAligner-0.6B directory (must contain model.safetensors).
-onnx_folder                 = Path(__file__).resolve().parent / "Qwen_ForcedAligner_ONNX"  # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
-onnx_folder.mkdir(parents=True, exist_ok=True)
-onnx_model_Metadata         = str(onnx_folder / "ASR_Matadata.onnx")
-onnx_model_Embed            = str(onnx_folder / "ForcedAligner_Embed.onnx")
-onnx_model_Encoder          = str(onnx_folder / "ForcedAligner_Encoder.onnx")
-onnx_model_Rotary_Mask      = str(onnx_folder / "ForcedAligner_Rotary_Mask.onnx")
-onnx_model_Main             = str(onnx_folder / "ForcedAligner_Decoder_Main.onnx")
+download_path               = str(Path.home() / "Downloads" / "Qwen3-ForcedAligner-0.6B")  # Local Qwen3-ForcedAligner-0.6B directory (must contain model.safetensors).
+script_folder               = Path(__file__).resolve().parent
+onnx_folder                 = script_folder / "Qwen_ForcedAligner_ONNX"      # Production: one merged graph + one shared initializer blob.
+_split_export_temp          = tempfile.TemporaryDirectory(prefix="qwen3_forced_aligner_split_")
+split_export_folder         = Path(_split_export_temp.name)
+
+MODEL_FILE_NAMES = {
+    "metadata":                 "ASR_Metadata.onnx",
+    "embed":                    "ForcedAligner_Embed.onnx",
+    "encoder":                  "ForcedAligner_Encoder.onnx",
+    "rotary_mask":              "ForcedAligner_Rotary_Mask.onnx",
+    "main":                     "ForcedAligner_Decoder_Main.onnx",
+    "merged":                   "ForcedAligner_Merged.onnx",
+    "shared_initializers":      "ForcedAligner_SharedInitializers.onnx",
+    "shared_initializers_data": "ForcedAligner_SharedInitializers.onnx.data",
+}
+
+# The four split graphs are build constituents. Runtime loads only the merged graph.
+onnx_model_Metadata         = str(split_export_folder / MODEL_FILE_NAMES["metadata"])
+onnx_model_Embed            = str(split_export_folder / MODEL_FILE_NAMES["embed"])
+onnx_model_Encoder          = str(split_export_folder / MODEL_FILE_NAMES["encoder"])
+onnx_model_Rotary_Mask      = str(split_export_folder / MODEL_FILE_NAMES["rotary_mask"])
+onnx_model_Main             = str(split_export_folder / MODEL_FILE_NAMES["main"])
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Audio & STFT Configuration  (identical to Qwen3-ASR-0.6B front-end)
-# ══════════════════════════════════════════════════════════════════════════════
-SAMPLE_RATE                 = 16000      # Model parameter, do not edit.
-WINDOW_TYPE                 = 'hann'     # STFT window function.
-N_MELS                      = 128        # Mel bands. Do not edit.
-NFFT_STFT                   = 400        # FFT size.
-WINDOW_LENGTH               = 400        # Window length.
-HOP_LENGTH                  = 160        # STFT hop.
-INPUT_AUDIO_DTYPE           = "INT16"    # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. "INT16" feeds raw PCM (÷32768 in-graph); "F32"/"F16" feed audio pre-normalised to [-1, 1].
-
-# Model / runtime limits
-MAX_INPUT_AUDIO_LENGTH      = SAMPLE_RATE * 30  # Max audio the encoder buffers are sized for (30 s). Raise for longer clips.
-MAX_SEQ_LEN                 = 1024              # Max total sequence length (audio tokens + 2 + text tokens). Scale with audio length.
-PREVENT_F16_OVERFLOW        = False             # Prevent float16 overflow. Set True for Q4F16 / Q8F16 / F16 quantization.
+# ============================== USER CONFIG ==============================
+MAX_INPUT_AUDIO_LENGTH      = 480000     # Maximum deployment audio length (30 s at the model's fixed 16 kHz sample rate).
+MAX_SEQ_LEN                 = 1024       # Maximum total sequence length (audio tokens + immutable boundary tokens + transcript tokens).
+INPUT_AUDIO_DTYPE           = "F32"      # Model audio input dtype: "INT16", "F32", or "F16". "INT16" feeds raw PCM (÷32768 in-graph); "F32"/"F16" feed audio already normalised to [-1, 1].
 
 # Weight-Quantization-Friendly Reorder (EXACT, zero runtime cost; helps only when weight-quant group_size < head_dim)
 REORDER_DOWNPROJ_FOR_QUANT  = True       # Reorder MLP intermediate channels so down_proj block-quant groups are magnitude-homogeneous (absorbed into gate_up + down_proj).
 REORDER_OPROJ_FOR_QUANT     = True       # Reorder each head's head_dim so o_proj sub-head groups are homogeneous (compensated on the qkv v-rows).
 REORDER_KEY                 = "absmean"  # Channel key: "absmean" | "L4" | "rms" | "std".
 
-DYNAMIC_AXES                = True       # Default dynamic axis is the input length.
-
-# Runtime & export settings
 OPSET                       = 20         # ONNX opset version.
-# ══════════════════════════════════════════════════════════════════════════════
-# Special-Token IDs & timestamp buckets  (verified from config.json / tokenizer_config.json)
-# ══════════════════════════════════════════════════════════════════════════════
-AUDIO_START_TOKEN_ID        = 151669     # <|audio_start|>
-AUDIO_END_TOKEN_ID          = 151670     # <|audio_end|>
-AUDIO_PAD_TOKEN_ID          = 151676     # <|audio_pad|> (audio placeholder)
-TIMESTAMP_TOKEN_ID          = 151705     # <timestamp>
-TIMESTAMP_SEGMENT_TIME      = 80         # ms per classification bucket.
+# ========================================================================
 
+# Fixed Qwen3-ForcedAligner model constants and metadata defaults; these are
+# part of the checkpoint contract, not user-tunable export settings.
+_MODEL_SAMPLE_RATE          = 16000
+_MODEL_WINDOW_TYPE          = "hann"
+_MODEL_NUM_MELS             = 128
+_MODEL_NFFT_STFT            = 400
+_MODEL_WINDOW_LENGTH        = 400
+_MODEL_HOP_LENGTH           = 160
+_MODEL_TIMESTAMP_SEGMENT_MS = 80
+_MODEL_TIMESTAMP_TOKENS_PER_WORD = 2  # Trained start/end alignment format.
+_MODEL_AUDIO_PCM_SCALE      = 32768
+_AUDIO_SUBSAMPLING_STAGE_NAMES = ("conv2d1", "conv2d2", "conv2d3")
+
+# Fixed tokenizer constants consumed inside the exported audio graph.
+_MODEL_AUDIO_START_TOKEN_ID = 151669     # <|audio_start|>
+_MODEL_AUDIO_END_TOKEN_ID   = 151670     # <|audio_end|>
 
 def build_model_metadata(*sections):
     metadata = {}
@@ -95,40 +108,29 @@ def build_model_metadata(*sections):
                 continue
             if isinstance(value, bool):
                 metadata[str(key)] = "1" if value else "0"
-            elif isinstance(value, (list, tuple)):
-                metadata[str(key)] = ",".join(str(item) for item in value)
+            elif isinstance(value, (dict, list, tuple)):
+                metadata[str(key)] = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             else:
                 metadata[str(key)] = str(value)
     return metadata
 
 
-def write_onnx_metadata(onnx_path, metadata):
+def replace_onnx_metadata(onnx_path, metadata):
     import onnx
 
-    model = onnx.load(onnx_path, load_external_data=False)
-    existing = {prop.key: prop for prop in model.metadata_props}
-    for key, value in metadata.items():
-        if key in existing:
-            existing[key].value = value
-        else:
-            model.metadata_props.add(key=key, value=value)
-    onnx.save(model, onnx_path)
-
-
-def _token_id(tokenizer, token, fallback):
-    try:
-        value = tokenizer.convert_tokens_to_ids(token)
-        if value is not None and value != getattr(tokenizer, "unk_token_id", None):
-            return int(value)
-    except Exception:
-        pass
-    try:
-        ids = tokenizer.encode(token, add_special_tokens=False)
-        if len(ids) == 1:
-            return int(ids[0])
-    except Exception:
-        pass
-    return int(fallback)
+    expected = {str(key): str(value) for key, value in metadata.items()}
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    model.producer_name = ""
+    model.producer_version = ""
+    del model.metadata_props[:]
+    for key in sorted(expected):
+        model.metadata_props.add(key=key, value=expected[key])
+    onnx.save_model(model, str(onnx_path), save_as_external_data=False)
 
 
 class METADATA_CARRIER(torch.nn.Module):
@@ -577,13 +579,34 @@ class Qwen3ForcedAlignerForConditionalGeneration(Qwen3ASRForConditionalGeneratio
 
 # Register so ``AutoModel.from_pretrained`` resolves the forced aligner variant
 # (config `model_type` == "qwen3_asr" -> Qwen3ForcedAlignerForConditionalGeneration).
-AutoConfig.register("qwen3_asr", Qwen3ASRConfig)
-AutoModel.register(Qwen3ASRConfig, Qwen3ForcedAlignerForConditionalGeneration)
+AutoConfig.register("qwen3_asr", Qwen3ASRConfig, exist_ok=True)
+AutoModel.register(Qwen3ASRConfig, Qwen3ForcedAlignerForConditionalGeneration, exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Weight-fusion helpers (shared with the ASR export) ────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
+class POSITIVE_CEIL_DIV(torch.autograd.Function):
+    """Positive int64 ceil-div lowered without legacy-exporter cast chains."""
+
+    @staticmethod
+    def forward(ctx, value: Tensor, divisor: int) -> Tensor:
+        return (value + divisor - 1) // divisor
+
+    @staticmethod
+    def symbolic(g, value, divisor):
+        divisor_value = symbolic_helper._get_const(divisor, "i", "divisor")
+        offset = g.op(
+            "Constant",
+            value_t=torch.tensor([divisor_value - 1], dtype=torch.int64),
+        )
+        denominator = g.op(
+            "Constant",
+            value_t=torch.tensor([divisor_value], dtype=torch.int64),
+        )
+        return g.op("Div", g.op("Add", value, offset), denominator)
+
+
 def _get_feat_extract_output_lengths(input_lengths: Tensor) -> Tensor:
     input_lengths_leave = input_lengths % 100
     feat_lengths = torch.clamp(input_lengths_leave - 1, min=0) // 2 + 1
@@ -659,6 +682,14 @@ class FORCED_ALIGNER_ENCODER(torch.nn.Module):
     def __init__(self, audio_tower: torch.nn.Module, embed_tokens: torch.nn.Embedding) -> None:
         super().__init__()
         self.audio_tower = audio_tower.float()
+        # int16 audio is raw PCM. Fold its exact power-of-two scale into the
+        # immutable DFT kernel so forward needs only the required int16->f32 Cast.
+        self.input_audio_is_int16 = (INPUT_AUDIO_DTYPE == "INT16")
+        stft_input_scale = (
+            (1.0 / _MODEL_AUDIO_PCM_SCALE)
+            if self.input_audio_is_int16
+            else 1.0
+        )
         replace_gelu_with_tanh(self.audio_tower)
         self.audio_tower.act = torch.nn.GELU(approximate="tanh")
         for layer in self.audio_tower.layers:
@@ -667,21 +698,23 @@ class FORCED_ALIGNER_ENCODER(torch.nn.Module):
 
         self.stft = STFT_Process(
             model_type="stft_B",
-            n_fft=NFFT_STFT,
-            win_length=WINDOW_LENGTH,
-            hop_len=HOP_LENGTH,
+            n_fft=_MODEL_NFFT_STFT,
+            win_length=_MODEL_WINDOW_LENGTH,
+            hop_len=_MODEL_HOP_LENGTH,
             max_frames=0,
-            window_type=WINDOW_TYPE,
+            window_type=_MODEL_WINDOW_TYPE,
             center_pad=True,
             pad_mode="reflect",
+            input_scale=stft_input_scale,
+            drop_last_frame=True,
         ).eval()
 
         mel_filters = torchaudio.functional.melscale_fbanks(
-            n_freqs=(NFFT_STFT // 2) + 1,
+            n_freqs=(_MODEL_NFFT_STFT // 2) + 1,
             f_min=0.0,
-            f_max=SAMPLE_RATE / 2,
-            n_mels=N_MELS,
-            sample_rate=SAMPLE_RATE,
+            f_max=_MODEL_SAMPLE_RATE / 2,
+            n_mels=_MODEL_NUM_MELS,
+            sample_rate=_MODEL_SAMPLE_RATE,
             norm="slaney",
             mel_scale="slaney",
         ).transpose(0, 1).unsqueeze(0).contiguous()
@@ -699,37 +732,31 @@ class FORCED_ALIGNER_ENCODER(torch.nn.Module):
         self.tokens_per_window = tokens_per_window
         self.model_dim        = int(self.audio_tower.config.d_model)
         self.output_dim       = int(self.audio_tower.config.output_dim)
+        self.conv_out_features = int(self.audio_tower.conv_out.in_features)
+        self.attn_out_features = int(self.audio_tower.layers[0].self_attn.out_proj.in_features)
         self.num_heads        = int(self.audio_tower.layers[0].self_attn.num_heads)
         self.head_dim         = self.model_dim // self.num_heads
 
-        max_mel_frames  = MAX_INPUT_AUDIO_LENGTH // HOP_LENGTH + 1
+        max_mel_frames  = MAX_INPUT_AUDIO_LENGTH // _MODEL_HOP_LENGTH + 1
         self.max_chunks  = (max_mel_frames + self.chunk_size_minus) // chunk_size
-        self.max_windows = (self.max_chunks + chunks_per_window - 1) // chunks_per_window
-        max_total_chunks_padded = self.max_windows * chunks_per_window
-        key_mask_lookup = torch.zeros(1, tokens_per_window + 1, 1, 1, tokens_per_window, dtype=torch.int8)
+        key_mask_lookup = torch.zeros(1, tokens_per_window + 1, 1, 1, tokens_per_window, dtype=torch.float32)
         for n in range(tokens_per_window + 1):
             key_mask_lookup[0, n, 0, 0, n:] = -128
-        valid_mask_float_lookup = torch.zeros(tokens_per_window + 1, tokens_per_window, 1, dtype=torch.int8)
-        for n in range(tokens_per_window + 1):
-            valid_mask_float_lookup[n, :n, 0] = 1
-
-        self.pos = self.audio_tower.positional_embedding.positional_embedding[:self.chunk_aftercnn].unsqueeze(0)
-        self.register_buffer("window_chunks_full", torch.arange(self.max_windows + 1, dtype=torch.int32) * chunks_per_window, persistent=False)
-        self.register_buffer("chunk_starts_full", torch.arange(self.max_chunks + 1, dtype=torch.int32) * chunk_size, persistent=False)
-        self.register_buffer("aftercnn_lens_lookup", _get_feat_extract_output_lengths(torch.arange(chunk_size + 1)).int(), persistent=False)
-        self.register_buffer("chunk_pad_zeros", torch.zeros((max_total_chunks_padded, chunk_aftercnn, self.model_dim), dtype=torch.int8), persistent=False)
-        self.register_buffer("aftercnn_pad_zeros", torch.zeros(chunks_per_window, dtype=torch.int8), persistent=False)
+        self.register_buffer(
+            "pos",
+            self.audio_tower.positional_embedding.positional_embedding[:self.chunk_aftercnn].unsqueeze(0).float(),
+            persistent=False,
+        )
+        self.register_buffer("chunk_starts_full", torch.arange(self.max_chunks + 1, dtype=torch.int64) * chunk_size, persistent=False)
+        self.register_buffer("aftercnn_lens_lookup", _get_feat_extract_output_lengths(torch.arange(chunk_size + 1)).long(), persistent=False)
+        self.register_buffer("chunk_pad_zeros", torch.zeros((self.chunks_per_window_minus, chunk_aftercnn, self.model_dim), dtype=torch.float32), persistent=False)
+        self.register_buffer("aftercnn_pad_zeros", torch.zeros(self.chunks_per_window_minus, dtype=torch.int64), persistent=False)
         self.register_buffer("key_mask_lookup", key_mask_lookup, persistent=False)
-        self.register_buffer("valid_mask_float_lookup", valid_mask_float_lookup, persistent=False)
-        self.register_buffer("mel_pad_zeros", torch.zeros((1, N_MELS, chunk_size), dtype=torch.int8), persistent=False)
-        self.register_buffer("inv_int16", torch.tensor([1.0 / 32768.0], dtype=torch.float32), persistent=False)
-        # int16 audio is raw PCM (normalised in forward via ÷32768); f32/f16 audio is
-        # assumed pre-normalised to [-1, 1], so the in-graph division is skipped.
-        self.input_audio_is_int16 = (INPUT_AUDIO_DTYPE == "INT16")
+        self.register_buffer("mel_pad_zeros", torch.zeros((1, _MODEL_NUM_MELS, chunk_size), dtype=torch.float32), persistent=False)
 
         with torch.no_grad():
-            audio_start = torch.tensor([[AUDIO_START_TOKEN_ID]], dtype=torch.int32)
-            audio_end   = torch.tensor([[AUDIO_END_TOKEN_ID]], dtype=torch.int32)
+            audio_start = torch.tensor([[_MODEL_AUDIO_START_TOKEN_ID]], dtype=torch.int32)
+            audio_end   = torch.tensor([[_MODEL_AUDIO_END_TOKEN_ID]], dtype=torch.int32)
             self.register_buffer("audio_start_embed", embed_tokens(audio_start).float(), persistent=False)
             self.register_buffer("audio_end_embed", embed_tokens(audio_end).float(), persistent=False)
 
@@ -758,59 +785,55 @@ class FORCED_ALIGNER_ENCODER(torch.nn.Module):
 
     def forward(self, audio: Tensor, text_embed: Tensor) -> Tuple[Tensor, Tensor]:
         # WhisperFeatureExtractor-equivalent log-mel front-end (no pre-emphasis / DC removal).
-        if self.input_audio_is_int16:
-            audio = audio.float() * self.inv_int16
-        else:
-            audio = audio.float()
+        audio = audio.float()
         real, imag = self.stft(audio)
-        real, imag = real[..., :-1], imag[..., :-1]
         power = real * real + imag * imag
         mel = torch.matmul(self.mel_filters, power)
         mel = torch.clamp(mel, min=1e-10).log10()
         mel = torch.maximum(mel, mel.amax(dim=(-2, -1), keepdim=True) - 8.0)
         input_features = mel * 0.25 + 1.0
-        feature_len = input_features.shape[-1].unsqueeze(0)
-        num_chunks = (feature_len + self.chunk_size_minus) // self.chunk_size
+        feature_len = torch._shape_as_tensor(input_features)[-1:]
+        num_chunks = POSITIVE_CEIL_DIV.apply(feature_len, self.chunk_size)
         pad_frames = self.chunk_starts_full[num_chunks] - feature_len
-        padded_features = torch.cat([input_features, self.mel_pad_zeros[..., :pad_frames].float()], dim=-1)
-        chunks = padded_features.reshape(1, N_MELS, num_chunks, self.chunk_size).permute(2, 0, 1, 3)
+        padded_features = torch.cat([input_features, self.mel_pad_zeros[..., :pad_frames]], dim=-1)
+        chunks = padded_features.reshape(1, _MODEL_NUM_MELS, -1, self.chunk_size).permute(2, 0, 1, 3)
         chunk_starts = self.chunk_starts_full[:num_chunks]
         raw_chunk_lens = torch.clamp(feature_len - chunk_starts, min=0, max=self.chunk_size)
         aftercnn_lens = self.aftercnn_lens_lookup[raw_chunk_lens]
         x = F.gelu(self.audio_tower.conv2d1(chunks), approximate="tanh")
         x = F.gelu(self.audio_tower.conv2d2(x), approximate="tanh")
         x = F.gelu(self.audio_tower.conv2d3(x), approximate="tanh")
-        x = self.audio_tower.conv_out(x.permute(0, 3, 1, 2).contiguous().view(num_chunks, self.chunk_aftercnn, -1))
+        x = self.audio_tower.conv_out(
+            x.permute(0, 3, 1, 2).contiguous().view(-1, self.chunk_aftercnn, self.conv_out_features)
+        )
         hidden_states = x + self.pos
-        num_windows = (num_chunks + self.chunks_per_window_minus) // self.chunks_per_window
-        total_chunks_padded = self.window_chunks_full[num_windows]
+        num_windows = POSITIVE_CEIL_DIV.apply(num_chunks, self.chunks_per_window)
+        total_chunks_padded = num_windows * self.chunks_per_window
         pad_chunks = total_chunks_padded - num_chunks
-        hidden_states = torch.cat([hidden_states, self.chunk_pad_zeros[:pad_chunks].float()], dim=0)
-        aftercnn_lens = torch.cat([aftercnn_lens, self.aftercnn_pad_zeros[:pad_chunks].int()])
-        hidden_states = hidden_states.reshape(num_windows, self.tokens_per_window, self.model_dim)
-        valid_counts = aftercnn_lens.reshape(num_windows, self.chunks_per_window).sum(dim=1, dtype=torch.int32)
-        valid_mask_float = self.valid_mask_float_lookup[valid_counts].float()
-        key_mask = self.key_mask_lookup[:, valid_counts].float()
+        hidden_states = torch.cat([hidden_states, self.chunk_pad_zeros[:pad_chunks]], dim=0)
+        aftercnn_lens = torch.cat([aftercnn_lens, self.aftercnn_pad_zeros[:pad_chunks]])
+        hidden_states = hidden_states.reshape(-1, self.tokens_per_window, self.model_dim)
+        valid_counts = aftercnn_lens.reshape(-1, self.chunks_per_window).sum(dim=1)
+        key_mask = self.key_mask_lookup[:, valid_counts]
         for layer in self.audio_tower.layers:
             residual = hidden_states
             normed = layer.self_attn_layer_norm(hidden_states)
-            qkv = layer.self_attn.qkv(normed).view(num_windows, -1, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+            qkv = layer.self_attn.qkv(normed).reshape(-1, self.tokens_per_window, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.split(1, dim=0)
             attn = torch.matmul(q, k.transpose(-1, -2))
             attn = torch.softmax(attn + key_mask, dim=-1)
-            attn = torch.matmul(attn, v).transpose(2, 3).reshape(num_windows, -1, layer.self_attn.out_proj.in_features)
+            attn = torch.matmul(attn, v).transpose(2, 3).reshape(-1, self.tokens_per_window, self.attn_out_features)
             hidden_states = residual + layer.self_attn.out_proj(attn)
             residual = hidden_states
             normed = layer.final_layer_norm(hidden_states)
             hidden_states = residual + layer.fc2(layer.activation_fn(layer.fc1(normed)))
         hidden_states = self.audio_tower.ln_post(hidden_states)
         hidden_states = self.audio_tower.proj2(self.audio_tower.act(self.audio_tower.proj1(hidden_states)))
-        hidden_states = hidden_states * valid_mask_float
         hidden_states = hidden_states.reshape(1, -1, self.output_dim)
-        encoded_len = aftercnn_lens.sum(dtype=torch.int32).long()
+        encoded_len = aftercnn_lens.sum(dim=0, keepdim=True)
         audio_hidden = hidden_states[:, :encoded_len]
         concat_embed = torch.cat([self.audio_start_embed, audio_hidden, self.audio_end_embed, text_embed], dim=1)
-        ids_len = concat_embed.shape[1].unsqueeze(0)
+        ids_len = torch._shape_as_tensor(concat_embed)[1:2]
         return concat_embed, ids_len
 
 
@@ -846,9 +869,11 @@ class FORCED_ALIGNER_ROTARY_MASK(torch.nn.Module):
         self.register_buffer("sin_rotary_pos_emb", torch.cat([-sin, sin], dim=-1).half(), persistent=False)
 
     def forward(self, ids_len: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        # Keep the checkpoint/exporter's established f16 lookup-table contract;
+        # widening these cached values measurably changes deep-decoder logits.
         rotary_cos = self.cos_rotary_pos_emb[:, :ids_len].float()
         rotary_sin = self.sin_rotary_pos_emb[:, :ids_len].float()
-        attention_mask = self.attention_mask[..., :ids_len, :ids_len].float()
+        attention_mask = self.attention_mask[..., :ids_len, :ids_len]
         return rotary_cos, rotary_sin, attention_mask
 
 
@@ -868,9 +893,11 @@ class SIMPLIFIED_LAYER_NORM(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, scale, epsilon, axis):
-        variance   = x.float().pow(2).mean(dim=axis, keepdim=True)
-        normalized = x.float() * torch.rsqrt(variance + epsilon)
-        return (normalized * scale).to(scale.dtype)
+        # This exporter is intentionally float32 end-to-end. Avoid trace-only
+        # no-op casts: the symbolic replaces this whole function with one fused op.
+        variance   = x.pow(2).mean(dim=axis, keepdim=True)
+        normalized = x * torch.rsqrt(variance + epsilon)
+        return normalized * scale
 
     @staticmethod
     def symbolic(g, x, scale, epsilon, axis):
@@ -910,13 +937,29 @@ class FORCED_ALIGNER_DECODER_MAIN(torch.nn.Module):
         self.num_kv_heads   = num_kv_heads
         self.num_kv_groups  = num_heads // num_kv_heads
         self.qk_heads       = num_heads + num_kv_heads
-        self.num_layers     = num_layers
+        self.total_qkv_heads = self.qk_heads + num_kv_heads
+        self.qkv_split_sizes = (self.qk_heads, num_kv_heads)
+        self.qk_split_sizes  = (num_heads, num_kv_heads)
+        self.hidden_size     = hidden_size
+        self.attention_output_size = int(self.llm.layers[0].self_attn.o_proj.in_features)
+        self.intermediate_size = int(self.llm.layers[0].mlp.down_proj.in_features)
+        self.mlp_split_sizes = (self.intermediate_size, self.intermediate_size)
+        self.register_buffer(
+            "rotate_half_indices",
+            torch.cat(
+                [
+                    torch.arange(self.head_dim_half, self.head_dim, dtype=torch.int32),
+                    torch.arange(self.head_dim_half, dtype=torch.int32),
+                ]
+            ),
+            persistent=False,
+        )
 
         # RMS norm is emitted as ORT's fused SimplifiedLayerNormalization (default ONNX domain): it computes
         # y = x * rsqrt(mean(x^2) + eps) * scale and reduces in float32 (stash_type=1). Feeding scale = 1/sqrt(N)
         # (N = normalized size) and the model's per-element eps reproduces this file's sum-based
-        # r = x * rsqrt(sum(x^2) + N*eps) EXACTLY, and the float32 reduction makes the PREVENT_F16_OVERFLOW
-        # activation pre-scale unnecessary. The g*sqrt(N) norm weight stays absorbed into the following linear.
+        # r = x * rsqrt(sum(x^2) + N*eps) EXACTLY. The float32 reduction needs no activation pre-scale,
+        # while the g*sqrt(N) norm weight stays absorbed into the following linear.
         hidden_rms_norm = self.llm.layers[0].input_layernorm
         qk_rms_norm     = self.llm.layers[0].self_attn.q_norm
         self.hidden_rms_norm_eps = float(getattr(hidden_rms_norm, "variance_epsilon", getattr(hidden_rms_norm, "eps", 1e-6)))
@@ -1041,34 +1084,33 @@ class FORCED_ALIGNER_DECODER_MAIN(torch.nn.Module):
     def _rms_norm(self, x: Tensor, scale: Tensor, eps: float) -> Tensor:
         return simplified_layer_norm(x, scale, eps)
 
-    def _rotate_half(self, x: Tensor, batch_size: int) -> Tensor:
-        x = x.view(batch_size, -1, 1, self.qk_heads, 2, self.head_dim_half)
-        x = x.flip(-2)
-        return x.view(batch_size, -1, 1, self.qk_heads, self.head_dim)
+    def _rotate_half(self, x: Tensor) -> Tensor:
+        # The sign is already folded into sin_rotary_pos_emb. One int32 Gather
+        # exactly replaces reshape -> flip -> reshape without shape construction.
+        return torch.index_select(x, -1, self.rotate_half_indices)
 
     def forward(self, hidden_states: Tensor, rotary_cos: Tensor, rotary_sin: Tensor, attention_mask: Tensor) -> Tensor:
-        batch_size = hidden_states.shape[0]
         for layer in self.llm.layers:
             residual = hidden_states
             hidden_states = self._rms_norm(hidden_states, self.hidden_norm_scale, self.hidden_rms_norm_eps)
             qkv = layer.self_attn.qkv(hidden_states)
-            qkv = qkv.reshape(batch_size, -1, 1, self.qk_heads + self.num_kv_heads, self.head_dim)
-            qk, v = torch.split(qkv, [self.qk_heads, self.num_kv_heads], dim=-2)
+            qkv = qkv.reshape(1, -1, 1, self.total_qkv_heads, self.head_dim)
+            qk, v = torch.split(qkv, self.qkv_split_sizes, dim=-2)
             qk = self._rms_norm(qk, self.qk_norm_scale, self.qk_rms_norm_eps) * layer.self_attn.qk_norm_weight
-            qk_rot = qk * rotary_cos + self._rotate_half(qk, batch_size) * rotary_sin
-            q, k = torch.split(qk_rot, [self.num_heads, self.num_kv_heads], dim=-2)
-            q = q.reshape(batch_size, -1, self.num_kv_heads, self.num_kv_groups, self.head_dim).permute(0, 2, 3, 1, 4)
+            qk_rot = qk * rotary_cos + self._rotate_half(qk) * rotary_sin
+            q, k = torch.split(qk_rot, self.qk_split_sizes, dim=-2)
+            q = q.reshape(1, -1, self.num_kv_heads, self.num_kv_groups, self.head_dim).permute(0, 2, 3, 1, 4)
             k = k.permute(0, 3, 2, 4, 1)   # (B, KVH, 1, D, L) — pre-transposed for Q @ K
             v = v.transpose(1, 3)          # (B, KVH, 1, L, D)
             attn = torch.matmul(q, k) + attention_mask
             attn = torch.softmax(attn, dim=-1)
             attn = torch.matmul(attn, v)
-            attn = attn.permute(0, 3, 1, 2, 4).reshape(batch_size, -1, layer.self_attn.o_proj.in_features)
+            attn = attn.permute(0, 3, 1, 2, 4).reshape(1, -1, self.attention_output_size)
             hidden_states = residual + layer.self_attn.o_proj(attn)
             residual = hidden_states
             hidden_states = self._rms_norm(hidden_states, self.hidden_norm_scale, self.hidden_rms_norm_eps)
             gate_up = layer.mlp.gate_up_proj(hidden_states)
-            gate, up = torch.split(gate_up, [layer.mlp.down_proj.in_features] * 2, dim=-1)
+            gate, up = torch.split(gate_up, self.mlp_split_sizes, dim=-1)
             hidden_states = residual + layer.mlp.down_proj(layer.mlp.act_fn(gate) * up)
         hidden_states = self._rms_norm(hidden_states, self.hidden_norm_scale, self.hidden_rms_norm_eps)
         logits = self.lm_head(hidden_states)                       # (1, L, classify_num)
@@ -1081,13 +1123,18 @@ class FORCED_ALIGNER_DECODER_MAIN(torch.nn.Module):
 # ══════════════════════════════════════════════════════════════════════════════
 @torch.inference_mode()
 def export_all() -> None:
-    if not os.path.isfile(os.path.join(download_path, "model.safetensors")):
-        raise FileNotFoundError(
-            f"'{download_path}/model.safetensors' not found.\n"
-            f"Download the weights first, e.g.:\n"
-            f"  huggingface-cli download Qwen/Qwen3-ForcedAligner-0.6B --local-dir {download_path}"
-        )
-    os.makedirs(os.path.dirname(onnx_model_Main), exist_ok=True)
+    import Shared_Merged
+
+    split_export_folder.mkdir(parents=True, exist_ok=True)
+    onnx_folder.mkdir(parents=True, exist_ok=True)
+    # Rebuild production atomically from current split constituents; never leave
+    # stale split-era graphs/sidecars beside the merged-only runtime bundle.
+    for _stale_name in MODEL_FILE_NAMES.values():
+        for _stale_path in (
+            onnx_folder / _stale_name,
+            onnx_folder / (_stale_name + ".data"),
+        ):
+            _stale_path.unlink(missing_ok=True)
     print("\nExport start …\n")
     config = AutoConfig.from_pretrained(download_path, trust_remote_code=True)
     model  = AutoModel.from_pretrained(download_path, dtype=torch.float32, device_map="cpu", trust_remote_code=True)
@@ -1106,10 +1153,45 @@ def export_all() -> None:
     head_dim     = text_cfg.head_dim
     hidden_size  = text_cfg.hidden_size
     classify_num = int(getattr(config.thinker_config, "classify_num", 5000))
+    timestamp_tokens_per_word = _MODEL_TIMESTAMP_TOKENS_PER_WORD
+    audio_subsampling_stages = len(_AUDIO_SUBSAMPLING_STAGE_NAMES)
+    language_codes = {
+        "Chinese": ("zh", ["chinese", "mandarin", "cn", "中文"]),
+        "Cantonese": ("yue", ["cantonese", "粤语", "廣東話", "广东话"]),
+        "English": ("en", ["english", "eng"]),
+        "German": ("de", ["german"]),
+        "Spanish": ("es", ["spanish"]),
+        "French": ("fr", ["french"]),
+        "Italian": ("it", ["italian"]),
+        "Portuguese": ("pt", ["portuguese"]),
+        "Russian": ("ru", ["russian"]),
+        "Korean": ("ko", ["korean", "한국어"]),
+        "Japanese": ("ja", ["japanese", "日本語"]),
+    }
+    configured_languages = list(config.support_languages or ())
+    supported_languages = {
+        language_codes[name][0]: {
+            "name": name,
+            "aliases": language_codes[name][1],
+            "prompt_token_ids": [],
+        }
+        for name in configured_languages
+    }
+    required_tokens = {
+        "audio_start": "<|audio_start|>",
+        "audio_end": "<|audio_end|>",
+        "audio_pad": "<|audio_pad|>",
+        "timestamp": "<timestamp>",
+    }
+    vocabulary = tokenizer.get_vocab()
+    special_token_ids = {
+        role: int(vocabulary[token]) for role, token in required_tokens.items()
+    }
 
     print(f"  Encoder    : layers={audio_cfg.encoder_layers}, d_model={audio_cfg.d_model}, output_dim={audio_cfg.output_dim}")
     print(f"  Decoder    : layers={num_layers}, heads={num_heads}/{num_kv_heads} GQA, head_dim={head_dim}")
-    print(f"  Classifier : {classify_num} timestamp buckets x {TIMESTAMP_SEGMENT_TIME} ms (max {classify_num * TIMESTAMP_SEGMENT_TIME / 1000:.0f}s)")
+    print(f"  Classifier : {classify_num} timestamp buckets x {_MODEL_TIMESTAMP_SEGMENT_MS} ms (max {classify_num * _MODEL_TIMESTAMP_SEGMENT_MS / 1000:.0f}s)")
+    print(f"  Alignment  : {timestamp_tokens_per_word} timestamp tokens/word, {audio_subsampling_stages} stride-2 audio stages")
 
     # ── Decoder Embed ─────────────────────────────────────────────────────────
     embed_mod = FORCED_ALIGNER_EMBED(model).eval()
@@ -1117,7 +1199,7 @@ def export_all() -> None:
     torch.onnx.export(
         embed_mod, (dummy_ids,), onnx_model_Embed,
         input_names=["input_ids"], output_names=["text_embed"],
-        dynamic_axes={"input_ids": {0: "batch", 1: "ids_len"}, "text_embed": {0: "batch", 1: "ids_len"}} if DYNAMIC_AXES else None,
+        dynamic_axes={"input_ids": {1: "ids_len"}, "text_embed": {1: "ids_len"}},
         opset_version=OPSET, dynamo=False,
     )
     del embed_mod, dummy_ids
@@ -1132,7 +1214,7 @@ def export_all() -> None:
     torch.onnx.export(
         encoder, (dummy_audio, dummy_text), onnx_model_Encoder,
         input_names=["audio", "text_embed"], output_names=["concat_embed", "ids_len"],
-        dynamic_axes={"audio": {2: "audio_len"}, "text_embed": {1: "num_token"}, "concat_embed": {1: "total_len"}} if DYNAMIC_AXES else None,
+        dynamic_axes={"audio": {2: "audio_len"}, "text_embed": {1: "num_token"}, "concat_embed": {1: "total_len"}},
         opset_version=OPSET, dynamo=False,
     )
     del encoder, dummy_audio, dummy_text
@@ -1145,7 +1227,7 @@ def export_all() -> None:
     torch.onnx.export(
         rotary_mod, (dummy_ids_len,), onnx_model_Rotary_Mask,
         input_names=["ids_len"], output_names=["rotary_cos", "rotary_sin", "attention_mask"],
-        dynamic_axes={"rotary_cos": {1: "ids_len"}, "rotary_sin": {1: "ids_len"}, "attention_mask": {3: "ids_len", 4: "kv_seq_len"}} if DYNAMIC_AXES else None,
+        dynamic_axes={"rotary_cos": {1: "ids_len"}, "rotary_sin": {1: "ids_len"}, "attention_mask": {3: "ids_len", 4: "kv_seq_len"}},
         opset_version=OPSET, dynamo=False,
     )
     del rotary_mod
@@ -1172,7 +1254,7 @@ def export_all() -> None:
             "rotary_sin":     {1: "ids_len"},
             "attention_mask": {3: "ids_len", 4: "kv_seq_len"},
             "output_ids":     {1: "ids_len"},
-        } if DYNAMIC_AXES else None,
+        },
         opset_version=OPSET, dynamo=False,
     )
     del decoder_main, hidden_states, rotary_cos, rotary_sin, attention_mask
@@ -1194,71 +1276,58 @@ def export_all() -> None:
 
     onnx_metadata = build_model_metadata(
         {
-            "qwen_forcedaligner_metadata_version": 1,
-            "producer": "Export_Qwen_ForcedAligner.py",
-            "sample_rate": SAMPLE_RATE,
-            "input_audio_length": MAX_INPUT_AUDIO_LENGTH,
-            "input_audio_dtype": INPUT_AUDIO_DTYPE,
-            "max_seq_len": MAX_SEQ_LEN,
-            "activations_fp16": False,
-            "opset": OPSET,
-        },
-        {
-            "num_layers": num_layers,
-            "num_attention_heads": num_heads,
-            "num_key_value_heads": num_kv_heads,
-            "head_dim": head_dim,
-            "hidden_size": hidden_size,
-            "num_timestamp_buckets": classify_num,
-            "timestamp_segment_ms": TIMESTAMP_SEGMENT_TIME,
-            "audio_encoder_layers": audio_cfg.encoder_layers,
-            "audio_encoder_attention_heads": audio_cfg.encoder_attention_heads,
-            "audio_encoder_d_model": audio_cfg.d_model,
-            "audio_encoder_output_dim": audio_cfg.output_dim,
-            "num_mels": N_MELS,
-            "nfft_stft": NFFT_STFT,
-            "window_length": WINDOW_LENGTH,
-            "hop_length": HOP_LENGTH,
-            "window_type": WINDOW_TYPE,
-        },
-        {
-            "audio_start_token_id": _token_id(tokenizer, "<|audio_start|>", AUDIO_START_TOKEN_ID),
-            "audio_end_token_id": _token_id(tokenizer, "<|audio_end|>", AUDIO_END_TOKEN_ID),
-            "audio_pad_token_id": _token_id(tokenizer, "<|audio_pad|>", AUDIO_PAD_TOKEN_ID),
-            "timestamp_token_id": _token_id(tokenizer, "<timestamp>", TIMESTAMP_TOKEN_ID),
+            "audio_pcm_scale": _MODEL_AUDIO_PCM_SCALE,
+            "sample_rate": _MODEL_SAMPLE_RATE,
+            "special_token_ids": special_token_ids,
+            "supported_languages": supported_languages,
+            "timestamp_segment_ms": _MODEL_TIMESTAMP_SEGMENT_MS,
+            "timestamp_tokens_per_word": timestamp_tokens_per_word,
         },
     )
-    metadata_targets = [onnx_model_Metadata]
-    written = []
-    for target in metadata_targets:
-        if not Path(target).exists():
-            continue
-        write_onnx_metadata(target, onnx_metadata)
-        written.append(target)
-    print(f"\n[Metadata] Stamped {len(onnx_metadata)} keys into {len(written)} ONNX graph(s):")
-    for key in sorted(onnx_metadata):
-        print(f"    {key} = {onnx_metadata[key]}")
+    replace_onnx_metadata(onnx_model_Metadata, onnx_metadata)
 
-    # ── Save the tokenizer into the ONNX folder so the exported folder runs inference ──
-    # stand-alone (no external Qwen3-ForcedAligner model path needed at inference time).
-    try:
-        _tokenizer_dir = onnx_folder / "tokenizer"
-        tokenizer.save_pretrained(str(_tokenizer_dir))
-        print(f"[Tokenizer] Saved tokenizer -> {_tokenizer_dir}")
-    except Exception as _exc:  # noqa: BLE001 - a failed save must not abort the auto demo
-        print(f"[Tokenizer] Skipped tokenizer bundle ({_exc})")
+    # Save the runtime tokenizer directly into the production folder. The
+    # automatically cleaned staging directory contains only split ONNX graphs.
+    _production_tokenizer_dir = onnx_folder / "tokenizer"
+    if _production_tokenizer_dir.exists():
+        shutil.rmtree(_production_tokenizer_dir)
+    tokenizer.save_pretrained(str(_production_tokenizer_dir))
+    print(f"[Tokenizer] Saved tokenizer -> {_production_tokenizer_dir}")
+
+    # Compose Embed -> Encoder -> Rotary+Mask -> Decoder Main. Unlike an
+    # autoregressive LLM, this NAR model has no KV cache or prefill/decode pair;
+    # the architecture-correct production bundle is one compute graph/session.
+    print("\n[SharedMerged] Building one-session NAR graph + shared initializer blob ...")
+    bundle = Shared_Merged.build_shared_merged_bundle(
+        split_export_folder,
+        out_folder=onnx_folder,
+        model_file_names=MODEL_FILE_NAMES,
+        delete_constituents=False,
+    )
+    shutil.copy2(onnx_model_Metadata, onnx_folder / MODEL_FILE_NAMES["metadata"])
+    replace_onnx_metadata(
+        str(onnx_folder / MODEL_FILE_NAMES["metadata"]),
+        onnx_metadata,
+    )
+    validation = bundle["validation"]
+    print(f"    {Path(bundle['merged_model']).name} ({Path(bundle['merged_model']).stat().st_size} bytes)")
+    print(f"    {Path(bundle['shared_data']).name} ({validation['shared_data_bytes']} bytes)")
+    print(f"    Shared initializers: {validation['shared_initializer_count']}")
+    print("    Compute sessions: 4 split -> 1 merged (no KV/decode loop in this NAR model)")
+
+    _split_export_temp.cleanup()
+    print("[SharedMerged] Removed automatic split-graph staging directory.")
     print("\nExport complete.\n")
-
-
-def run_exported_inference() -> None:
-    print("─" * 70)
-    print("Running ONNX Runtime demo via Inference_Qwen_ForcedAligner_ONNX.py ...\n")
-    subprocess.run(
-        [sys.executable, str(Path(__file__).resolve().parent / "Inference_Qwen_ForcedAligner_ONNX.py"), "--onnx-folder", str(onnx_folder)],
-        check=True,
-    )
-
 
 if __name__ == "__main__":
     export_all()
-    run_exported_inference()
+    if subprocess.call(
+        [
+            sys.executable,
+            str(script_folder / "Inference_Qwen_ForcedAligner_ONNX.py"),
+            "--onnx-folder",
+            str(onnx_folder),
+        ],
+        cwd=str(script_folder),
+    ) != 0:
+        raise RuntimeError("Qwen ForcedAligner inference failed after export.")

@@ -25,11 +25,7 @@ def example_audio_path(language, filename=None):
 
 
 def model_audio_cases(model_name):
-    try:
-        audio_files = _MODEL_AUDIO_FILES[model_name]
-    except KeyError as exc:
-        names = ", ".join(sorted(_MODEL_AUDIO_FILES))
-        raise ValueError(f"Unknown demo audio model {model_name!r}. Available models: {names}") from exc
+    audio_files = _MODEL_AUDIO_FILES[model_name]
     return [(example_audio_path(language, filename), language) for language, filename in audio_files]
 
 

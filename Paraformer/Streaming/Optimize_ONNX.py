@@ -1,11 +1,10 @@
 """Optimize & quantize the exported Paraformer streaming ONNX modules."""
 
 from pathlib import Path
-import shutil
+import copy
 import sys
 
-
-# ============================== USER CONFIG ==============================
+import onnx
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
@@ -15,74 +14,140 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, metadata_int_for_model, run_optimizer
+from Optimize_ONNX_Common import (
+    consolidate_optimized_model_weights,
+    DEFAULT_F16_OP_BLOCK_LIST,
+    OptimizerConfig,
+    Plan,
+    run_optimizer,
+)
 
 
-ORIGINAL_FOLDER_PATH = str(_SCRIPT_DIR / "Paraformer_ONNX")
+# ============================== USER CONFIG ==============================
+# Edit this section only.
+# Q8 is the direct-script default. Campaign profiles can select Q4, dynamic
+# INT8, or the validated literal-F16 exporter graph without changing its I/O.
+
+ORIGINAL_FOLDER_PATH  = str(_SCRIPT_DIR / "Paraformer_ONNX")
 OPTIMIZED_FOLDER_PATH = str(_SCRIPT_DIR / "Paraformer_Optimized")
 
+WEIGHT_ONLY_ALGORITHM = "AFFINE_REFINE_V2"
+DYNAMIC_WEIGHT_TYPE  = "QInt8"
+DYNAMIC_PER_CHANNEL  = True
+DYNAMIC_REDUCE_RANGE = False
+
 FORCE_EXTERNAL_DATA = False
-UPGRADE_OPSET = 0
+UPGRADE_OPSET       = 0
+OPTIMIZER_LEVEL     = 2
+OPTIMIZER_ONLY_ONNXRUNTIME = False
 
-F16_OP_BLOCK_LIST = [
-    "DynamicQuantizeLinear",
-    "DequantizeLinear",
-    "DynamicQuantizeMatMul",
-    "Range",
-    "MatMulIntegerToFloat",
-    "Softmax",
-]
-
-
-def paraformer_num_heads(model_path: str) -> int:
-    key = "num_encoder_heads" if "Encoder" in Path(model_path).stem else "num_decoder_heads"
-    return metadata_int_for_model(model_path, key)
-
-
-def paraformer_hidden_size(model_path: str) -> int:
-    return metadata_int_for_model(model_path, "hidden_size")
-
-
-# ============================== MODEL PLANS ==============================
-
-TRANSFORMER_PLAN = dict(num_heads=paraformer_num_heads, hidden_size=paraformer_hidden_size)
+F16_KEEP_IO_TYPES      = False
+F16_FORCE_INITIALIZERS = False
+F16_OP_BLOCK_LIST = DEFAULT_F16_OP_BLOCK_LIST
 
 MODEL_PLANS = {
-    "Paraformer_Streaming_Encoder": Plan(method="DYNAMIC", **TRANSFORMER_PLAN),
-    "Paraformer_Streaming_Decoder": Plan(method="DYNAMIC", **TRANSFORMER_PLAN),
+    "Paraformer_Streaming_Encoder": Plan(
+        method="Q8",
+        num_heads=0,
+        hidden_size=0,
+    ),
+    "Paraformer_Streaming_Decoder": Plan(
+        method="Q8",
+        num_heads=0,
+        hidden_size=0,
+    ),
+    "ASR_Metadata": Plan(
+        method="F32",
+        optimize=False,
+        transformer=False,
+    ),
 }
 
-
-# ============================== PIPELINE ================================
 
 CONFIG = OptimizerConfig(
     original_folder_path=ORIGINAL_FOLDER_PATH,
     optimized_folder_path=OPTIMIZED_FOLDER_PATH,
     model_plans=MODEL_PLANS,
-    dynamic_weight_type="QInt8",
-    dynamic_per_channel=True,
-    dynamic_reduce_range=False,
+    weight_only_algorithm=WEIGHT_ONLY_ALGORITHM,
+    dynamic_weight_type=DYNAMIC_WEIGHT_TYPE,
+    dynamic_per_channel=DYNAMIC_PER_CHANNEL,
+    dynamic_reduce_range=DYNAMIC_REDUCE_RANGE,
     force_external_data=FORCE_EXTERNAL_DATA,
     upgrade_opset=UPGRADE_OPSET,
-    optimizer_level=2,
+    optimizer_level=OPTIMIZER_LEVEL,
+    optimizer_only_onnxruntime=OPTIMIZER_ONLY_ONNXRUNTIME,
+    f16_keep_io_types=F16_KEEP_IO_TYPES,
+    f16_force_initializers=F16_FORCE_INITIALIZERS,
     f16_op_block_list=F16_OP_BLOCK_LIST,
+    copy_artifacts=("Vocab_Paraformer.txt",),
 )
+
+# ============================ END USER CONFIG ============================
+
+
+def _expose_f16_encoder_bridge_outputs(model_path: Path) -> int:
+    """Keep encoder internals F32 while exposing F16 decoder bridge tensors."""
+    model = onnx.load(str(model_path), load_external_data=False)
+    graph_outputs = {value.name: value for value in model.graph.output}
+    converted = 0
+    for output_name in ("encoder_out", "list_frame"):
+        output = graph_outputs[output_name]
+        internal_name = output_name + "_internal_f32"
+        producer = next(
+            node for node in model.graph.node if output_name in node.output
+        )
+        producer.output[:] = [
+            internal_name if name == output_name else name
+            for name in producer.output
+        ]
+        for node in model.graph.node:
+            node.input[:] = [
+                internal_name if name == output_name else name
+                for name in node.input
+            ]
+        internal_info = copy.deepcopy(output)
+        internal_info.name = internal_name
+        model.graph.value_info.append(internal_info)
+        output.type.tensor_type.elem_type = onnx.TensorProto.FLOAT16
+        model.graph.node.append(
+            onnx.helper.make_node(
+                "Cast",
+                [internal_name],
+                [output_name],
+                name=f"Paraformer_Streaming_{output_name}_To_Float16",
+                to=onnx.TensorProto.FLOAT16,
+            )
+        )
+        converted += 1
+    onnx.save_model(model, str(model_path), save_as_external_data=False)
+    return converted
+
+
+def postprocess_model(name, _plan, output_path: Path) -> None:
+    if (
+        name == "Paraformer_Streaming_Encoder"
+        and MODEL_PLANS["Paraformer_Streaming_Encoder"].method.upper() == "F32"
+        and MODEL_PLANS["Paraformer_Streaming_Decoder"].method.upper() == "F16"
+    ):
+        converted = _expose_f16_encoder_bridge_outputs(output_path)
+        print(f"  Exposed {converted} F16 encoder-to-decoder bridge output(s).")
+
+
+def main() -> None:
+    run_optimizer(
+        CONFIG,
+        model_names=(
+            "Paraformer_Streaming_Encoder",
+            "Paraformer_Streaming_Decoder",
+        ),
+        after_model=postprocess_model,
+    )
+    storage = consolidate_optimized_model_weights(
+        OPTIMIZED_FOLDER_PATH,
+        "Paraformer_Streaming_SharedInitializers.onnx",
+    )
+    print(f"  Consolidated {storage['unique_data_ranges']} unique shared range(s).")
 
 
 if __name__ == "__main__":
-    run_optimizer(CONFIG)
-
-    # ── Move the vocab list from the export folder to the optimized folder so the optimized
-    # folder (the default inference target) runs inference stand-alone. ──
-    _optimized_dir = Path(OPTIMIZED_FOLDER_PATH)
-    for _asset in ("Vocab_Paraformer.txt",):
-        _src = Path(ORIGINAL_FOLDER_PATH) / _asset
-        if not _src.exists():
-            print(f"[Tokenizer] Skipped {_asset} (not found in {ORIGINAL_FOLDER_PATH})")
-            continue
-        try:
-            _optimized_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(_src), str(_optimized_dir / _asset))
-            print(f"[Tokenizer] Moved {_asset} -> {OPTIMIZED_FOLDER_PATH}")
-        except Exception as _exc:  # noqa: BLE001
-            print(f"[Tokenizer] Skipped {_asset} ({_exc})")
+    main()

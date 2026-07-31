@@ -1,11 +1,7 @@
-"""Optimize & quantize the exported Qwen ForcedAligner ONNX modules."""
+"""Optimize the merged Qwen ForcedAligner NAR graph."""
 
 from pathlib import Path
-import shutil
 import sys
-
-
-# ============================== USER CONFIG ==============================
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
@@ -15,51 +11,62 @@ for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
 else:
     raise RuntimeError("Could not locate Optimize_ONNX_Common.py")
 
-from Optimize_ONNX_Common import OptimizerConfig, Plan, metadata_int_for_model, run_optimizer
+from Optimize_ONNX_Common import (
+    QUANTIZATION_F16_OP_BLOCK_LIST,
+    consolidate_optimized_model_weights,
+    copy_artifact,
+    OptimizerConfig,
+    Plan,
+    run_optimizer,
+)
 
+# ============================== USER CONFIG ==============================
+# Edit this section only.
+# Q8 is the direct-script default. Set USE_FLOAT16 only for the validated
+# mixed-F16 plan with frontend and residual precision repairs.
 
-ORIGINAL_FOLDER_PATH = str(_SCRIPT_DIR / "Qwen_ForcedAligner_ONNX")
+ORIGINAL_FOLDER_PATH  = str(_SCRIPT_DIR / "Qwen_ForcedAligner_ONNX")
 OPTIMIZED_FOLDER_PATH = str(_SCRIPT_DIR / "Qwen_ForcedAligner_Optimized")
 
-USE_OPENVINO = False
-FORCE_EXTERNAL_DATA = True
-UPGRADE_OPSET = 0
+OPTIMIZER_ONLY_ONNXRUNTIME = False
+FORCE_EXTERNAL_DATA        = True
+UPGRADE_OPSET              = 0
+OPTIMIZER_LEVEL            = 2
+USE_FLOAT16                = False
 
-def forced_aligner_num_heads(model_path: str) -> int:
-    if "Encoder" in Path(model_path).stem:
-        return metadata_int_for_model(model_path, "audio_encoder_attention_heads")
-    return metadata_int_for_model(model_path, "num_attention_heads")
+WEIGHT_ONLY_ALGORITHM      = "AFFINE_REFINE_V2"
+WEIGHT_ONLY_BLOCK_SIZE     = 32
+WEIGHT_ONLY_ACCURACY_LEVEL = 4
+WEIGHT_ONLY_SYMMETRIC      = False
 
+F16_KEEP_IO_TYPES      = False
+F16_FORCE_INITIALIZERS = False
 
-def forced_aligner_hidden_size(model_path: str) -> int:
-    if "Encoder" in Path(model_path).stem:
-        return metadata_int_for_model(model_path, "audio_encoder_d_model")
-    return metadata_int_for_model(model_path, "hidden_size")
-
-WEIGHT_ONLY_ALGORITHM = "k_quant"
-BLOCK_SIZE = 32
-ACCURACY_LEVEL = 4
-QUANT_SYMMETRIC = False
-
-F16_OP_BLOCK_LIST = [
-    "DynamicQuantizeLinear",
-    "DequantizeLinear",
-    "DynamicQuantizeMatMul",
-    "MatMulIntegerToFloat",
-]
+F16_OP_BLOCK_LIST = QUANTIZATION_F16_OP_BLOCK_LIST
 
 
-# ============================== MODEL PLANS ==============================
-
-TRANSFORMER_PLAN = dict(num_heads=forced_aligner_num_heads, hidden_size=forced_aligner_hidden_size)
-Q4_MATMUL = dict(method="Q4", op_types=("MatMul",), axes=(0,), **TRANSFORMER_PLAN)
-Q4_GATHER = dict(method="Q4", algo="DEFAULT", op_types=("Gather",), axes=(1,), block_size=16, **TRANSFORMER_PLAN)
+# ============================== MODEL PLANS =============================
 
 MODEL_PLANS = {
-    "ForcedAligner_Encoder":        Plan(**Q4_MATMUL, opt_level=2),
-    "ForcedAligner_Embed":          Plan(**Q4_GATHER),
-    "ForcedAligner_Decoder_Main":   Plan(**Q4_MATMUL),
-    "ForcedAligner_Rotary_Mask":    Plan(method="F32", transformer=False),
+    "ForcedAligner_Merged": Plan(
+        method="F16" if USE_FLOAT16 else "Q8",
+        algo=None if USE_FLOAT16 else WEIGHT_ONLY_ALGORITHM,
+        opt_level=2,
+        num_heads=0,
+        hidden_size=0,
+        f16_force_initializers=F16_FORCE_INITIALIZERS,
+        run_second_slim=not USE_FLOAT16,
+    ),
+    "ForcedAligner_SharedInitializers": Plan(
+        method="F32",
+        optimize=False,
+        transformer=False,
+    ),
+    "ASR_Metadata": Plan(
+        method="F32",
+        optimize=False,
+        transformer=False,
+    ),
 }
 
 
@@ -70,34 +77,45 @@ CONFIG = OptimizerConfig(
     optimized_folder_path=OPTIMIZED_FOLDER_PATH,
     model_plans=MODEL_PLANS,
     weight_only_algorithm=WEIGHT_ONLY_ALGORITHM,
-    block_size=BLOCK_SIZE,
-    accuracy_level=ACCURACY_LEVEL,
-    quant_symmetric=QUANT_SYMMETRIC,
+    block_size=WEIGHT_ONLY_BLOCK_SIZE,
+    accuracy_level=WEIGHT_ONLY_ACCURACY_LEVEL,
+    quant_symmetric=WEIGHT_ONLY_SYMMETRIC,
     force_external_data=FORCE_EXTERNAL_DATA,
     upgrade_opset=UPGRADE_OPSET,
-    optimizer_level=2,
-    optimizer_only_onnxruntime=USE_OPENVINO,
+    optimizer_level=OPTIMIZER_LEVEL,
+    optimizer_fusion_options=(
+        {
+            "enable_skip_layer_norm": False,
+            "enable_bias_skip_layer_norm": False,
+        }
+        if USE_FLOAT16
+        else None
+    ),
+    optimizer_only_onnxruntime=OPTIMIZER_ONLY_ONNXRUNTIME,
     f16_op_block_list=F16_OP_BLOCK_LIST,
+    f16_keep_io_types=F16_KEEP_IO_TYPES,
 )
+
+# ============================ END USER CONFIG ============================
+
+
+def main() -> None:
+    run_optimizer(
+        CONFIG,
+        model_names=("ForcedAligner_Merged",),
+        reset_output_folder=True,
+    )
+    copy_artifact(
+        Path(ORIGINAL_FOLDER_PATH) / "tokenizer",
+        Path(OPTIMIZED_FOLDER_PATH) / "tokenizer",
+        required=True,
+    )
+    storage = consolidate_optimized_model_weights(
+        OPTIMIZED_FOLDER_PATH,
+        "ForcedAligner_SharedInitializers.onnx",
+    )
+    print(f"  Consolidated {storage['unique_data_ranges']} unique shared range(s).")
 
 
 if __name__ == "__main__":
-    run_optimizer(CONFIG)
-
-    # ── Move the bundled tokenizer folder from the export folder to the optimized folder so the
-    # optimized folder (the default inference target) runs inference stand-alone. ──
-    _optimized_dir = Path(OPTIMIZED_FOLDER_PATH)
-    for _asset in ("tokenizer",):
-        _src = Path(ORIGINAL_FOLDER_PATH) / _asset
-        if not _src.exists():
-            print(f"[Tokenizer] Skipped {_asset} (not found in {ORIGINAL_FOLDER_PATH})")
-            continue
-        try:
-            _optimized_dir.mkdir(parents=True, exist_ok=True)
-            _dst = _optimized_dir / _asset
-            if _dst.exists():
-                shutil.rmtree(_dst) if _dst.is_dir() else _dst.unlink()
-            shutil.move(str(_src), str(_dst))
-            print(f"[Tokenizer] Moved {_asset} -> {OPTIMIZED_FOLDER_PATH}")
-        except Exception as _exc:  # noqa: BLE001
-            print(f"[Tokenizer] Skipped {_asset} ({_exc})")
+    main()

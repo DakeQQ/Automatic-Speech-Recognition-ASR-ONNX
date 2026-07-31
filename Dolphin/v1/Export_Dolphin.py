@@ -1,64 +1,90 @@
 import gc
-import subprocess
-import sys
+import json
 import os
 import shutil
 import copy
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 import torch
+import torch.nn.functional as F
 import dolphin                         
 import torchaudio
+import sentencepiece as spm
 from STFT_Process import STFT_Process  # The custom STFT/ISTFT can be exported in ONNX format.
-try:
-    import sentencepiece as spm
-except ImportError:
-    spm = None
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) 
 
 
-model_path             = "/home/DakeQQ/Downloads/dolphin-small"                                   # The dolphin project download path. Currently, only support dolphin-small and dolphin-base.
-onnx_folder            = os.path.join(_SCRIPT_DIR, "Dolphin_ONNX")                              # Local folder next to this script holding all exported ONNX graphs; created automatically if missing.
-os.makedirs(onnx_folder, exist_ok=True)
-onnx_model_Metadata    = os.path.join(onnx_folder, "ASR_Matadata.onnx")                     # Tiny metadata carrier graph.
-onnx_model_Encoder     = os.path.join(onnx_folder, "Dolphin_Encoder.onnx")                      # The exported onnx encoder model path.
-onnx_model_Decoder     = os.path.join(onnx_folder, "Dolphin_Decoder.onnx")                      # The exported onnx decoder (main, pure-float) model path.
-onnx_model_Embed       = os.path.join(onnx_folder, "Dolphin_Decoder_Embed.onnx")                # Token-embedding graph (keeps int ids out of the decoder).
-onnx_model_Prefill     = os.path.join(onnx_folder, "Dolphin_Position_Mask_Prefill.onnx")        # Prefill position-embedding + causal-mask graph.
-onnx_model_Decode      = os.path.join(onnx_folder, "Dolphin_Position_Mask_Decode.onnx")         # Decode position-embedding graph for the single new token.
-onnx_model_Greedy      = os.path.join(onnx_folder, "Dolphin_Greedy_Search.onnx")                # Greedy argmax + save_id history (used with Apply_Penality).
-onnx_model_Argmax      = os.path.join(onnx_folder, "Dolphin_Argmax.onnx")                       # Bare argmax (greedy decoding without a repetition penalty).
-onnx_model_First_Beam  = os.path.join(onnx_folder, "Dolphin_First_Beam_Search.onnx")            # First beam-search step.
-onnx_model_Second_Beam = os.path.join(onnx_folder, "Dolphin_Second_Beam_Search.onnx")           # Subsequent beam-search steps.
-onnx_model_Penality    = os.path.join(onnx_folder, "Dolphin_Apply_Penality.onnx")               # Sliding-window repetition penalty on the logits.
-save_vocab             = os.path.join(onnx_folder, "vocab_Dolphin.txt")                         # The exported Dolphin vocab path.
-TARGET_LANGUAGE        = "Auto-Auto"                                                            # See 'LANGUAGE_REGION' for detail.
+# ============================================================================================
+#                                       User configuration
+# ============================================================================================
+model_path = str(Path.home() / "Downloads" / "dolphin-small")  # Dolphin project path.
+_MODEL_MAX_AUDIO_SAMPLES = 480000
+_MODEL_MAX_DECODER_SEQ_LEN = 448
+INPUT_AUDIO_DTYPE   = "F32"             # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. "INT16" feeds raw PCM (÷32768 in-graph); "F32"/"F16" feed audio pre-normalised to [-1, 1].
+USE_FP16_KV     = True                  # Keep cache, cross-KV, position, and mask storage in FP16 for normal deployment exports.
+COMPUTE_IN_F32  = False                 # FP16-cache-only option: upcast attention compute while retaining FP16 storage.
+KV_DTYPE        = torch.float16 if USE_FP16_KV else torch.float32
+REORDER_DOWNPROJ_FOR_QUANT = True       # Exact FFN intermediate-channel reorder, absorbed into w_1/w_2.
+REORDER_OPROJ_FOR_QUANT    = True       # Exact self-attention V/linear_out per-head reorder.
+REORDER_KEY                = "absmean"  # "absmean" | "L4" | "rms" | "std".
+CROSS_KV_GROUP_SIZE        = 2          # Fuse two decoder cross-KV projections per Gemm; bounds the max f32 temporary to ~8.8 MiB.
+OPSET                      = 20         # ONNX opset version for the export.
 
 
+ONNX_DIR = Path(_SCRIPT_DIR) / "Dolphin_ONNX"
+_raw_onnx_temp = tempfile.TemporaryDirectory(prefix="dolphin-v1-export-")
+_raw_onnx_dir = Path(_raw_onnx_temp.name)
 
-USE_BEAM_SEARCH    = False    # Use beam search or greedy search.
-INPUT_AUDIO_LENGTH = 480000   # The maximum input audio length. Must less than 480000 (30 seconds).
-MAX_SEQ_LEN        = 448      # It should less than 448.
-REPEAT_PENALITY    = 1.0      # Range from 0.0 to 1.0; "1.0" means no penality.
-PENALITY_RANGE     = 20       # Penalizes the most recent output. "30" means the last 30 tokens.
-MAX_BEAM_SIZE      = 10       # Max beams for exported model.
-TOP_K              = 3        # The top k candidate in decoding.
-BEAM_SIZE          = 3        # Number of beams in searching.
-# ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-WINDOW_TYPE     = 'hann'      # Type of window function used in the STFT.
-N_MELS          = 80          # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT_STFT       = 512         # Number of FFT components for the STFT process, edit it carefully.
-WINDOW_LENGTH   = 400         # Length of windowing, edit it carefully.
-HOP_LENGTH      = 160         # Number of samples between successive frames in the STFT, edit it carefully.
-PRE_EMPHASIZE   = 0.0         # Dolphin's DefaultFrontend applies NO pre-emphasis; keep 0.0 to match the reference feature extractor.
-SAMPLE_RATE     = 16000       # The model parameter, do not edit the value.
-INPUT_AUDIO_DTYPE   = "INT16" # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. "INT16" feeds raw PCM (÷32768 in-graph); "F32"/"F16" feed audio pre-normalised to [-1, 1].
-STOP_TOKEN      = [40000]     # 40000 is the end token for Dolphin series model.
-COMPUTE_IN_F32  = False       # F16 KV-cache compute precision. False = minimum-cast f16 attention (self + cross Q@K/mask/softmax/attn@V run in f16 on the f16 caches; the context is cast back to f32). True = keep the f16 KV *storage* (cache I/O dtype unchanged) but upcast K/V (and the mask, internally) to f32 at the attention use points, keeping Q/softmax in f32 (f16 storage, f32 compute).
-OPSET           = 18          # ONNX opset version for the export.
+MODEL_FILE_NAMES = {
+    "metadata": "ASR_Metadata.onnx",
+    "encoder": "Dolphin_Encoder.onnx",
+    "main": "Dolphin_Decoder.onnx",
+    "embed": "Dolphin_Decoder_Embed.onnx",
+    "position_prefill": "Dolphin_Position_Mask_Prefill.onnx",
+    "position_decode": "Dolphin_Position_Mask_Decode.onnx",
+    "greedy": "Dolphin_Greedy_Search.onnx",
+    "argmax": "Dolphin_Argmax.onnx",
+    "sampling": "Dolphin_TopKTopPSampling.onnx",
+    "penalty": "Dolphin_Apply_Penalty.onnx",
+    "prefill_greedy": "Dolphin_PrefillGreedy.onnx",
+    "prefill_penalty_greedy": "Dolphin_PrefillPenaltyGreedy.onnx",
+    "prefill_sampling": "Dolphin_PrefillSampling.onnx",
+    "probe_prefill_greedy": "Dolphin_ProbePrefillGreedy.onnx",
+    "probe_prefill_penalty_greedy": "Dolphin_ProbePrefillPenaltyGreedy.onnx",
+    "probe_prefill_sampling": "Dolphin_ProbePrefillSampling.onnx",
+    "decode_greedy": "Dolphin_DecodeGreedy.onnx",
+    "decode_penalty_greedy": "Dolphin_DecodePenaltyGreedy.onnx",
+    "decode_sampling": "Dolphin_DecodeSampling.onnx",
+    "shared_initializers": "Dolphin_SharedInitializers.onnx",
+}
+MODEL_FILE_NAMES["shared_initializers_data"] = MODEL_FILE_NAMES["shared_initializers"] + ".data"
+
+onnx_model_Metadata = str(_raw_onnx_dir / MODEL_FILE_NAMES["metadata"])
+onnx_model_Encoder = str(_raw_onnx_dir / MODEL_FILE_NAMES["encoder"])
+onnx_model_Decoder = str(_raw_onnx_dir / MODEL_FILE_NAMES["main"])
+onnx_model_Embed = str(_raw_onnx_dir / MODEL_FILE_NAMES["embed"])
+onnx_model_Prefill = str(_raw_onnx_dir / MODEL_FILE_NAMES["position_prefill"])
+onnx_model_Decode = str(_raw_onnx_dir / MODEL_FILE_NAMES["position_decode"])
+onnx_model_Greedy = str(_raw_onnx_dir / MODEL_FILE_NAMES["greedy"])
+onnx_model_Argmax = str(_raw_onnx_dir / MODEL_FILE_NAMES["argmax"])
+onnx_model_Sampling = str(_raw_onnx_dir / MODEL_FILE_NAMES["sampling"])
+onnx_model_Penalty = str(_raw_onnx_dir / MODEL_FILE_NAMES["penalty"])
+save_vocab = str(_raw_onnx_dir / "vocab_Dolphin.txt")
 
 
+# Fixed Dolphin-v1 model contract. These values define exported tensor geometry and metadata;
+# they are not runtime/user choices and must remain aligned with the trained frontend/model.
+WINDOW_TYPE = "hann"
+N_MELS = 80
+NFFT_STFT = 512
+WINDOW_LENGTH = 400
+HOP_LENGTH = 160
+PRE_EMPHASIZE = 0.0
+SAMPLE_RATE = 16000
 
-if HOP_LENGTH > INPUT_AUDIO_LENGTH:
-    HOP_LENGTH = INPUT_AUDIO_LENGTH
+
 LANGUAGE_REGION = {
     # ───────────────────────────── Auto Detection ─────────────────────────────
     "Auto"                         : "auto-auto",
@@ -298,7 +324,7 @@ class Tokenizer:
         
 
 def rel_shift(x, x_len, zero_pad, n_head):
-    x_padded = torch.cat([zero_pad[:, :x_len].float(), x], dim=-1)
+    x_padded = torch.cat([zero_pad[:, :x_len], x], dim=-1)
     x_padded = x_padded.view(n_head, -1, x_len)
     x = x_padded[:, 1:].view_as(x)
     return x[:, :, :x_len]
@@ -319,7 +345,7 @@ def fold_norm_into_linear(norm, linear):
 
 class GREEDY_SEARCH(torch.nn.Module):
     # Pure argmax that also appends the chosen token to the running save_id history (Qwen ASR style).
-    # Used when a repetition penalty is active so APPLY_PENALITY can read the on-device history.
+    # Used when a repetition penalty is active so APPLY_PENALTY can read the on-device history.
     def __init__(self):
         super(GREEDY_SEARCH, self).__init__()
 
@@ -345,90 +371,97 @@ class METADATA_CARRIER(torch.nn.Module):
         return marker
 
 
-class APPLY_PENALITY(torch.nn.Module):
+class APPLY_PENALTY(torch.nn.Module):
     # Sliding-window repetition penalty (Qwen ASR style): multiply the logits of the most recent
-    # `penality_range` tokens by `penality_value`. penality_range is baked into the graph at export
-    # via int(), so the runtime input only needs to match the export value.
+    # `penalty_range` tokens by `penalty_value`. Keep penalty_range as a live int64[1] graph input;
+    # indexing element zero avoids `.item()` and the fragile scalar-Reshape Slice lowering.
     def __init__(self):
-        super(APPLY_PENALITY, self).__init__()
+        super(APPLY_PENALTY, self).__init__()
 
-    def forward(self, logits, save_id, penality_value, penality_range):
-        penality_range_val = int(penality_range.item())
-        target_indices = save_id[:, -penality_range_val:].long()
-        penalised = logits.gather(1, target_indices) * penality_value
+    def forward(self, logits, save_id, penalty_value, penalty_range):
+        target_indices = save_id[:, -penalty_range[0]:].long()
+        penalised = logits.gather(1, target_indices) * penalty_value
         return logits.scatter(1, target_indices, penalised)
 
 
-class FIRST_BEAM_SEARCH(torch.nn.Module):
-    # First beam step (Qwen ASR style): expand the single prefilled sequence into `beam_size` beams.
-    # Scores are log-probabilities via logits - logsumexp(logits); no repetition penalty here (it is a
-    # separate APPLY_PENALITY pass on the logits beforehand).
-    def __init__(self, num_layers):
-        super(FIRST_BEAM_SEARCH, self).__init__()
-        self.num_keys_values = num_layers + num_layers
-        self.save_keys_values = [None] * self.num_keys_values
+class TOPK_TOPP_SAMPLING(torch.nn.Module):
+    NEG_INF = float("-inf")
+    GUMBEL_EPS = 1.0e-7
 
-    def forward(self, *all_inputs):
-        logits = all_inputs[-3]
-        save_id = all_inputs[-2]
-        beam_size = all_inputs[-1]
-        row_logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
-        top_beam_logits, top_beam_indices = torch.topk(logits, dim=-1, k=beam_size, sorted=True, largest=True)
-        top_beam_prob = top_beam_logits - row_logsumexp
-        for i in range(self.num_keys_values):
-            kv = all_inputs[i]
-            self.save_keys_values[i] = kv.repeat(beam_size, *([1] * (kv.dim() - 1)))
-        top_beam_indices = top_beam_indices.transpose(0, 1).int()
-        save_id = torch.cat([save_id, top_beam_indices], dim=-1)
-        max_logits_idx = top_beam_indices[[0]]
-        return *self.save_keys_values, save_id, top_beam_prob.transpose(0, 1), top_beam_indices, max_logits_idx
+    def __init__(self):
+        super().__init__()
+        self.register_buffer(
+            "neg_inf", torch.tensor(self.NEG_INF, dtype=torch.float32), persistent=False
+        )
+        self.register_buffer(
+            "gumbel_min", torch.tensor(self.GUMBEL_EPS, dtype=torch.float32), persistent=False
+        )
+        self.register_buffer(
+            "gumbel_max",
+            torch.tensor(1.0 - self.GUMBEL_EPS, dtype=torch.float32),
+            persistent=False,
+        )
 
+    def forward(self, logits, temperature, top_k, top_p, repetition_penalty, previous_ids):
+        inv_penalty = torch.reciprocal(repetition_penalty)
+        prev_logits = torch.gather(logits, 1, previous_ids)
+        prev_scores = torch.where(
+            prev_logits < 0.0,
+            prev_logits * repetition_penalty,
+            prev_logits * inv_penalty,
+        )
+        scores = torch.scatter(logits, 1, previous_ids, prev_scores)
+        scores = scores * torch.reciprocal(temperature)
 
-class SECOND_BEAM_SEARCH(torch.nn.Module):
-    # Subsequent beam steps (Qwen ASR style): accumulate log-prob scores, pick the global top-`beam_size`
-    # continuations from the top-`topK` per beam, and reorder the K/V caches / save_id via index_select.
-    def __init__(self, num_layers):
-        super(SECOND_BEAM_SEARCH, self).__init__()
-        self.num_keys_values = num_layers + num_layers
-        self.save_keys_values = [None] * self.num_keys_values
+        sorted_scores, sorted_indices = torch.topk(
+            scores, k=top_k, dim=-1, largest=True, sorted=True
+        )
+        sorted_probs = torch.softmax(sorted_scores, dim=-1)
+        sorted_cumsum = torch.cumsum(sorted_probs, dim=-1)
+        keep_topp = (sorted_cumsum - sorted_probs) <= top_p
+        sorted_scores = torch.where(keep_topp, sorted_scores, self.neg_inf)
 
-    def forward(self, *all_inputs):
-        logits = all_inputs[-5]
-        save_id = all_inputs[-4]
-        previous_prob = all_inputs[-3]
-        beam_size = all_inputs[-2]
-        topK = all_inputs[-1]
-        row_logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
-        top_k_logits, top_k_indices = torch.topk(logits, k=topK, dim=-1, largest=True, sorted=True)
-        top_k_prob = top_k_logits - row_logsumexp
-        current_prob = (top_k_prob + previous_prob).view(-1)
-        top_beam_prob, flat_beam_indices = torch.topk(current_prob, k=beam_size, dim=-1, largest=True, sorted=True)
-        beam_index = flat_beam_indices // topK
-        top_beam_indices = top_k_indices.view(-1)[flat_beam_indices]
-        for i in range(self.num_keys_values):
-            self.save_keys_values[i] = torch.index_select(all_inputs[i], dim=0, index=beam_index)
-        gathered_save_id = torch.index_select(save_id, dim=0, index=beam_index)
-        top_beam_indices = top_beam_indices.unsqueeze(-1).int()
-        max_logits_idx = top_beam_indices[[0]]
-        save_id = torch.cat([gathered_save_id, top_beam_indices], dim=-1)
-        return *self.save_keys_values, save_id, top_beam_prob.unsqueeze(-1), top_beam_indices, max_logits_idx
+        noise = torch.clamp(
+            torch.rand_like(sorted_scores), self.gumbel_min, self.gumbel_max
+        )
+        gumbel = -torch.log(-torch.log(noise))
+        winner = torch.argmax(sorted_scores + gumbel, dim=-1, keepdim=True)
+        sampled_id = torch.gather(sorted_indices, 1, winner).int()
+        save_id = torch.cat([previous_ids, sampled_id], dim=-1)
+        return sampled_id, save_id
 
 
 class DOLPHIN_ENCODER(torch.nn.Module):
-    def __init__(self, dolphin, stft_model, nfft_stft, n_mels, sample_rate, pre_emphasis, num_layers_de):
+    def __init__(
+        self,
+        dolphin,
+        stft_model,
+        nfft_stft,
+        n_mels,
+        sample_rate,
+        pre_emphasis,
+        num_layers_de,
+        max_audio_length,
+        cross_kv_group_size,
+    ):
         super(DOLPHIN_ENCODER, self).__init__()
-        self.dolphin = copy.deepcopy(dolphin.s2t_model)
+        source_model = dolphin.s2t_model
+        source_decoder_layers = list(source_model.decoder.decoders)
+        # The encoder graph only needs the encoder plus decoder cross-K/V weights.  Avoid copying
+        # the decoder embedding, self-attention, FFNs, and vocabulary head into this wrapper.
+        self.encoder = copy.deepcopy(source_model.encoder)
         self.stft_model = stft_model
         self.pre_emphasis = float(pre_emphasis)
         self.nfft_stft = nfft_stft
         self.n_mels = n_mels
         self.sample_rate = sample_rate
+        self.cross_kv_group_size = int(cross_kv_group_size)
 
         # Calculate frequency bins for STFT and filterbank
         self.stft_bins = nfft_stft // 2 + 1  # Number of frequency bins from STFT
 
         # Create mel filterbank - ensure it matches STFT output dimensions
-        self.fbank = torchaudio.functional.melscale_fbanks(
+        fbank = torchaudio.functional.melscale_fbanks(
             n_freqs=self.stft_bins,
             f_min=0,
             f_max=sample_rate // 2,
@@ -437,41 +470,82 @@ class DOLPHIN_ENCODER(torch.nn.Module):
             norm='slaney',
             mel_scale='slaney'
         ).transpose(0, 1).unsqueeze(0)
+        self.register_buffer('fbank', fbank)
                      
         # Normalization parameters (global_cmvn stores mean/std as float64; cast to float32)
         self.inv_int16 = float(1.0 / 32768.0)
         # int16 audio is raw PCM (normalised in forward via ÷32768); f32/f16 audio is
         # assumed pre-normalised to [-1, 1], so the in-graph division is skipped.
         self.input_audio_is_int16 = (INPUT_AUDIO_DTYPE == "INT16")
-        self.cmvn_mean = self.dolphin.encoder.global_cmvn.mean.float()
-        self.inv_std = (1.0 / self.dolphin.encoder.global_cmvn.std).float()
+        if self.input_audio_is_int16:
+            # 2^-15 is exact in float32.  Folding it into the immutable DFT kernel removes a
+            # full-audio Mul while preserving the Conv accumulation bit-for-bit on this model.
+            self.stft_model.stft_kernel.mul_(self.inv_int16)
+        self.register_buffer('cmvn_mean', self.encoder.global_cmvn.mean.float().clone())
+        self.register_buffer('inv_std', (1.0 / self.encoder.global_cmvn.std).float().clone())
+        del self.encoder.global_cmvn
 
-        # Encoder components (keeping your original structure)
-        self.zero_pad = torch.zeros((self.dolphin.encoder.encoders._modules['0'].attn.h, 2048, 1), dtype=torch.int8)
         self.save_en_keys = [None] * num_layers_de
         self.save_en_values = [None] * num_layers_de
-        self.embed = self.dolphin.encoder.embed.out[0]
-        self.position_encode = self.dolphin.encoder.embed.pos_enc
-        self.embed.weight.data *= self.position_encode.xscale
-        self.embed.bias.data *= self.position_encode.xscale
-        self.position_encode_pe_half = self.position_encode.pe.size(1) // 2
-        # Pre-compute the full symmetric rel-pos table once; forward only slices+casts the needed window.
-        self.position_encode_pe = self.position_encode.pe.half()
-        self.num_heads = self.dolphin.encoder.encoders._modules['0'].attn.h
-        self.head_dim = self.dolphin.encoder.encoders._modules['0'].attn.d_k
+        self.embed = self.encoder.embed.out[0]
+        position_encode = self.encoder.embed.pos_enc
+        self.embed.weight.data *= position_encode.xscale
+        self.embed.bias.data *= position_encode.xscale
+        self.num_heads = self.encoder.encoders._modules['0'].attn.h
+        self.head_dim = self.encoder.encoders._modules['0'].attn.d_k
         self.hidden_size = self.embed.out_features
-        self.cross_num_heads = self.dolphin.decoder.decoders._modules['0'].src_attn.h
-        self.cross_head_dim = self.dolphin.decoder.decoders._modules['0'].src_attn.d_k
-        self._fuse_weights()
-        # Pre-apply linear_pos + view + permute once per layer over the full pe; forward slices all layers then gathers.
-        pe_full = self.position_encode_pe.float()
-        self.pos_p = torch.stack([encoder_layer.attn.linear_pos(pe_full).view(-1, self.num_heads, self.head_dim).permute(1, 2, 0)
-                                  for encoder_layer in self.dolphin.encoder.encoders], dim=0).half()
+        self.cross_num_heads = source_decoder_layers[0].src_attn.h
+        self.cross_head_dim = source_decoder_layers[0].src_attn.d_k
 
-    def _fuse_weights(self):
+        # Bound the relative-position table by the declared maximum audio length.  The original
+        # 9,999-position projection was 184,301,568 bytes; 30 seconds reaches only 749 encoder
+        # frames, so the complete required symmetric table has 1,497 positions.
+        max_embed_len = int(max_audio_length)
+        if getattr(self.stft_model, '_center_pad', False):
+            max_embed_len = max_embed_len // self.stft_model.hop_len + 1
+        else:
+            max_embed_len = (
+                max_embed_len - self.stft_model.n_fft
+            ) // self.stft_model.hop_len + 1
+        for module in self.encoder.embed.conv:
+            if isinstance(module, torch.nn.Conv2d):
+                kernel = module.kernel_size[0]
+                stride = module.stride[0]
+                padding = module.padding[0]
+                dilation = module.dilation[0]
+                max_embed_len = (
+                    max_embed_len + 2 * padding - dilation * (kernel - 1) - 1
+                ) // stride + 1
+        full_position_half = position_encode.pe.size(1) // 2
+        self.max_embed_len = max_embed_len
+        self.position_encode_pe_half = max_embed_len - 1
+        self.register_buffer(
+            'zero_pad',
+            torch.zeros((self.num_heads, max_embed_len, 1), dtype=torch.float32),
+        )
+
+        self._fuse_weights(source_decoder_layers)
+        pe_full = position_encode.pe[
+            :,
+            full_position_half - max_embed_len + 1:
+            full_position_half + max_embed_len,
+        ].to(KV_DTYPE).float()
+        pos_p = torch.stack([
+            encoder_layer.attn.linear_pos(pe_full)
+            .view(-1, self.num_heads, self.head_dim)
+            .permute(1, 2, 0)
+            for encoder_layer in self.encoder.encoders
+        ], dim=0).to(KV_DTYPE)
+        self.register_buffer('pos_p', pos_p)
+        # These construction-only modules/tables are no longer reachable from forward().
+        del self.encoder.embed.out
+        del self.encoder.embed.pos_enc
+
+    def _fuse_weights(self, source_decoder_layers):
         with torch.no_grad():
             scale = float(self.head_dim ** -0.25)
-            for encoder_layer in self.dolphin.encoder.encoders:
+            folded_norms = []
+            for encoder_layer in self.encoder.encoders:
                 attn = encoder_layer.attn
                 out_features = attn.linear_q.out_features
                 qkv = torch.nn.Linear(attn.linear_q.in_features, out_features * 3, bias=True)
@@ -492,6 +566,12 @@ class DOLPHIN_ENCODER(torch.nn.Module):
                 fold_norm_into_linear(encoder_layer.norm_ff_macaron, encoder_layer.feed_forward_macaron.w_1)
                 fold_norm_into_linear(encoder_layer.norm_ff, encoder_layer.feed_forward.w_1)
                 fold_norm_into_linear(encoder_layer.norm_mlp, encoder_layer.cgmlp.channel_proj1[0])
+                folded_norms.extend((
+                    encoder_layer.norm_ff_macaron,
+                    encoder_layer.norm_mha,
+                    encoder_layer.norm_mlp,
+                    encoder_layer.norm_ff,
+                ))
                 # Absorb the encoder's residual FFN scale into both output projections.
                 encoder_layer.feed_forward_macaron.w_2.weight.data.mul_(encoder_layer.ff_scale)
                 encoder_layer.feed_forward_macaron.w_2.bias.data.mul_(encoder_layer.ff_scale)
@@ -499,33 +579,83 @@ class DOLPHIN_ENCODER(torch.nn.Module):
                 encoder_layer.feed_forward.w_2.bias.data.mul_(encoder_layer.ff_scale)
                 encoder_layer.ff_scale = 1.0
 
+                # depthwise_conv_fusion(x) + x is another depthwise convolution whose centre
+                # coefficient is incremented by one.  This removes one full [T, 2H] Add.
+                fusion = encoder_layer.depthwise_conv_fusion
+                kernel = fusion.kernel_size[0]
+                centre = kernel // 2
+                fusion.weight.data[:, 0, centre].add_(1.0)
+
             cross_scale = float(self.cross_head_dim ** -0.25)
             # Snapshot after_norm gamma/beta ONCE: it folds into EVERY cross-attn kv, so we must not let the
             # helper zero it on the first layer (that would leave layers 1+ with gamma1/beta0 = garbage).
-            after_gamma = self.dolphin.encoder.after_norm.weight.data.clone()
-            after_beta = self.dolphin.encoder.after_norm.bias.data.clone()
-            for decoder_layer in self.dolphin.decoder.decoders:
-                cross_attn = decoder_layer.src_attn
-                out_features = cross_attn.linear_k.out_features
-                kv = torch.nn.Linear(cross_attn.linear_k.in_features, out_features * 2, bias=True)
-                kv.weight.copy_(torch.cat([cross_attn.linear_k.weight, cross_attn.linear_v.weight], dim=0))
-                kv.bias.copy_(torch.cat([_bias_or_zero(cross_attn.linear_k), _bias_or_zero(cross_attn.linear_v)], dim=0))
-                kv.weight.data[:out_features].mul_(cross_scale)
-                kv.bias.data[:out_features].mul_(cross_scale)
-                # Absorb the encoder's after_norm affine into every cross-attn kv (enc_outputs = after_norm(x)).
-                kv.bias.data.add_(kv.weight.data @ after_beta)
-                kv.weight.data.mul_(after_gamma.unsqueeze(0))
-                cross_attn.kv = kv
-                del cross_attn.linear_k, cross_attn.linear_v
+            after_gamma = self.encoder.after_norm.weight.data.clone()
+            after_beta = self.encoder.after_norm.bias.data.clone()
+            self.cross_kv_groups = torch.nn.ModuleList()
+            self.cross_kv_group_counts = []
+            for group_start in range(0, len(source_decoder_layers), self.cross_kv_group_size):
+                group_layers = source_decoder_layers[
+                    group_start:group_start + self.cross_kv_group_size
+                ]
+                group_weights = []
+                group_biases = []
+                for decoder_layer in group_layers:
+                    cross_attn = decoder_layer.src_attn
+                    out_features = cross_attn.linear_k.out_features
+                    kv_weight = torch.cat([
+                        cross_attn.linear_k.weight,
+                        cross_attn.linear_v.weight,
+                    ], dim=0).detach().clone()
+                    kv_bias = torch.cat([
+                        _bias_or_zero(cross_attn.linear_k),
+                        _bias_or_zero(cross_attn.linear_v),
+                    ], dim=0).detach().clone()
+                    kv_weight[:out_features].mul_(cross_scale)
+                    kv_bias[:out_features].mul_(cross_scale)
+                    kv_bias.add_(kv_weight @ after_beta)
+                    kv_weight.mul_(after_gamma.unsqueeze(0))
+                    group_weights.append(kv_weight)
+                    group_biases.append(kv_bias)
+                grouped_kv = torch.nn.Linear(
+                    group_weights[0].shape[1],
+                    sum(weight.shape[0] for weight in group_weights),
+                    bias=True,
+                )
+                grouped_kv.weight.copy_(torch.cat(group_weights, dim=0))
+                grouped_kv.bias.copy_(torch.cat(group_biases, dim=0))
+                self.cross_kv_groups.append(grouped_kv)
+                self.cross_kv_group_counts.append(len(group_layers))
             # after_norm folded into all kv copies above; collapse it to identity once.
-            self.dolphin.encoder.after_norm.weight.data.fill_(1.0)
-            self.dolphin.encoder.after_norm.bias.data.zero_()
+            self.encoder.after_norm.weight.data.fill_(1.0)
+            self.encoder.after_norm.bias.data.zero_()
+            folded_norms.append(self.encoder.after_norm)
+
+            norm_eps = {float(norm.eps) for norm in folded_norms}
+            self.folded_norm_eps = norm_eps.pop()
+            self.folded_norm_shape = (self.hidden_size,)
+            self.register_buffer(
+                'folded_norm_weight',
+                torch.ones(self.hidden_size, dtype=after_gamma.dtype),
+            )
+            self.register_buffer(
+                'folded_norm_bias',
+                torch.zeros(self.hidden_size, dtype=after_gamma.dtype),
+            )
+
+    def _folded_norm(self, x):
+        return F.layer_norm(
+            x,
+            self.folded_norm_shape,
+            self.folded_norm_weight,
+            self.folded_norm_bias,
+            self.folded_norm_eps,
+        )
 
     def forward(self, audio):
         # Match the reference DefaultFrontend exactly: int16->[-1,1], torch.stft(center=True -> reflect pad),
         # power spectrum, Slaney mel (f_min=0), clamp(1e-10), natural log, then global-CMVN. No DC removal, no pre-emphasis.
         if self.input_audio_is_int16:
-            audio = audio.float() * self.inv_int16
+            audio = audio.float()  # 2^-15 is already folded into stft_kernel.
         else:
             audio = audio.float()
         if self.pre_emphasis > 0:
@@ -533,14 +663,20 @@ class DOLPHIN_ENCODER(torch.nn.Module):
         real_part, imag_part = self.stft_model(audio)
         mel_features = torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2).clamp(min=1e-10).log()
         mel_features = (mel_features - self.cmvn_mean) * self.inv_std
-        embed = self.dolphin.encoder.embed.conv(mel_features.unsqueeze(0))
+        embed = self.encoder.embed.conv(mel_features.unsqueeze(0))
         embed_len = embed.shape[-2].unsqueeze(0)
-        x = self.embed(embed.transpose(1, 2).contiguous().view(1, embed_len, -1))
+        # Batch is contractually one for audio.  Keep the Transformer path as [time, hidden] so
+        # every immutable Linear lowers to one Gemm instead of MatMul + Add.
+        x = self.embed(
+            embed.transpose(1, 2).contiguous().view(-1, self.embed.in_features)
+        )
         pos_p = self.pos_p[:, :, :, self.position_encode_pe_half - embed_len + 1: self.position_encode_pe_half + embed_len].float()
-        for idx, encoder_layer in enumerate(self.dolphin.encoder.encoders):
-            x = x + encoder_layer.feed_forward_macaron(encoder_layer.norm_ff_macaron(x))  # ff_scale(0.5) already folded into macaron w_2
-            x1 = encoder_layer.norm_mha(x)
-            qkv = encoder_layer.attn.qkv(x1).view(-1, 3 * self.num_heads, self.head_dim).transpose(0, 1)
+        for idx, encoder_layer in enumerate(self.encoder.encoders):
+            x = x + encoder_layer.feed_forward_macaron(self._folded_norm(x))  # ff_scale(0.5) already folded into macaron w_2
+            # norm_mha and norm_mlp are now the same affine-free LayerNorm.  Preserve the
+            # normalized [T,H] tensor until the cgMLP branch consumes it instead of reducing twice.
+            branch_norm = self._folded_norm(x)
+            qkv = encoder_layer.attn.qkv(branch_norm).view(-1, 3 * self.num_heads, self.head_dim).transpose(0, 1)
             q, k, v = qkv.split(self.num_heads, dim=0)
             p = pos_p[idx]
             q_with_bias_u = q + encoder_layer.attn.pos_bias_u
@@ -549,22 +685,42 @@ class DOLPHIN_ENCODER(torch.nn.Module):
             matrix_bd = torch.matmul(q_with_bias_v, p)
             matrix_bd = rel_shift(matrix_bd, embed_len, self.zero_pad, encoder_layer.attn.h)
             x1 = torch.matmul(torch.softmax(matrix_ac + matrix_bd, dim=-1), v)
-            x1 = encoder_layer.attn.linear_out(x1.transpose(0, 1).reshape(1, -1, self.hidden_size))
-            x2 = encoder_layer.cgmlp.channel_proj1(encoder_layer.norm_mlp(x))
-            x_r, x_g = x2.chunk(2, dim=-1)
-            x_g = encoder_layer.cgmlp.csgu.conv(encoder_layer.cgmlp.csgu.norm(x_g).transpose(1, 2)).transpose(1, 2)
+            x1 = encoder_layer.attn.linear_out(
+                x1.transpose(0, 1).reshape(-1, self.hidden_size)
+            )
+            x2 = encoder_layer.cgmlp.channel_proj1[0](branch_norm)
+            x2 = encoder_layer.cgmlp.channel_proj1[1](x2)
+            split_size = encoder_layer.cgmlp.channel_proj1[0].out_features // 2
+            x_r, x_g = torch.split(x2, [split_size, split_size], dim=-1)
+            x_g = encoder_layer.cgmlp.csgu.conv(
+                encoder_layer.cgmlp.csgu.norm(x_g).transpose(0, 1)
+            ).transpose(0, 1)
             x2 = encoder_layer.cgmlp.channel_proj2(x_r * x_g)
             x_concat = torch.cat([x1, x2], dim=-1)
-            x_concat = x_concat + encoder_layer.depthwise_conv_fusion(x_concat.transpose(1, 2)).transpose(1, 2)
+            x_concat = encoder_layer.depthwise_conv_fusion(
+                x_concat.transpose(0, 1)
+            ).transpose(0, 1)
             x = x + encoder_layer.merge_proj(x_concat)
-            x = x + encoder_layer.feed_forward(encoder_layer.norm_ff(x))  # ff_scale(0.5) already folded into ff w_2
+            x = x + encoder_layer.feed_forward(self._folded_norm(x))  # ff_scale(0.5) already folded into ff w_2
             x = encoder_layer.norm_final(x)
-        enc_outputs = self.dolphin.encoder.after_norm(x)
-        for idx, decoder_layer in enumerate(self.dolphin.decoder.decoders):
-            cross_kv = decoder_layer.src_attn.kv(enc_outputs).half().view(-1, 2 * self.cross_num_heads, self.cross_head_dim).transpose(0, 1)
-            k, v = cross_kv.split(self.cross_num_heads, dim=0)
-            self.save_en_keys[idx] = k.transpose(1, 2)       # f16 cross-attention key   (num_heads, head_dim, T)
-            self.save_en_values[idx] = v                     # f16 cross-attention value (num_heads, T, head_dim)
+        enc_outputs = self._folded_norm(x)
+        output_index = 0
+        for grouped_kv, layer_count in zip(
+            self.cross_kv_groups,
+            self.cross_kv_group_counts,
+        ):
+            cross_kv = grouped_kv(enc_outputs).to(KV_DTYPE).view(
+                -1,
+                2 * layer_count * self.cross_num_heads,
+                self.cross_head_dim,
+            ).transpose(0, 1)
+            projected = torch.split(cross_kv, self.cross_num_heads, dim=0)
+            for local_index in range(layer_count):
+                k = projected[2 * local_index]
+                v = projected[2 * local_index + 1]
+                self.save_en_keys[output_index] = k.transpose(1, 2)  # f16 key   (heads, dim, T)
+                self.save_en_values[output_index] = v                # f16 value (heads, T, dim)
+                output_index += 1
         return *self.save_en_keys, *self.save_en_values
 
 
@@ -574,10 +730,9 @@ class DOLPHIN_DECODER_EMBED(torch.nn.Module):
     # weight here (the absolute position embedding itself is added inside the decoder main graph).
     def __init__(self, dolphin):
         super(DOLPHIN_DECODER_EMBED, self).__init__()
-        self.dolphin = copy.deepcopy(dolphin.s2t_model)
-        self.embed = self.dolphin.decoder.embed[0]
-        self.position_encode = self.dolphin.decoder.embed[1]
-        self.embed.weight.data *= self.position_encode.xscale
+        source_decoder = dolphin.s2t_model.decoder
+        self.embed = copy.deepcopy(source_decoder.embed[0])
+        self.embed.weight.data *= source_decoder.embed[1].xscale
 
     def forward(self, input_ids):
         return self.embed(input_ids)
@@ -589,14 +744,22 @@ class DOLPHIN_PREFILL(torch.nn.Module):
     # main graph stays integer-free.
     def __init__(self, dolphin, max_seq_len):
         super(DOLPHIN_PREFILL, self).__init__()
-        position_encode = copy.deepcopy(dolphin.s2t_model.decoder.embed[1])
-        self.register_buffer('position_weight', position_encode.pe[:, :max_seq_len].half())
-        self.register_buffer('attention_mask', (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128)
+        position_encode = dolphin.s2t_model.decoder.embed[1]
+        self.register_buffer(
+            'position_weight',
+            position_encode.pe[:, :max_seq_len].to(KV_DTYPE).clone(),
+        )
+        self.register_buffer(
+            'attention_mask',
+            ((1 - torch.tril(torch.ones(
+                [1, max_seq_len, max_seq_len], dtype=torch.int8
+            ))) * -128).to(KV_DTYPE),
+        )
 
     def forward(self, ids_len, history_len):
         kv_seq_len = history_len + ids_len
         position_embed = self.position_weight[:, history_len: kv_seq_len].float()
-        attention_mask = self.attention_mask[:, :ids_len, :kv_seq_len].half()   # f16 mask matches the minimum-cast f16 attention scores
+        attention_mask = self.attention_mask[:, :ids_len, :kv_seq_len]
         return position_embed, attention_mask, kv_seq_len
 
 
@@ -606,8 +769,11 @@ class DOLPHIN_DECODE(torch.nn.Module):
     # as a static buffer at runtime and no mask is produced here.
     def __init__(self, dolphin, max_seq_len):
         super(DOLPHIN_DECODE, self).__init__()
-        position_encode = copy.deepcopy(dolphin.s2t_model.decoder.embed[1])
-        self.register_buffer('position_weight', position_encode.pe[:, :max_seq_len].half())
+        position_encode = dolphin.s2t_model.decoder.embed[1]
+        self.register_buffer(
+            'position_weight',
+            position_encode.pe[:, :max_seq_len].to(KV_DTYPE).clone(),
+        )
 
     def forward(self, kv_seq_len):
         kv_seq_len_next = kv_seq_len + 1
@@ -618,27 +784,37 @@ class DOLPHIN_DECODE(torch.nn.Module):
 class DOLPHIN_DECODER(torch.nn.Module):
     def __init__(self, dolphin, num_layers_de):
         super(DOLPHIN_DECODER, self).__init__()
-        self.dolphin = copy.deepcopy(dolphin.s2t_model)
+        source_decoder = dolphin.s2t_model.decoder
+        # Embed is exported separately.  Copy only the decoder layers, final norm, and vocabulary
+        # projection instead of duplicating the entire ASR model (including its encoder and embed table).
+        self.layers = copy.deepcopy(source_decoder.decoders)
+        self.after_norm = copy.deepcopy(source_decoder.after_norm)
+        self.output_layer = copy.deepcopy(source_decoder.output_layer)
         self.num_layers_de = num_layers_de
-        self.compute_in_f32 = COMPUTE_IN_F32
+        self.compute_in_f32 = not USE_FP16_KV or COMPUTE_IN_F32
         self.idx_en_key = num_layers_de + num_layers_de         # en cross-attn keys start (2 * L)
         self.idx_en_value = self.idx_en_key + num_layers_de     # en cross-attn values start (3 * L)
         self.idx_hidden = self.idx_en_value + num_layers_de     # token-embedding input (4 * L)
         self.idx_position = self.idx_hidden + 1                 # position-embedding input (4 * L + 1)
         self.save_de_keys = [None] * num_layers_de
         self.save_de_values = [None] * num_layers_de
-        self.num_heads = self.dolphin.decoder.decoders._modules['0'].self_attn.h
-        self.head_dim = self.dolphin.decoder.decoders._modules['0'].self_attn.d_k
-        self.hidden_size = self.dolphin.decoder.output_layer.in_features
-        self.cross_num_heads = self.dolphin.decoder.decoders._modules['0'].src_attn.h
-        self.cross_head_dim = self.dolphin.decoder.decoders._modules['0'].src_attn.d_k
+        self.num_heads = self.layers._modules['0'].self_attn.h
+        self.head_dim = self.layers._modules['0'].self_attn.d_k
+        self.hidden_size = self.output_layer.in_features
+        self.cross_num_heads = self.layers._modules['0'].src_attn.h
+        self.cross_head_dim = self.layers._modules['0'].src_attn.d_k
         self._fuse_weights()
+        if REORDER_DOWNPROJ_FOR_QUANT:
+            self._reorder_downproj_for_quant(REORDER_KEY)
+        if REORDER_OPROJ_FOR_QUANT:
+            self._reorder_oproj_for_quant(REORDER_KEY)
 
     def _fuse_weights(self):
         with torch.no_grad():
             scale = float(self.head_dim ** -0.25)
             cross_scale = float(self.cross_head_dim ** -0.25)
-            for decoder_layer in self.dolphin.decoder.decoders:
+            folded_norms = []
+            for decoder_layer in self.layers:
                 attn = decoder_layer.self_attn
                 out_features = attn.linear_q.out_features
                 qkv = torch.nn.Linear(attn.linear_q.in_features, out_features * 3, bias=True)
@@ -657,8 +833,96 @@ class DOLPHIN_DECODER(torch.nn.Module):
                 fold_norm_into_linear(decoder_layer.norm1, qkv)
                 fold_norm_into_linear(decoder_layer.norm2, cross_attn.linear_q)
                 fold_norm_into_linear(decoder_layer.norm3, decoder_layer.feed_forward.w_1)
+                folded_norms.extend((decoder_layer.norm1, decoder_layer.norm2, decoder_layer.norm3))
             # Absorb the decoder's final after_norm into the output projection.
-            fold_norm_into_linear(self.dolphin.decoder.after_norm, self.dolphin.decoder.output_layer)
+            fold_norm_into_linear(self.after_norm, self.output_layer)
+            folded_norms.append(self.after_norm)
+            norm_eps = {float(norm.eps) for norm in folded_norms}
+            self.folded_norm_eps = norm_eps.pop()
+            self.folded_norm_shape = (self.hidden_size,)
+            self.register_buffer(
+                'folded_norm_weight',
+                torch.ones(self.hidden_size, dtype=self.output_layer.weight.dtype),
+            )
+            self.register_buffer(
+                'folded_norm_bias',
+                torch.zeros(self.hidden_size, dtype=self.output_layer.weight.dtype),
+            )
+
+    def _folded_norm(self, x):
+        return F.layer_norm(
+            x,
+            self.folded_norm_shape,
+            self.folded_norm_weight,
+            self.folded_norm_bias,
+            self.folded_norm_eps,
+        )
+
+    @staticmethod
+    def _channel_stat(weight, key, dims):
+        absolute = weight.abs()
+        if key == "rms":
+            return (weight * weight).mean(dim=dims).sqrt()
+        if key == "L4":
+            return absolute.pow(4).mean(dim=dims).pow(0.25)
+        if key == "std":
+            if isinstance(dims, tuple):
+                return weight.reshape(-1, weight.shape[-1]).std(0)
+            return weight.std(dim=dims)
+        if key != "absmean":
+            raise ValueError(f"Unsupported REORDER_KEY: {key!r}")
+        return absolute.mean(dim=dims)
+
+    def _reorder_downproj_for_quant(self, key):
+        """Permute each FFN w_1 output and its matching w_2 input column."""
+        with torch.no_grad():
+            for decoder_layer in self.layers:
+                w_1 = decoder_layer.feed_forward.w_1
+                w_2 = decoder_layer.feed_forward.w_2
+                permutation = torch.argsort(self._channel_stat(w_2.weight, key, 0))
+                w_1.weight.copy_(w_1.weight[permutation])
+                if w_1.bias is not None:
+                    w_1.bias.copy_(w_1.bias[permutation])
+                w_2.weight.copy_(w_2.weight[:, permutation])
+
+    def _reorder_oproj_for_quant(self, key):
+        """Permute self-attention V rows and matching linear_out columns per head."""
+        with torch.no_grad():
+            for decoder_layer in self.layers:
+                attention = decoder_layer.self_attn
+                output_weight = attention.linear_out.weight
+                qkv = attention.qkv
+                output_by_head = output_weight.view(
+                    output_weight.shape[0], self.num_heads, self.head_dim
+                )
+                permutations = [
+                    torch.argsort(self._channel_stat(output_by_head[:, head], key, 0))
+                    for head in range(self.num_heads)
+                ]
+                reordered_output = output_by_head.clone()
+                for head, permutation in enumerate(permutations):
+                    reordered_output[:, head] = output_by_head[:, head, permutation]
+                output_weight.copy_(reordered_output.reshape_as(output_weight))
+
+                value_weight = qkv.weight[2 * self.hidden_size:].view(
+                    self.num_heads, self.head_dim, qkv.in_features
+                )
+                reordered_value_weight = value_weight.clone()
+                for head, permutation in enumerate(permutations):
+                    reordered_value_weight[head] = value_weight[head, permutation]
+                qkv.weight[2 * self.hidden_size:].copy_(
+                    reordered_value_weight.reshape(self.hidden_size, qkv.in_features)
+                )
+                if qkv.bias is not None:
+                    value_bias = qkv.bias[2 * self.hidden_size:].view(
+                        self.num_heads, self.head_dim
+                    )
+                    reordered_value_bias = value_bias.clone()
+                    for head, permutation in enumerate(permutations):
+                        reordered_value_bias[head] = value_bias[head, permutation]
+                    qkv.bias[2 * self.hidden_size:].copy_(
+                        reordered_value_bias.reshape(self.hidden_size)
+                    )
 
     def forward(self, *all_inputs):
         # Pure float graph: token embedding + position embedding are produced by the separate Embed / Prefill /
@@ -669,8 +933,8 @@ class DOLPHIN_DECODER(torch.nn.Module):
         # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
         # dtype unchanged) and upcast to f32 ONCE here, shared by every layer. Minimum-cast path uses it as-is (f16).
         attn_mask = attention_mask.float() if self.compute_in_f32 else attention_mask
-        for idx, decoder_layer in enumerate(self.dolphin.decoder.decoders):
-            hidden_states_norm = decoder_layer.norm1(hidden_states)
+        for idx, decoder_layer in enumerate(self.layers):
+            hidden_states_norm = self._folded_norm(hidden_states)
             # Self-attention. OFF (minimum-cast): cast the fused QKV DOWN to f16 before the split so
             # Q@K/mask/softmax/attn@V run in f16 on the f16 K/V cache; the context is cast back to f32 for linear_out.
             # ON (COMPUTE_IN_F32): keep the f16 K/V *storage* (K/V still cast to f16 before the cache concat, so
@@ -682,8 +946,8 @@ class DOLPHIN_DECODER(torch.nn.Module):
             qkv = qkv.view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
             q, k, v = qkv.split(self.num_heads, dim=1)
             if self.compute_in_f32:
-                k = k.half()   # f16 K storage (no-op in the minimum-cast path: qkv is already f16)
-                v = v.half()   # f16 V storage
+                k = k.to(KV_DTYPE)
+                v = v.to(KV_DTYPE)
             k = torch.cat((all_inputs[idx], k.transpose(-1, -2)), dim=-1)           # f16 key cache   (batch, num_heads, head_dim, kv_seq_len)
             v = torch.cat((all_inputs[idx + self.num_layers_de], v), dim=-2)       # f16 value cache (batch, num_heads, kv_seq_len, head_dim)
             self.save_de_keys[idx] = k
@@ -697,7 +961,7 @@ class DOLPHIN_DECODER(torch.nn.Module):
             # Cross-attention against the f16 encoder cross-KV cache. OFF: downcast Q to f16 and run in f16 on the
             # f16 cross cache, context back to f32. ON: keep Q in f32 and upcast the f16 cross K/V to f32 at the
             # matmul use points (the cross cache is produced f16 by the encoder; its I/O dtype is unchanged).
-            q = decoder_layer.src_attn.linear_q(decoder_layer.norm2(hidden_state_attn)).view(batch_size, -1, self.cross_num_heads, self.cross_head_dim).transpose(1, 2)
+            q = decoder_layer.src_attn.linear_q(self._folded_norm(hidden_state_attn)).view(batch_size, -1, self.cross_num_heads, self.cross_head_dim).transpose(1, 2)
             if self.compute_in_f32:
                 hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q, all_inputs[idx + self.idx_en_key].float()), dim=-1), all_inputs[idx + self.idx_en_value].float())
                 hidden_state_cross = decoder_layer.src_attn.linear_out(hidden_state_cross.transpose(1, 2).reshape(batch_size, -1, self.hidden_size))
@@ -705,9 +969,9 @@ class DOLPHIN_DECODER(torch.nn.Module):
                 hidden_state_cross = torch.matmul(torch.softmax(torch.matmul(q.half(), all_inputs[idx + self.idx_en_key]), dim=-1), all_inputs[idx + self.idx_en_value])
                 hidden_state_cross = decoder_layer.src_attn.linear_out(hidden_state_cross.transpose(1, 2).reshape(batch_size, -1, self.hidden_size).float())
             hidden_state_cross += hidden_state_attn
-            hidden_states = hidden_state_cross + decoder_layer.feed_forward(decoder_layer.norm3(hidden_state_cross))
-        hidden_states = self.dolphin.decoder.after_norm(hidden_states[:, -1])
-        logits = self.dolphin.decoder.output_layer(hidden_states)
+            hidden_states = hidden_state_cross + decoder_layer.feed_forward(self._folded_norm(hidden_state_cross))
+        hidden_states = self._folded_norm(hidden_states[:, -1])
+        logits = self.output_layer(hidden_states)
         return *self.save_de_keys, *self.save_de_values, logits
 
 
@@ -715,6 +979,13 @@ def build_model_metadata(*sections):
     def _norm(value):
         if isinstance(value, bool):
             return "1" if value else "0"
+        if isinstance(value, (dict, list)):
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         return str(value)
 
     merged = {}
@@ -725,20 +996,87 @@ def build_model_metadata(*sections):
     return merged
 
 
-def write_onnx_metadata(onnx_path, metadata):
+def build_v1_supported_languages(token_to_id, special_token_ids):
+    """Group configured aliases and resolve every prompt against units.txt."""
+    aliases_by_value = {}
+    for alias, model_value in LANGUAGE_REGION.items():
+        aliases_by_value.setdefault(model_value, []).append(alias)
+    aliases_by_value.setdefault("auto-auto", [])
+    # Uighur also has a trained unknown-region combination in the model token
+    # table, in addition to the public alias map's preferred ug-CN spelling.
+    if "<ug>" in token_to_id and "<NULL>" in token_to_id:
+        aliases_by_value.setdefault("ug-NULL", [])
+
+    catalog = {}
+    required_languages = set()
+    required_regions = set()
+    for model_value in aliases_by_value:
+        language, _, region = model_value.partition("-")
+        if model_value != "auto-auto":
+            required_languages.add(language)
+        if region != "auto":
+            required_regions.add(region)
+
+    language_start = special_token_ids["asr"] + 1
+    region_start = None
+    for token_id in range(language_start, special_token_ids["notimestamp"]):
+        token = next(
+            (piece for piece, value in token_to_id.items() if value == token_id),
+            None,
+        )
+        body = token[1:-1]
+        if body.upper() == body and body.lower() != body:
+            region_start = token_id
+            break
+    language_end = region_start
+    region_end = special_token_ids["notimestamp"]
+
+    for model_value, aliases in aliases_by_value.items():
+        language, region = model_value.split("-", 1)
+        if model_value == "auto-auto":
+            prompt_token_ids = []
+        else:
+            language_id = token_to_id[f"<{language}>"]
+            if region == "auto":
+                prompt_token_ids = [language_id]
+            else:
+                region_id = token_to_id[f"<{region}>"]
+                prompt_token_ids = [
+                    language_id,
+                    region_id,
+                    special_token_ids["asr"],
+                    special_token_ids["notimestamp"],
+                ]
+        catalog[model_value] = {
+            "name": model_value,
+            "aliases": sorted(set(aliases), key=str.casefold),
+            "prompt_token_ids": prompt_token_ids,
+        }
+    return catalog, (language_start, language_end, region_start, region_end)
+
+
+def write_onnx_metadata(onnx_path, metadata, *, replace=True):
     import onnx
     model = onnx.load(onnx_path, load_external_data=False)
-    existing = {prop.key: prop for prop in model.metadata_props}
-    for key, value in metadata.items():
-        if key in existing:
-            existing[key].value = value
-        else:
-            model.metadata_props.add(key=key, value=value)
+    values = {} if replace else {prop.key: prop.value for prop in model.metadata_props}
+    values.update({str(key): str(value) for key, value in metadata.items()})
+    del model.metadata_props[:]
+    for key in sorted(values):
+        model.metadata_props.add(key=key, value=values[key])
     onnx.save(model, onnx_path)
+
+
+def write_metadata_carrier(onnx_path, metadata):
+    write_onnx_metadata(
+        onnx_path,
+        {str(key): str(value) for key, value in metadata.items()},
+        replace=True,
+    )
 
 
 print('\nExport start...\n')
 with torch.inference_mode():
+    _raw_onnx_dir.mkdir(parents=True, exist_ok=True)
     if 'small' in model_path.lower():
         model_size = 'small'
     else:
@@ -762,7 +1100,7 @@ with torch.inference_mode():
     # Copy the SentencePiece bpe.model next to the exported vocab so the ONNX folder is
     # self-contained and Inference_Dolphin_ONNX.py no longer needs the original model_path.
     src_bpe_model = os.path.join(model_path, "bpe.model")
-    dst_bpe_model = os.path.join(onnx_folder, "bpe.model")
+    dst_bpe_model = str(_raw_onnx_dir / "bpe.model")
     if os.path.exists(src_bpe_model):
         shutil.copyfile(src_bpe_model, dst_bpe_model)
         print(f"Copied bpe.model -> {dst_bpe_model}")
@@ -771,19 +1109,26 @@ with torch.inference_mode():
     HIDDEN_SIZE = model.s2t_model.decoder.output_layer.in_features
     NUM_HEAD_EN = model.s2t_model.encoder.encoders._modules['0'].attn.h
     NUM_HEAD_DE = model.s2t_model.decoder.decoders._modules['0'].self_attn.h
-    HEAD_DIM_EN = model.s2t_model.encoder.encoders._modules['0'].attn.d_k
     HEAD_DIM_DE = model.s2t_model.decoder.decoders._modules['0'].self_attn.d_k
     NUM_LAYER_DE = len(model.s2t_model.decoder.decoders)
     VOCAB_SIZE = model.s2t_model.vocab_size
-    CROSS_NUM_HEAD_DE = model.s2t_model.decoder.decoders._modules['0'].src_attn.h
-    CROSS_HEAD_DIM_DE = model.s2t_model.decoder.decoders._modules['0'].src_attn.d_k
-    STFT_SIGNAL_LENGTH = INPUT_AUDIO_LENGTH // HOP_LENGTH + 1
+    STFT_SIGNAL_LENGTH = _MODEL_MAX_AUDIO_SAMPLES // HOP_LENGTH + 1
 
     custom_stft = STFT_Process(model_type='stft_B', n_fft=NFFT_STFT, hop_len=HOP_LENGTH, win_length=WINDOW_LENGTH, max_frames=0, window_type=WINDOW_TYPE, pad_mode='reflect', center_pad=True).eval()  # The max_frames is not the key parameter for STFT, but it is for ISTFT.
-    dolphin_encoder = DOLPHIN_ENCODER(model, custom_stft, NFFT_STFT, N_MELS, SAMPLE_RATE, PRE_EMPHASIZE, NUM_LAYER_DE)
+    dolphin_encoder = DOLPHIN_ENCODER(
+        model,
+        custom_stft,
+        NFFT_STFT,
+        N_MELS,
+        SAMPLE_RATE,
+        PRE_EMPHASIZE,
+        NUM_LAYER_DE,
+        _MODEL_MAX_AUDIO_SAMPLES,
+        CROSS_KV_GROUP_SIZE,
+    )
     output_names = []
     _audio_export_dtype = {"INT16": torch.int16, "F32": torch.float32, "F16": torch.float16}[INPUT_AUDIO_DTYPE]
-    audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=_audio_export_dtype)
+    audio = torch.ones((1, 1, _MODEL_MAX_AUDIO_SAMPLES), dtype=_audio_export_dtype)
     dynamic_axes = {'audio': {2: 'audio_len'}}
     for i in range(NUM_LAYER_DE):
         name = f'en_key_layer_{i}'
@@ -832,7 +1177,7 @@ with torch.inference_mode():
     del embed_input_ids
 
     # ── Prefill position-embedding + causal-mask graph ──
-    dolphin_prefill = DOLPHIN_PREFILL(model, MAX_SEQ_LEN)
+    dolphin_prefill = DOLPHIN_PREFILL(model, _MODEL_MAX_DECODER_SEQ_LEN)
     prefill_ids_len = torch.tensor([5], dtype=torch.int64)
     prefill_history_len = torch.tensor([0], dtype=torch.int64)
     torch.onnx.export(
@@ -853,7 +1198,7 @@ with torch.inference_mode():
     del prefill_history_len
 
     # ── Decode position-embedding graph for the single new token ──
-    dolphin_decode = DOLPHIN_DECODE(model, MAX_SEQ_LEN)
+    dolphin_decode = DOLPHIN_DECODE(model, _MODEL_MAX_DECODER_SEQ_LEN)
     decode_kv_seq_len = torch.tensor([5], dtype=torch.int64)
     torch.onnx.export(
         dolphin_decode,
@@ -871,14 +1216,14 @@ with torch.inference_mode():
 
     # ── Decoder main graph (pure float: token + position embeddings and the mask arrive as inputs) ──
     dolphin_decoder = DOLPHIN_DECODER(model, NUM_LAYER_DE)
-    save_encoder_key = torch.zeros((NUM_HEAD_DE, HEAD_DIM_DE, STFT_SIGNAL_LENGTH // 2 + 1), dtype=torch.float16)
-    save_encoder_value = torch.zeros((NUM_HEAD_DE, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_DE), dtype=torch.float16)
+    save_encoder_key = torch.zeros((NUM_HEAD_DE, HEAD_DIM_DE, STFT_SIGNAL_LENGTH // 2 + 1), dtype=KV_DTYPE)
+    save_encoder_value = torch.zeros((NUM_HEAD_DE, STFT_SIGNAL_LENGTH // 2 + 1, HEAD_DIM_DE), dtype=KV_DTYPE)
     batch_size = 3  # Dummy batch value for the export trace.
-    past_key_de = torch.zeros((batch_size, NUM_HEAD_DE, HEAD_DIM_DE, 0), dtype=torch.float16)
-    past_value_de = torch.zeros((batch_size, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=torch.float16)
+    past_key_de = torch.zeros((batch_size, NUM_HEAD_DE, HEAD_DIM_DE, 0), dtype=KV_DTYPE)
+    past_value_de = torch.zeros((batch_size, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=KV_DTYPE)
     hidden_states_de = torch.ones((batch_size, 1, HIDDEN_SIZE), dtype=torch.float32)
     position_embed_de = torch.ones((1, 1, HIDDEN_SIZE), dtype=torch.float32)
-    attention_mask = torch.zeros((1, 1, 1), dtype=torch.float16)   # f16 mask matches the minimum-cast f16 attention scores
+    attention_mask = torch.zeros((1, 1, 1), dtype=KV_DTYPE)
 
     input_names = []
     all_inputs = []
@@ -947,15 +1292,13 @@ with torch.inference_mode():
     del output_names
     del dynamic_axes
     
-    beam_size = torch.tensor([BEAM_SIZE], dtype=torch.int64)
-    topK = torch.tensor([TOP_K], dtype=torch.int64)
-    logits = torch.ones((BEAM_SIZE, VOCAB_SIZE), dtype=torch.float32)
-    save_id = torch.zeros((BEAM_SIZE, 10), dtype=torch.int32)            # 10 = dummy history length
-    previous_prob = torch.zeros((BEAM_SIZE, 1), dtype=torch.float32)
-    penality_value = torch.tensor([REPEAT_PENALITY], dtype=torch.float32)
-    penality_range = torch.tensor([PENALITY_RANGE], dtype=torch.int64)
+    # Trace-only values for dynamic selection and direct-penalty inputs.
+    logits = torch.ones((1, VOCAB_SIZE), dtype=torch.float32)
+    save_id = torch.zeros((1, 10), dtype=torch.int32)  # Dummy history length.
+    penalty_value = torch.tensor([1.0], dtype=torch.float32)
+    penalty_range = torch.tensor([20], dtype=torch.int64)
 
-    # ── Greedy Search (argmax + save_id history; used together with APPLY_PENALITY) ──
+    # ── Greedy Search (argmax + save_id history; used together with APPLY_PENALTY) ──
     torch.onnx.export(
         GREEDY_SEARCH(),
         (logits[[0]], save_id[[0]]),
@@ -969,7 +1312,7 @@ with torch.inference_mode():
             'save_id_out': {0: 'batch', 1: 'history_len_out'}
         },
         do_constant_folding=True,
-        opset_version=17,
+        opset_version=OPSET,
         dynamo=False
     )
 
@@ -985,16 +1328,16 @@ with torch.inference_mode():
             'max_logits_idx': {0: 'batch'}
         },
         do_constant_folding=True,
-        opset_version=17,
+        opset_version=OPSET,
         dynamo=False
     )
 
-    # ── Apply Penality (sliding-window repetition penalty on the logits) ──
+    # ── Apply Penalty (sliding-window repetition penalty on the logits) ──
     torch.onnx.export(
-        APPLY_PENALITY(),
-        (logits, save_id, penality_value, penality_range),
-        onnx_model_Penality,
-        input_names=['logits_in', 'save_id_in', 'penality_value', 'penality_range'],
+        APPLY_PENALTY(),
+        (logits, save_id, penalty_value, penalty_range),
+        onnx_model_Penalty,
+        input_names=['logits_in', 'save_id_in', 'penalty_value', 'penalty_range'],
         output_names=['logits_out'],
         dynamic_axes={
             'logits_in': {0: 'batch'},
@@ -1002,121 +1345,71 @@ with torch.inference_mode():
             'logits_out': {0: 'batch'}
         },
         do_constant_folding=True,
-        opset_version=17,
-        dynamo=False
-    )
-
-    # ── First Beam Search ──
-    first_beam_search = FIRST_BEAM_SEARCH(NUM_LAYER_DE)
-    past_keys_greedy = past_key_de[[0]]
-    past_values_greedy = past_value_de[[0]]
-
-    all_inputs = []
-    input_names = []
-    output_names = []
-    dynamic_axes = {}
-    for i in range(NUM_LAYER_DE):
-        name = f'in_key_layer_{i}'
-        input_names.append(name)
-        all_inputs.append(past_keys_greedy)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len'}
-        name = f'out_key_layer_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 3: 'history_len_plus_ids_len'}
-    for i in range(NUM_LAYER_DE):
-        name = f'in_value_layer_{i}'
-        input_names.append(name)
-        all_inputs.append(past_values_greedy)
-        dynamic_axes[name] = {0: 'batch', 2: 'history_len'}
-        name = f'out_value_layer_{i}'
-        output_names.append(name)
-        dynamic_axes[name] = {0: 'batch', 2: 'history_len_plus_ids_len'}
-    input_names.append('logits')
-    all_inputs.append(logits[[0]])
-    input_names.append('save_id_in')
-    all_inputs.append(save_id)
-    input_names.append('beam_size')
-    all_inputs.append(beam_size)
-    output_names.append('save_id_out')
-    output_names.append('top_beam_prob')
-    output_names.append('top_beam_indices')
-    output_names.append('max_logits_idx')
-    dynamic_axes['logits'] = {0: 'batch'}
-    dynamic_axes['save_id_in'] = {0: 'batch', 1: 'history_len'}
-    dynamic_axes['save_id_out'] = {0: 'batch', 1: 'history_len'}
-    dynamic_axes['top_beam_prob'] = {0: 'batch'}
-    dynamic_axes['top_beam_indices'] = {0: 'batch'}
-    dynamic_axes['max_logits_idx'] = {0: 'batch'}
-
-    torch.onnx.export(
-        first_beam_search,
-        tuple(all_inputs),
-        onnx_model_First_Beam,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
         opset_version=OPSET,
         dynamo=False
     )
 
-    # ── Second Beam Search (same output layout as First Beam) ──
-    all_inputs = []
-    input_names = []
-    for i in range(NUM_LAYER_DE):
-        name = f'in_key_layer_{i}'
-        input_names.append(name)
-        all_inputs.append(past_key_de)
-    for i in range(NUM_LAYER_DE):
-        name = f'in_value_layer_{i}'
-        input_names.append(name)
-        all_inputs.append(past_value_de)
-    input_names.append('logits')
-    all_inputs.append(logits)
-    input_names.append('save_id_in')
-    all_inputs.append(save_id)
-    input_names.append('previous_prob')
-    all_inputs.append(previous_prob)
-    input_names.append('beam_size')
-    all_inputs.append(beam_size)
-    input_names.append('topK')
-    all_inputs.append(topK)
-    dynamic_axes['previous_prob'] = {0: 'batch'}
-
-    second_beam_search = SECOND_BEAM_SEARCH(NUM_LAYER_DE)
+    # ── Top-K / Top-P sampling with standard repetition penalty ──
+    sampling_temperature = torch.tensor([0.8], dtype=torch.float32)
+    sampling_top_k = torch.tensor([50], dtype=torch.int32)
+    sampling_top_p = torch.tensor([0.95], dtype=torch.float32)
+    sampling_repetition_penalty = torch.tensor([1.0], dtype=torch.float32)
     torch.onnx.export(
-        second_beam_search,
-        tuple(all_inputs),
-        onnx_model_Second_Beam,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
+        TOPK_TOPP_SAMPLING(),
+        (
+            logits,
+            sampling_temperature,
+            sampling_top_k,
+            sampling_top_p,
+            sampling_repetition_penalty,
+            save_id,
+        ),
+        onnx_model_Sampling,
+        input_names=[
+            'logits', 'temperature', 'top_k', 'top_p',
+            'repetition_penalty', 'previous_ids'
+        ],
+        output_names=['sampled_id', 'save_id_out'],
+        dynamic_axes={
+            'previous_ids': {1: 'history_len'},
+            'save_id_out': {1: 'history_len_out'},
+        },
         opset_version=OPSET,
-        dynamo=False
+        dynamo=False,
     )
 
-    del first_beam_search
-    del second_beam_search
     del past_key_de
     del past_value_de
-    del past_keys_greedy
-    del past_values_greedy
     del logits
-    del previous_prob
     del save_id
-    del penality_value
-    del penality_range
-    del topK
-    del input_names
-    del output_names
-    del dynamic_axes
-    del all_inputs
+    del penalty_value
+    del penalty_range
+    del sampling_temperature
+    del sampling_top_k
+    del sampling_top_p
+    del sampling_repetition_penalty
     gc.collect()
 
     token_to_id = {token: idx for idx, token in id_to_token.items()}
 
-    def _special_token_id(piece, fallback):
-        tid = token_to_id.get(piece)
-        return int(tid) if tid is not None else int(fallback)
+    required_special_tokens = {
+        "blank": "<blank>",
+        "sos": "<sos>",
+        "stop": "<eos>",
+        "asr": "<asr>",
+        "notimestamp": "<notimestamp>",
+    }
+    special_token_ids = {
+        role: int(token_to_id[piece])
+        for role, piece in required_special_tokens.items()
+    }
+    supported_languages, token_ranges = build_v1_supported_languages(
+        token_to_id,
+        special_token_ids,
+    )
+    language_token_start, language_token_end, region_token_start, region_token_end = (
+        token_ranges
+    )
 
     metadata_marker = torch.zeros((1,), dtype=torch.int64)
     torch.onnx.export(
@@ -1133,59 +1426,64 @@ with torch.inference_mode():
 
     onnx_metadata = build_model_metadata(
         {
-            "dolphin_metadata_version": 1,
-            "producer": "Export_Dolphin.py",
-            "model_variant": model_size,
-            "compute_in_f32": COMPUTE_IN_F32,
-        },
-        {
-            "num_decoder_layers": NUM_LAYER_DE,
-            "num_encoder_heads": NUM_HEAD_EN,
-            "num_decoder_heads": NUM_HEAD_DE,
-            "encoder_head_dim": HEAD_DIM_EN,
-            "decoder_head_dim": HEAD_DIM_DE,
-            "cross_num_heads": CROSS_NUM_HEAD_DE,
-            "cross_head_dim": CROSS_HEAD_DIM_DE,
-            "hidden_size": HIDDEN_SIZE,
-            "vocab_size": VOCAB_SIZE,
-            "max_seq_len": MAX_SEQ_LEN,
+            "max_seq_len": _MODEL_MAX_DECODER_SEQ_LEN,
             "sample_rate": SAMPLE_RATE,
-            "input_audio_length": INPUT_AUDIO_LENGTH,
-            "num_mels": N_MELS,
-            "nfft_stft": NFFT_STFT,
-            "window_length": WINDOW_LENGTH,
-            "hop_length": HOP_LENGTH,
-            "window_type": WINDOW_TYPE,
-            "pre_emphasis": PRE_EMPHASIZE,
-        },
-        {
-            "stop_token_ids": ",".join(str(t) for t in [_special_token_id("<eos>", STOP_TOKEN[0])]),
+            "audio_pcm_scale": 32768,
+            "prompt_control_token_count": 4,
+            "language_token_start": language_token_start,
+            "language_token_end": language_token_end,
+            "region_token_start": region_token_start,
+            "region_token_end": region_token_end,
+            "special_token_ids": special_token_ids,
+            "supported_languages": supported_languages,
         },
     )
 
-    _metadata_targets = [onnx_model_Metadata]
-    _written, _skipped = [], []
-    for _target in _metadata_targets:
-        if not os.path.exists(_target):
-            continue
-        try:
-            write_onnx_metadata(_target, onnx_metadata)
-            _written.append(os.path.basename(_target))
-        except Exception as _exc:  # noqa: BLE001 - one bad graph must not abort export
-            _skipped.append(f"{os.path.basename(_target)} ({_exc})")
+    write_metadata_carrier(onnx_model_Metadata, onnx_metadata)
 
-    print(f"\n[Metadata] Stamped {len(onnx_metadata)} keys into {len(_written)} ONNX graph(s):")
-    for _key in sorted(onnx_metadata):
-        print(f"    {_key} = {onnx_metadata[_key]}")
-    if _skipped:
-        print("[Metadata] Skipped (kept usable, metadata not written):")
-        for _entry in _skipped:
-            print(f"    {_entry}")
     gc.collect()
-    
-print('\nExport done!\n')
-print('Running ONNX Runtime demo via Inference_Dolphin_ONNX.py ...')
-subprocess.run(
-    [sys.executable, os.path.join(_SCRIPT_DIR, "Inference_Dolphin_ONNX.py"), "--onnx-folder", onnx_folder],
-    check=True,
+
+import Shared_Merged
+
+if ONNX_DIR.exists():
+    shutil.rmtree(ONNX_DIR)
+ONNX_DIR.mkdir(parents=True)
+print("\n[SharedMerged] Building Dolphin v1 strategy graphs + shared initializer bundle ...")
+_bundle = Shared_Merged.build_shared_merged_bundle(
+    _raw_onnx_dir,
+    out_folder=ONNX_DIR,
+    model_file_names=MODEL_FILE_NAMES,
+    retain_prefill_logits=True,
+    probe_aware=True,
 )
+Shared_Merged.copy_runtime_standalones(
+    _raw_onnx_dir,
+    ONNX_DIR,
+    model_file_names=MODEL_FILE_NAMES,
+    include_encoder=False,
+)
+shutil.copy2(save_vocab, ONNX_DIR / Path(save_vocab).name)
+if os.path.exists(dst_bpe_model):
+    shutil.copy2(dst_bpe_model, ONNX_DIR / "bpe.model")
+for _name, _path in _bundle["graphs"].items():
+    print(f"    {_name} ({Path(_path).stat().st_size} bytes)")
+write_metadata_carrier(ONNX_DIR / MODEL_FILE_NAMES["metadata"], onnx_metadata)
+print(
+    f"    {MODEL_FILE_NAMES['shared_initializers_data']} "
+    f"({Path(_bundle['shared_data']).stat().st_size} bytes)"
+)
+print("    Standalone graphs: Encoder + Metadata; no Qwen KV helpers.")
+
+_raw_onnx_temp.cleanup()
+print(f"[Raw] Deleted temporary split export at {_raw_onnx_dir}")
+print('\nExport done!\n')
+if subprocess.call(
+    [
+        sys.executable,
+        str(Path(_SCRIPT_DIR) / "Inference_Dolphin_ONNX.py"),
+        "--onnx-folder",
+        str(ONNX_DIR),
+    ],
+    cwd=_SCRIPT_DIR,
+) != 0:
+    raise RuntimeError("Dolphin v1 inference failed after export.")

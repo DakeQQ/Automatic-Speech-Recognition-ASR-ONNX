@@ -1,11 +1,11 @@
 import gc
+import json
 import subprocess
 import sys
-import json
 from pathlib import Path
 
-import numpy as np
 import torch
+import torch.nn.functional as F
 import torchaudio.compliance.kaldi as kaldi
 
 from funasr import AutoModel
@@ -17,12 +17,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # ============================== Path settings ==============================
 # Set this single path to the Paraformer download you want to export. The language
 # (zh or en) is auto-detected from the folder, so there is no separate switch to set.
-DOWNLOADS_DIR   = Path("/home/DakeQQ/Downloads")
+DOWNLOADS_DIR   = Path.home() / "Downloads"
 MODEL_PATH      = DOWNLOADS_DIR / "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"  # The Paraformer download to export.
 ONNX_OUTPUT_DIR = SCRIPT_DIR / "Paraformer_ONNX"                                                        # Where exported artifacts are written.
 ONNX_MODEL_PATH = ONNX_OUTPUT_DIR / "Paraformer.onnx"                                                   # The exported onnx model path.
 VOCAB_FILE_PATH = ONNX_OUTPUT_DIR / "Vocab_Paraformer.txt"                                              # Save the vocab list.
-ONNX_METADATA_PATH = ONNX_OUTPUT_DIR / "ASR_Matadata.onnx"                                       # Tiny metadata carrier graph.
+ONNX_METADATA_PATH = ONNX_OUTPUT_DIR / "ASR_Metadata.onnx"                                       # Tiny metadata carrier graph.
 
 
 # ============================== Language profiles ==============================
@@ -72,8 +72,8 @@ vocab_path   = str(VOCAB_FILE_PATH)                                         # Sa
 
 # ============================== Export / runtime settings ==============================
 DYNAMIC_AXES         = True                                                 # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-PREVENT_F16_OVERFLOW = False                                                # Set True before export if the front-end will be converted to fp16.
-INPUT_AUDIO_LENGTH   = 480000                                               # The maximum input audio length. Must less than 480000 (30 seconds).
+INPUT_AUDIO_LENGTH   = 480000                                               # The maximum input audio length. Must be <= 480000 (30 seconds).
+DECODER_CROSS_KV_GROUP_SIZE = 4                                             # Fuse this many decoder memory K/V projections into each GEMM (4 balances launch reduction and peak memory).
 WINDOW_TYPE          = "hamming"                                            # Type of window function used in the STFT.
 N_MELS               = 80                                                   # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
 NFFT_STFT            = 512                                                  # Kaldi fbank defaults to 512 for both zh and en profiles.
@@ -85,8 +85,8 @@ LFR_N                = 6                                                    # Th
 PRE_EMPHASIZE        = 0.97                                                 # For audio preprocessing.
 FRONTEND_TYPE        = "kaldi"                                              # Front-end implementation ('kaldi').
 DECODE_MODE          = PROFILE["decode_mode"]                               # Token decoding mode ('zh' or 'en').
-INPUT_AUDIO_DTYPE    = "INT16"                                              # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. Kaldi fbank works on the int16 numeric range, so "F32"/"F16" carry int16-range values (no ÷32768).
-OPSET                = 18                                                   # <= 20
+INPUT_AUDIO_DTYPE    = "F32"                                                # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. Kaldi fbank works on the int16 numeric range, so "F32"/"F16" carry int16-range values (no ÷32768).
+OPSET                = 20                                                   # <= 20
 
 
 # ============================== Derived values ==============================
@@ -104,16 +104,72 @@ def sinusoidal_encode(positions, depth, dtype=torch.float32):
     inv_timescales = torch.reshape(inv_timescales, [positions.size(0), -1])
     scaled_time = torch.reshape(positions, [1, -1, 1]) * torch.reshape(inv_timescales, [1, 1, -1])
     return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=2).type(dtype)
-def decode_tokens(tokens, mode):
-    if mode == "en":
-        return " ".join(tokens).replace("</s>", "").replace("@@ ", "").strip()
-    return "".join(tokens).replace("</s>", "").strip()
+
+
+_SPECIAL_TOKEN_CANDIDATES = {
+    "blank": ("<blank>", "<blk>", "<eps>"),
+    "eos": ("</s>", "<eos>"),
+    "unknown": ("<unk>", "<unknown>", "[UNK]"),
+    "pad": ("<pad>", "[PAD]"),
+    "bos": ("<s>", "<bos>", "<sos>"),
+}
+_LANGUAGE_METADATA = {
+    "zh": {
+        "name": "Chinese",
+        "aliases": ["Chinese", "Mandarin", "zh-CN", "中文"],
+    },
+    "en": {
+        "name": "English",
+        "aliases": ["English", "en-US"],
+    },
+}
+
+
+def _find_token_id(token_list, role):
+    candidates = _SPECIAL_TOKEN_CANDIDATES[role]
+    return next(
+        (token_id for token_id, token in enumerate(token_list) if token in candidates),
+        None,
+    )
+
+
+def build_tokenizer_metadata(token_list, language, decode_mode):
+    token_list = list(token_list)
+
+    blank_id = _find_token_id(token_list, "blank")
+    eos_id = _find_token_id(token_list, "eos")
+    special_token_ids = {
+        "blank": blank_id,
+        "eos": eos_id,
+        "stop": [eos_id],
+    }
+    for role in ("unknown", "pad", "bos"):
+        token_id = _find_token_id(token_list, role)
+        if token_id is not None:
+            special_token_ids[role] = token_id
+
+    language_metadata = _LANGUAGE_METADATA[language]
+    supported_languages = {
+        language: {
+            **language_metadata,
+            "prompt_token_ids": [],
+            "decode_mode": decode_mode,
+        }
+    }
+    return special_token_ids, supported_languages
 
 
 def build_model_metadata(*sections):
     def _norm(value):
         if isinstance(value, bool):
             return "1" if value else "0"
+        if isinstance(value, (dict, list)):
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         return str(value)
 
     merged = {}
@@ -124,9 +180,11 @@ def build_model_metadata(*sections):
     return merged
 
 
-def write_onnx_metadata(onnx_path, metadata):
+def write_onnx_metadata(onnx_path, metadata, *, replace=False):
     import onnx
     model = onnx.load(onnx_path, load_external_data=False)
+    if replace:
+        del model.metadata_props[:]
     existing = {prop.key: prop for prop in model.metadata_props}
     for key, value in metadata.items():
         if key in existing:
@@ -136,30 +194,92 @@ def write_onnx_metadata(onnx_path, metadata):
     onnx.save(model, onnx_path)
 
 
+def write_metadata_carrier(onnx_path, metadata):
+    write_onnx_metadata(
+        onnx_path,
+        {str(key): str(value) for key, value in metadata.items()},
+        replace=True,
+    )
+
+
 class METADATA_CARRIER(torch.nn.Module):
     def forward(self, marker):
         return marker
 
 
-def absorb_layer_norm_affine(norm, linear):
+def _output_scale_tensor(output_scale, device):
+    scale = torch.as_tensor(output_scale, dtype=torch.float64, device=device)
+    if scale.ndim == 0:
+        return scale
+    scale = scale.reshape(-1)
+    return scale
+
+
+def fold_linear_output_scale(linear, output_scale):
+    """Fold an immutable per-output scale into a Linear in float64, then store float32."""
+    with torch.no_grad():
+        weight = linear.weight.detach().to(torch.float64)
+        bias = (linear.bias.detach().to(torch.float64) if linear.bias is not None
+                else torch.zeros(linear.out_features, dtype=torch.float64, device=weight.device))
+        scale = _output_scale_tensor(output_scale, weight.device)
+        if scale.ndim == 0:
+            weight = weight * scale
+            bias = bias * scale
+        else:
+            weight = weight * scale.unsqueeze(1)
+            bias = bias * scale
+        linear.weight.copy_(weight.to(linear.weight.dtype))
+        if linear.bias is None:
+            linear.bias = torch.nn.Parameter(bias.to(linear.weight.dtype))
+        else:
+            linear.bias.copy_(bias.to(linear.bias.dtype))
+    linear._onnx_output_scale_folded = True
+
+
+def absorb_layer_norm_affine(norm, linear, output_scale=1.0):
     """Fold a LayerNorm's affine (weight, bias) into the linear that consumes its output.
 
         new_bias   = linear.bias + linear.weight @ norm.bias
         new_weight = linear.weight * norm.weight        (scales the linear's input columns)
 
-    The LayerNorm is then switched to affine-free, so at runtime it only normalises while the
-    scale/shift live inside the following GEMM weight/bias. This is exact in float32 and keeps
-    the single fused LayerNormalization op. The linear must be the sole consumer of the
-    normalised tensor.
+    The learned affine is replaced by an identity scale/shift, which is later shared across
+    compatible LayerNorms so ONNX emits reusable initializers instead of per-call constants.
+    Immutable transforms are evaluated in float64 and rounded once to the model dtype. The
+    linear must be the sole consumer of the normalised tensor.
     """
     with torch.no_grad():
+        weight = linear.weight.detach().to(torch.float64)
+        bias = (linear.bias.detach().to(torch.float64) if linear.bias is not None
+                else torch.zeros(linear.out_features, dtype=torch.float64, device=weight.device))
+        scale = _output_scale_tensor(output_scale, weight.device)
+        if scale.ndim == 0:
+            weight = weight * scale
+            bias = bias * scale
+        else:
+            weight = weight * scale.unsqueeze(1)
+            bias = bias * scale
+        bias = bias + torch.matmul(weight, norm.bias.detach().to(torch.float64))
+        weight = weight * norm.weight.detach().to(torch.float64).unsqueeze(0)
+        linear.weight.copy_(weight.to(linear.weight.dtype))
         if linear.bias is None:
-            linear.bias = torch.nn.Parameter(torch.zeros(linear.out_features, dtype=linear.weight.dtype))
-        linear.bias.data.add_(torch.matmul(linear.weight.data, norm.bias.data))
-        linear.weight.data.mul_(norm.weight.data.unsqueeze(0))
-    norm.elementwise_affine = False
-    norm.weight = None
-    norm.bias = None
+            linear.bias = torch.nn.Parameter(bias.to(linear.weight.dtype))
+        else:
+            linear.bias.copy_(bias.to(linear.bias.dtype))
+        norm.weight.fill_(1.0)
+        norm.bias.zero_()
+    norm._onnx_affine_folded = True
+
+
+def share_folded_layer_norm_affines(module):
+    shared_affines = {}
+    for norm in module.modules():
+        if not isinstance(norm, torch.nn.LayerNorm) or not getattr(norm, "_onnx_affine_folded", False):
+            continue
+        key = (tuple(norm.normalized_shape), norm.weight.dtype, norm.weight.device)
+        if key not in shared_affines:
+            shared_affines[key] = (norm.weight, norm.bias)
+        else:
+            norm.weight, norm.bias = shared_affines[key]
 
 
 def fold_symmetric_pad_into_conv(pad_module, conv):
@@ -172,17 +292,17 @@ def fold_symmetric_pad_into_conv(pad_module, conv):
     silently mis-folded.
     """
     left, right = pad_module.padding
-    if float(pad_module.value) != 0.0 or left != right:
-        raise ValueError(f"Cannot fold pad {pad_module.padding!r} (value={pad_module.value}) into Conv1d.")
     conv.padding = (int(left),)
 
 
-def replace_gelu_with_tanh(module):
-    for name, child in module.named_children():
-        if isinstance(child, torch.nn.GELU):
-            setattr(module, name, torch.nn.GELU(approximate="tanh"))
-        else:
-            replace_gelu_with_tanh(child)
+def fold_depthwise_residual_into_conv(conv):
+    """Fold ``depthwise_conv(x) + x`` into the convolution's centre tap."""
+    kernel_size = int(conv.kernel_size[0])
+    with torch.no_grad():
+        weight = conv.weight.detach().to(torch.float64)
+        weight[:, 0, kernel_size // 2] += 1.0
+        conv.weight.copy_(weight.to(conv.weight.dtype))
+    conv._onnx_identity_folded = True
 
 
 def kaldi_window(window_type, win_length):
@@ -228,74 +348,66 @@ class KaldiFbank(torch.nn.Module):
         super().__init__()
         self.hop_len = hop_len
         self.n_freqs = n_fft // 2 + 1
-        self.register_buffer("stft_kernel", create_kaldi_stft_kernel(n_fft, win_length, window_type, pre_emphasis))
+        stft_kernel = create_kaldi_stft_kernel(n_fft, win_length, window_type, pre_emphasis)
         mel_bins, _ = kaldi.get_mel_banks(n_mels, n_fft, sample_rate, 20.0, 0.0, 100.0, -500.0, 1.0)
         mel_bins = torch.nn.functional.pad(mel_bins, (0, 1), mode="constant", value=0.0)
+        self.register_buffer("stft_kernel", stft_kernel)
         self.register_buffer("mel_bins", mel_bins.unsqueeze(0).to(torch.float32))
-        power_scale = 0.01 if PREVENT_F16_OVERFLOW else 1.0
-        self.register_buffer("power_scale", torch.tensor([power_scale], dtype=torch.float32), persistent=False)
-        self.register_buffer("epsilon", torch.tensor(torch.finfo(torch.float32).eps * (power_scale ** 2), dtype=torch.float32))
-        self.register_buffer("log_power_scale", torch.tensor(np.log(power_scale ** 2), dtype=torch.float32), persistent=False)
+        self.register_buffer("epsilon", torch.tensor(torch.finfo(torch.float32).eps, dtype=torch.float32))
 
     def forward(self, audio):
         stft = torch.nn.functional.conv1d(audio.float(), self.stft_kernel, stride=self.hop_len)
-        if PREVENT_F16_OVERFLOW:
-            stft = stft * self.power_scale                                                # one scale over the 2*n_freqs channels (== scaling real / imag separately)
         real_power, imag_power = torch.split(stft * stft, self.n_freqs, dim=1)            # one square over the 2*n_freqs channels, then split (== real^2 / imag^2)
         power = real_power + imag_power
         mel = torch.matmul(self.mel_bins, power)
         log_mel = torch.maximum(mel, self.epsilon).log()
-        if PREVENT_F16_OVERFLOW:
-            log_mel = log_mel - self.log_power_scale
         return log_mel.transpose(1, 2)
 
 
 class PARAFORMER(torch.nn.Module):
-    def __init__(self, paraformer, fbank_model, stft_signal_len, n_mels, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars, cif_hidden_size):
+    def __init__(self, paraformer, fbank_model, n_mels, lfr_m, lfr_n, lfr_len, cmvn_means, cmvn_vars,
+                 cif_hidden_size, cross_kv_group_size=DECODER_CROSS_KV_GROUP_SIZE):
         super(PARAFORMER, self).__init__()
         self.encoder = paraformer.encoder
         self.predictor = paraformer.predictor
         self.decoder = paraformer.decoder
-        replace_gelu_with_tanh(self.encoder)
-        replace_gelu_with_tanh(self.predictor)
-        replace_gelu_with_tanh(self.decoder)
         self.fbank_model = fbank_model
-        self.register_buffer("cmvn_means", cmvn_means, persistent=False)
-        self.register_buffer("cmvn_vars", cmvn_vars, persistent=False)
+        self.register_buffer("cmvn_vars", cmvn_vars.detach().clone())
         self.T_lfr = lfr_len
         self.lfr_m = lfr_m
         self.lfr_n = lfr_n
+        self.cif_hidden_size = cif_hidden_size
         self.lfr_m_factor = (lfr_m - 1) // 2
         self.lfr_feature_size = n_mels * lfr_m                                          # static LFR-stacked feature width
-        indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
-        self.register_buffer("indices_mel", indices.clamp(max=stft_signal_len + self.lfr_m_factor - 1).reshape(-1), persistent=False)  # int32 LFR gather indices
+        indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int64).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int64) - self.lfr_m_factor
+        self.register_buffer("indices_mel", indices.clamp(min=0).reshape(-1))  # int64 matches dynamic shape arithmetic and avoids a runtime Cast
 
         # Fold the attention scale (1 / sqrt(d_k)) into the q/k projection weights so the inlined
         # attention can use a plain q @ k matmul without a separate scaling step, then absorb every
-        # LayerNorm affine into the linear that consumes it. Both folds are exact in float32 and keep
-        # the fused LayerNormalization op. Scale-fold runs before LayerNorm-fold; the two commute
-        # because one scales the linear's output rows and the other scales its input columns.
+        # LayerNorm affine into the linear that consumes it. The immutable transforms are evaluated
+        # together in float64 and rounded once, while runtime stays entirely in the model dtype.
         head_dim = self.encoder.encoders._modules["0"].self_attn.d_k
         factor = float(head_dim ** (-0.25))
         total_encoders = list(self.encoder.encoders0) + list(self.encoder.encoders)
         for encoder_layer in total_encoders:
             attn = encoder_layer.self_attn
-            attn.linear_q_k_v.weight.data[:-cif_hidden_size] *= factor
-            attn.linear_q_k_v.bias.data[:-cif_hidden_size] *= factor
-            absorb_layer_norm_affine(encoder_layer.norm1, attn.linear_q_k_v)
+            qk_scale = torch.ones(attn.linear_q_k_v.out_features, dtype=torch.float64,
+                                  device=attn.linear_q_k_v.weight.device)
+            qk_scale[:-cif_hidden_size] = factor
+            absorb_layer_norm_affine(encoder_layer.norm1, attn.linear_q_k_v, qk_scale)
             absorb_layer_norm_affine(encoder_layer.norm2, encoder_layer.feed_forward.w_1)
 
         head_dim = self.decoder.decoders._modules["0"].src_attn.d_k
         factor = float(head_dim ** (-0.25))
         for decoder_layer in self.decoder.decoders:
             cross = decoder_layer.src_attn
-            cross.linear_q.weight.data *= factor
-            cross.linear_q.bias.data *= factor
-            cross.linear_k_v.weight.data[:cif_hidden_size] *= factor
-            cross.linear_k_v.bias.data[:cif_hidden_size] *= factor
             absorb_layer_norm_affine(decoder_layer.norm1, decoder_layer.feed_forward.w_1)
             absorb_layer_norm_affine(decoder_layer.feed_forward.norm, decoder_layer.feed_forward.w_2)
-            absorb_layer_norm_affine(decoder_layer.norm3, cross.linear_q)
+            absorb_layer_norm_affine(decoder_layer.norm3, cross.linear_q, factor)
+            kv_scale = torch.ones(cross.linear_k_v.out_features, dtype=torch.float64,
+                                  device=cross.linear_k_v.weight.device)
+            kv_scale[:cif_hidden_size] = factor
+            fold_linear_output_scale(cross.linear_k_v, kv_scale)
 
         # decoders3 are FFN-only blocks (no self/cross attention); fold their two LayerNorms too,
         # and finally fold the decoder's trailing after_norm into the output projection.
@@ -304,43 +416,71 @@ class PARAFORMER(torch.nn.Module):
             absorb_layer_norm_affine(decoder_layer.feed_forward.norm, decoder_layer.feed_forward.w_2)
         absorb_layer_norm_affine(self.decoder.after_norm, self.decoder.output_layer)
 
-        # Fold every (symmetric, zero) FSMN / CIF pad into its following Conv1d so the exported graph
-        # drops the standalone Pad nodes. Conv1d already zero-pads, so each fold is bit-identical.
+        # Fold every symmetric zero pad into Conv1d, then fold each FSMN's depthwise_conv(x) + x
+        # identity into the centre tap. This removes 66 full activation-sized residual Adds.
         for encoder_layer in total_encoders:
             fold_symmetric_pad_into_conv(encoder_layer.self_attn.pad_fn, encoder_layer.self_attn.fsmn_block)
+            fold_depthwise_residual_into_conv(encoder_layer.self_attn.fsmn_block)
+            encoder_layer.self_attn.pad_fn = None
         for decoder_layer in self.decoder.decoders:
             fold_symmetric_pad_into_conv(decoder_layer.self_attn.pad_fn, decoder_layer.self_attn.fsmn_block)
+            fold_depthwise_residual_into_conv(decoder_layer.self_attn.fsmn_block)
+            decoder_layer.self_attn.pad_fn = None
         fold_symmetric_pad_into_conv(self.predictor.pad, self.predictor.cif_conv1d)
+        self.predictor.pad = None
+        share_folded_layer_norm_affines(self)
 
         # Flatten the FunASR Sequential containers into plain lists so forward() can iterate the
         # layers explicitly (one inlined block per layer in the exported graph).
         self.encoder_layers = total_encoders
         self.decoder_att_layers = list(self.decoder.decoders)
         self.decoder_ffn_layers = list(self.decoder.decoders3)
-        assert getattr(self.decoder, "decoders2", None) is None, \
-            "Inlined decoder assumes att_layer_num == num_blocks (decoders2 must be None)."
+        # Every decoder layer projects the same encoder memory. Concatenate immutable K/V weights
+        # in bounded groups, execute one larger GEMM per group, then split in head-major layout.
+        # Four layers reduce 16 MatMul/Add/Reshape/Transpose/Split chains to four while limiting the
+        # maximum extra activation to about 8 MiB at the 500-frame production maximum.
+        self.cross_kv_group_size = int(cross_kv_group_size)
+        self.cross_kv_group_counts = []
+        for group_idx, group_start in enumerate(range(0, len(self.decoder_att_layers), self.cross_kv_group_size)):
+            group_layers = self.decoder_att_layers[group_start:group_start + self.cross_kv_group_size]
+            kv_linears = [layer.src_attn.linear_k_v for layer in group_layers]
+            self.register_buffer(
+                f"cross_kv_weight_{group_idx}",
+                torch.cat([linear.weight.detach() for linear in kv_linears], dim=0).contiguous(),
+            )
+            self.register_buffer(
+                f"cross_kv_bias_{group_idx}",
+                torch.cat([linear.bias.detach() for linear in kv_linears], dim=0).contiguous(),
+            )
+            self.cross_kv_group_counts.append(len(group_layers))
+            for layer in group_layers:
+                layer.src_attn.linear_k_v = None
 
         # Constants that the original FunASR modules build internally; precomputed here so the
         # export no longer depends on the patched modeling files.
-        positions = torch.arange(1, 502, dtype=torch.int32).unsqueeze(0)   # 502 -> up to 30 seconds of audio
-        self.register_buffer("position_encoding", sinusoidal_encode(positions, n_mels * lfr_m).half(), persistent=False)
-        self.register_buffer("predictor_tail_threshold", torch.reshape(torch.tensor([self.predictor.tail_threshold], dtype=torch.float32), (1, 1)), persistent=False)
-        self.register_buffer("predictor_start_zero", torch.zeros((1, 1), dtype=torch.float32), persistent=False)
-        self.register_buffer("predictor_zeros", torch.zeros((1, 1, cif_hidden_size), dtype=torch.float32), persistent=False)
-        self.register_buffer("cif_frame_zero", torch.zeros((1, cif_hidden_size), dtype=torch.float32), persistent=False)
+        positions = torch.arange(1, lfr_len + 1, dtype=torch.int32).unsqueeze(0)
+        position_encoding = sinusoidal_encode(positions, n_mels * lfr_m)
+        encoder_input_bias = (cmvn_means.to(torch.float64) * cmvn_vars.to(torch.float64)
+                              + position_encoding.to(torch.float64)).to(torch.float32)
+        self.register_buffer("encoder_input_bias", encoder_input_bias)
+        self.encoder.embed = None
+        self.decoder.embed = None
+        self.register_buffer("predictor_tail_threshold", torch.reshape(torch.tensor([self.predictor.tail_threshold], dtype=torch.float32), (1, 1)))
+        self.register_buffer("predictor_start_zero", torch.zeros((1, 1), dtype=torch.float32))
+        self.register_buffer("predictor_zeros", torch.zeros((1, 1, cif_hidden_size), dtype=torch.float32))
+        self.register_buffer("cif_frame_zero", torch.zeros((1, cif_hidden_size), dtype=torch.float32))
+        self.register_buffer("cif_one", torch.ones((1,), dtype=torch.int32))
 
     def forward(self, audio):
         # ----- Front-end -> LFR stacking -----
         mel_features = self.fbank_model(audio)
-        left_padding = mel_features[:, [0]]
-        right_padding = mel_features[:, [-1]]
-        padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features] + [right_padding] * self.lfr_m, dim=1)
-        _len = (mel_features.shape[1] + self.lfr_n - 1) // self.lfr_n
-        mel_features = torch.index_select(padded_inputs, 1, self.indices_mel[:_len * self.lfr_m]).reshape(1, -1, self.lfr_feature_size)
+        mel_len = torch._shape_as_tensor(mel_features)[1]
+        _len = (mel_len + self.lfr_n - 1) // self.lfr_n
+        lfr_indices = torch.minimum(self.indices_mel[:_len * self.lfr_m], mel_len - 1)
+        mel_features = torch.index_select(mel_features, 1, lfr_indices).reshape(1, -1, self.lfr_feature_size)
 
         # ----- Encoder: SANMEncoder (CMVN + sinusoidal position encoding + SANM blocks) -----
-        enc = (mel_features + self.cmvn_means) * self.cmvn_vars
-        enc = enc + self.position_encoding[:, :_len, :].float()
+        enc = mel_features * self.cmvn_vars + self.encoder_input_bias[:, :_len]
         for layer in self.encoder_layers:
             attn = layer.self_attn
             hidden = attn.h * attn.d_k
@@ -349,7 +489,7 @@ class PARAFORMER(torch.nn.Module):
             q, k, v_h = torch.split(qkv.view(-1, 3 * attn.h, attn.d_k).transpose(0, 1), attn.h, dim=0)  # one reshape splits all heads
             scores = torch.softmax(torch.matmul(q, k.transpose(1, 2)), dim=-1)        # k.transpose -> (head, d_k, time)
             context = torch.matmul(scores, v_h).transpose(0, 1).reshape(1, -1, hidden)
-            fsmn = attn.fsmn_block(v.transpose(1, 2)).transpose(1, 2) + v             # FSMN pad folded into the Conv1d
+            fsmn = attn.fsmn_block(v.transpose(1, 2)).transpose(1, 2)                 # pad and identity residual folded into Conv1d
             att_out = attn.linear_out(context) + fsmn
             enc = enc + att_out if layer.in_size == layer.size else att_out
             ff = layer.feed_forward
@@ -362,42 +502,64 @@ class PARAFORMER(torch.nn.Module):
         alphas = torch.sigmoid(self.predictor.cif_output(conv_out)).squeeze(-1)                 # relu(sigmoid()) == sigmoid() (sigmoid >= 0)
         alphas = torch.cat([alphas, self.predictor_tail_threshold], dim=-1)
         cif_hidden = torch.cat([encoder_out, self.predictor_zeros], dim=1)
-        prefix_sum = torch.cumsum(alphas, dim=-1, dtype=torch.float32)
+        # FunASR deliberately accumulates alpha in float64 and rounds once to float32; a genuine
+        # fp32 ONNX CumSum can miss an integer boundary and change the transcript.
+        prefix_sum = torch.cumsum(alphas, dim=-1, dtype=torch.float64).float()
         prefix_sum_floor = torch.floor(prefix_sum)
-        dislocation_floor = torch.floor(torch.cat([self.predictor_start_zero, prefix_sum[:, :-1]], dim=1))
-        fire_idxs = (prefix_sum_floor - dislocation_floor) > 0
-        fires = fire_idxs.float() + prefix_sum - prefix_sum_floor
+        dislocation_floor = torch.cat([self.predictor_start_zero, prefix_sum_floor[:, :-1]], dim=1)
+        fire_idxs = prefix_sum_floor > dislocation_floor
+        fire_indices = torch.nonzero(fire_idxs[0], as_tuple=False).squeeze(1)
         prefix_sum_hidden = torch.cumsum(alphas.unsqueeze(-1) * cif_hidden, dim=1)
-        frames = prefix_sum_hidden[fire_idxs]
-        shift_frames = torch.cat([self.cif_frame_zero, frames[:-1]], dim=0)
-        remains = fires - torch.floor(fires)
-        remain_frames = remains[fire_idxs].reshape(-1, 1) * cif_hidden[fire_idxs]
-        shift_remain_frames = torch.cat([self.cif_frame_zero, remain_frames[:-1]], dim=0)
-        acoustic_embeds = (frames - shift_frames + shift_remain_frames - remain_frames).unsqueeze(0)  # (1, token, dim)
+        frames = torch.index_select(prefix_sum_hidden, 1, fire_indices).squeeze(0)
+        remains = torch.index_select(prefix_sum - prefix_sum_floor, 1, fire_indices).squeeze(0)
+        fired_hidden = torch.index_select(cif_hidden, 1, fire_indices).squeeze(0)
+        completed_prefix = frames - remains.unsqueeze(1) * fired_hidden
+        completed_prefix = torch.cat([self.cif_frame_zero, completed_prefix], dim=0)
+        acoustic_embeds = (completed_prefix[1:] - completed_prefix[:-1]).unsqueeze(0)  # zero-fire safe (1, token, dim)
+        num_id = prefix_sum_floor[:, -1].to(torch.int32)                              # fixed shape [1]: authoritative CIF fire count
 
         # ----- Decoder: ParaformerSANMDecoder (FFN -> SANM self-attn -> cross-attn per block) -----
         memory = encoder_out
-        dec = acoustic_embeds
-        for layer in self.decoder_att_layers:
-            ff = layer.feed_forward
-            x = ff.w_2(ff.norm(ff.activation(ff.w_1(layer.norm1(dec)))))
-            sa = layer.self_attn
-            sa_in = layer.norm2(x)
-            fsmn = sa.fsmn_block(sa_in.transpose(1, 2)).transpose(1, 2) + sa_in                 # FSMN pad folded into the Conv1d
-            x = dec + fsmn
-            cross = layer.src_attn
-            c_in = layer.norm3(x)
-            q = cross.linear_q(c_in).view(-1, cross.h, cross.d_k).transpose(0, 1)
-            k, v = torch.split(cross.linear_k_v(memory).view(-1, 2 * cross.h, cross.d_k).transpose(0, 1), cross.h, dim=0)
-            scores = torch.softmax(torch.matmul(q, k.transpose(1, 2)), dim=-1)
-            c_out = torch.matmul(scores, v).transpose(0, 1).reshape(1, -1, cross.linear_out.in_features)
-            dec = x + cross.linear_out(c_out)
+        # Conv1d cannot consume a zero-length token axis. Append one immutable zero frame, gather
+        # max(num_id, 1) rows with native int32 indices, and remove that dummy from token_ids below.
+        # Dynamic Range avoids the fragile scalar-Slice lowering used by several ONNX optimizers.
+        safe_num_id = torch.maximum(num_id, self.cif_one)
+        safe_token_indices = torch.arange(safe_num_id[0], dtype=torch.int32, device=acoustic_embeds.device)
+        dec = torch.index_select(torch.cat([acoustic_embeds, self.predictor_zeros], dim=1), 1, safe_token_indices)
+        layer_idx = 0
+        for group_idx, group_count in enumerate(self.cross_kv_group_counts):
+            first_cross = self.decoder_att_layers[layer_idx].src_attn
+            grouped_kv = F.linear(
+                memory,
+                getattr(self, f"cross_kv_weight_{group_idx}"),
+                getattr(self, f"cross_kv_bias_{group_idx}"),
+            )
+            grouped_kv = grouped_kv.reshape(-1, 2 * group_count * first_cross.h, first_cross.d_k).transpose(0, 1)
+            kv_heads = torch.split(grouped_kv, first_cross.h, dim=0)
+            for local_idx in range(group_count):
+                layer = self.decoder_att_layers[layer_idx]
+                ff = layer.feed_forward
+                x = ff.w_2(ff.norm(ff.activation(ff.w_1(layer.norm1(dec)))))
+                sa = layer.self_attn
+                sa_in = layer.norm2(x)
+                fsmn = sa.fsmn_block(sa_in.transpose(1, 2)).transpose(1, 2)             # pad and identity residual folded into Conv1d
+                x = dec + fsmn
+                cross = layer.src_attn
+                c_in = layer.norm3(x)
+                q = cross.linear_q(c_in).view(-1, cross.h, cross.d_k).transpose(0, 1)
+                k = kv_heads[2 * local_idx]
+                v = kv_heads[2 * local_idx + 1]
+                scores = torch.softmax(torch.matmul(q, k.transpose(1, 2)), dim=-1)
+                c_out = torch.matmul(scores, v).transpose(0, 1).reshape(1, -1, self.cif_hidden_size)
+                dec = x + cross.linear_out(c_out)
+                layer_idx += 1
         for layer in self.decoder_ffn_layers:
             ff = layer.feed_forward
             dec = ff.w_2(ff.norm(ff.activation(ff.w_1(layer.norm1(dec)))))
         decoder_out = self.decoder.output_layer(self.decoder.after_norm(dec))
-        token_ids = decoder_out.argmax(dim=-1).int()                                # (1, num_token) int32 token ids
-        num_id = torch._shape_as_tensor(token_ids)[1].to(torch.int32).unsqueeze(0)  # fixed shape [1]: count of decoded tokens
+        token_ids = decoder_out.argmax(dim=-1).int()
+        output_token_indices = torch.arange(num_id[0], dtype=torch.int32, device=token_ids.device)
+        token_ids = torch.index_select(token_ids, 1, output_token_indices)             # (1, num_token) int32 token ids; empty when CIF fires zero times
         return token_ids, num_id
 
 
@@ -405,8 +567,6 @@ print('\nExport start ...\n')
 with torch.inference_mode():
     Path(onnx_model_A).expanduser().parent.mkdir(parents=True, exist_ok=True)
     Path(vocab_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
-    if FRONTEND_TYPE != "kaldi":
-        raise ValueError(f"Unsupported PARAFORMER_FRONTEND={FRONTEND_TYPE!r}; use 'kaldi'.")
     custom_fbank = KaldiFbank(NFFT_STFT, WINDOW_LENGTH, HOP_LENGTH, N_MELS, SAMPLE_RATE, WINDOW_TYPE, PRE_EMPHASIZE).eval()
     print(f"Language: {LANGUAGE}; frontend: {FRONTEND_TYPE}; decode: {DECODE_MODE}")
     model = AutoModel(
@@ -418,16 +578,19 @@ with torch.inference_mode():
     CMVN_MEANS = model.kwargs['frontend'].cmvn[0].repeat(1, 1, 1)
     CMVN_VARS = (model.kwargs['frontend'].cmvn[1] * encoder_output_size_factor).repeat(1, 1, 1)
     CIF_HIDDEN_SIZE = model.model.encoder.encoders0._modules["0"].size
-    FIRST_ATTN = model.model.encoder.encoders0._modules["0"].self_attn
-    NUM_HEADS = FIRST_ATTN.h
-    HEAD_DIM = FIRST_ATTN.d_k
     tokenizer = model.kwargs['tokenizer']
+    token_list = list(tokenizer.token_list)
+    special_token_ids, supported_languages = build_tokenizer_metadata(
+        token_list,
+        LANGUAGE,
+        DECODE_MODE,
+    )
     # Save to text file
     with open(vocab_path, 'w', encoding='utf-8') as f:
-        for token in tokenizer.token_list:
+        for token in token_list:
             f.write(f'{token}\n')
   
-    paraformer = PARAFORMER(model.model.eval(), custom_fbank, STFT_SIGNAL_LENGTH, N_MELS, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE)
+    paraformer = PARAFORMER(model.model.eval(), custom_fbank, N_MELS, LFR_M, LFR_N, LFR_LENGTH, CMVN_MEANS, CMVN_VARS, CIF_HIDDEN_SIZE)
     _audio_export_dtype = {"INT16": torch.int16, "F32": torch.float32, "F16": torch.float16}[INPUT_AUDIO_DTYPE]
     audio = torch.ones((1, 1, INPUT_AUDIO_LENGTH), dtype=_audio_export_dtype)
     torch.onnx.export(
@@ -459,48 +622,27 @@ with torch.inference_mode():
 
     onnx_metadata = build_model_metadata(
         {
-            "paraformer_metadata_version": 1,
-            "producer": "Export_Paraformer.py",
-            "language": LANGUAGE,
-        },
-        {
-            "num_heads": NUM_HEADS,
-            "head_dim": HEAD_DIM,
-            "hidden_size": CIF_HIDDEN_SIZE,
-            "vocab_size": len(tokenizer.token_list),
-            "num_mels": N_MELS,
-            "nfft_stft": NFFT_STFT,
-            "window_length": WINDOW_LENGTH,
-            "hop_length": HOP_LENGTH,
-            "lfr_m": LFR_M,
-            "lfr_n": LFR_N,
             "sample_rate": SAMPLE_RATE,
-            "input_audio_length": INPUT_AUDIO_LENGTH,
+            "audio_pcm_scale": 1,
+            "special_token_ids": special_token_ids,
+            "supported_languages": supported_languages,
         },
     )
-    _written, _skipped = [], []
-    for _target in [onnx_model_Metadata]:
-        try:
-            write_onnx_metadata(_target, onnx_metadata)
-            _written.append(Path(_target).name)
-        except Exception as _exc:  # noqa: BLE001 - one bad graph must not abort export
-            _skipped.append(f"{Path(_target).name} ({_exc})")
+    write_metadata_carrier(onnx_model_Metadata, onnx_metadata)
 
-    print(f"\n[Metadata] Stamped {len(onnx_metadata)} keys into {len(_written)} ONNX graph(s):")
-    for _key in sorted(onnx_metadata):
-        print(f"    {_key} = {onnx_metadata[_key]}")
-    if _skipped:
-        print("[Metadata] Skipped (kept usable, metadata not written):")
-        for _entry in _skipped:
-            print(f"    {_entry}")
     del model
     del audio
     del CMVN_VARS
     del CMVN_MEANS
     gc.collect()
 print('\nExport done!\n')
-print('Running ONNX Runtime demo via Inference_Paraformer_ONNX.py ...')
-subprocess.run(
-    [sys.executable, str(SCRIPT_DIR / "Inference_Paraformer_ONNX.py"), "--onnx-folder", str(ONNX_OUTPUT_DIR)],
-    check=True,
-)
+if subprocess.call(
+    [
+        sys.executable,
+        str(SCRIPT_DIR / "Inference_Paraformer_ONNX.py"),
+        "--onnx-folder",
+        str(ONNX_OUTPUT_DIR),
+    ],
+    cwd=str(SCRIPT_DIR),
+) != 0:
+    raise RuntimeError("Paraformer inference failed after export.")

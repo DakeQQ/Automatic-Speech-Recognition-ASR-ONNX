@@ -1,10 +1,9 @@
 import argparse
-import os
 import sys
 import time
 import unicodedata
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import onnxruntime
@@ -12,32 +11,47 @@ from onnxruntime.capi import _pybind_state as C
 from pydub import AudioSegment
 from transformers import AutoTokenizer
 
+from Shared_Merged import (
+    DEFAULT_MODEL_FILE_NAMES,
+    attach_shared_initializers,
+)
+
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from Example_Audio import model_audio_cases
+from ORT_IO import (
+    array_for,
+    is_dynamic_dim,
+    metadata_by_name,
+    load_special_token_ids,
+    load_supported_languages,
+    numpy_dtype,
+    resolve_supported_language,
+)
 
 # transformers==4.57.6
 #
 # ──────────────────────────────────────────────────────────────────────────────
 # Qwen3-ForcedAligner-0.6B  ·  ONNX Runtime inference demo
 # ──────────────────────────────────────────────────────────────────────────────
-# Standalone inference pipeline for the ONNX graphs produced by
+# Standalone inference pipeline for the merged ONNX bundle produced by
 # Export_Qwen_ForcedAligner.py. The forced aligner is NON auto-regressive (NAR):
 # given an audio clip and its transcript it classifies, in ONE forward pass, a
 # timestamp bucket at every "<timestamp>" position — NO KV cache, NO decode loop,
-# NO beam/greedy search.
+# No autoregressive token-selection loop.
 #
-# Pipeline (mirrors the export self-test):
-#   1. tokenize transcript -> word_list, build
-#      "<|audio_start|><|audio_pad|><|audio_end|>" + "w1<ts><ts>w2<ts><ts>..."
-#   2. Embed graph          : text/timestamp ids   -> token embeddings
-#   3. Encoder graph        : audio(int16)+text_emb -> [audio_start, audio, audio_end, text]
-#   4. Rotary+Mask graph    : ids_len               -> cos, sin, causal mask
-#   5. Decoder-Main graph   : embeds+cos+sin+mask   -> argmax bucket per position
-#   6. gather buckets at "<timestamp>" positions, x 80 ms, monotonic-fix -> seconds
+# Host pipeline:
+#   1. split the transcript into word units, tokenize only lexical text, and
+#      insert metadata-owned audio/timestamp IDs into the prompt explicitly
+#   2. Merged graph (one run): Embed -> Encoder -> Rotary+Mask -> Decoder Main
+#   3. gather buckets at "<timestamp>" positions, x 80 ms, monotonic-fix -> seconds
+#
+# Large initializers are mmap'd once from ForcedAligner_SharedInitializers.onnx.data
+# and injected before session creation. There is no prefill/decode ping-pong to run:
+# that mechanism is meaningful only for autoregressive models with a growing KV cache.
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -47,22 +61,24 @@ from Example_Audio import model_audio_cases
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Qwen ForcedAligner ONNX inference.")
     parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", type=Path, default=_SCRIPT_DIR / "Qwen_ForcedAligner_Optimized", help="Folder containing ONNX graphs, for example Qwen_ForcedAligner_Optimized or Qwen_ForcedAligner_ONNX.")
+    parser.add_argument("--tokenizer-path", type=Path, default=None, help="Optional tokenizer directory; defaults to tokenizer inside the model folder.")
     return parser.parse_args()
 
 
 _ARGS = _parse_args()
 
 onnx_folder            = _ARGS.onnx_folder.expanduser().resolve()          # Selected ONNX graph folder.
-onnx_model_Metadata    = str(onnx_folder / "ASR_Matadata.onnx")
-onnx_model_Embed       = str(onnx_folder / "ForcedAligner_Embed.onnx")
-onnx_model_Encoder     = str(onnx_folder / "ForcedAligner_Encoder.onnx")
-onnx_model_Rotary_Mask = str(onnx_folder / "ForcedAligner_Rotary_Mask.onnx")
-onnx_model_Main        = str(onnx_folder / "ForcedAligner_Decoder_Main.onnx")
+onnx_model_Metadata    = str(onnx_folder / DEFAULT_MODEL_FILE_NAMES["metadata"])
+TOKENIZER_PATH = (
+    _ARGS.tokenizer_path.expanduser().resolve()
+    if _ARGS.tokenizer_path is not None
+    else onnx_folder / "tokenizer"
+)
 
 # Test (audio, transcript, language) triples for the inference demo.
 # NOTE: the transcript MUST match what is spoken in the clip — forced alignment
 # aligns a *known* transcript to the audio. Edit these to your own data.
-_TEST_AUDIO = dict(model_audio_cases("qwen_forced_aligner"))
+_TEST_AUDIO = {language: path for path, language in model_audio_cases("qwen_forced_aligner")}
 TEST_CASES = [
     (_TEST_AUDIO["zh"],  "開放時間：早上九點至下午五點。",  "Chinese"),
     (_TEST_AUDIO["en"],  "The tribal chieftain called for the boy, and presented him with fifty pieces of gold.", "English"),
@@ -75,47 +91,71 @@ TEST_CASES = [
 # ══════════════════════════════════════════════════════════════════════════════
 # Runtime Configuration
 # ══════════════════════════════════════════════════════════════════════════════
+# IMPORTANT: CLI options are intentionally limited to model/tokenizer paths.
+# Edit this section and TEST_CASES above for demo, audio, and runtime behavior.
 # The audio input dtype is auto-detected from the encoder's audio input tensor in the ONNX model
-# ("int16" -> raw PCM ÷32768 in-graph; "float16"/"float" -> pre-normalised [-1, 1]); no manual setting needed.
+# ("int16" -> raw PCM scaled in-graph; "float16"/"float" -> metadata-scaled
+# normalised audio); no manual setting is needed.
 USE_NORMALISE_AUDIO    = False             # Apply RMS loudness normalisation before feeding the model. Set False to pass raw audio through (only the dtype conversion is applied).
 
-ORT_Accelerate_Providers = []     # ['CUDAExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider']
+ORT_Accelerate_Providers = ["CUDAExecutionProvider"]     # ['CUDAExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider']
 ORT_LOG                  = False  # Enable ONNX Runtime logging for debugging.
 ORT_FP16                 = False  # FP16 ONNX Runtime settings. For CPUs, requires ARM64-v8.2a or newer.
 MAX_THREADS              = 0      # Parallel CPU threads. 0 = auto.
 DEVICE_ID                = 0      # Default to zero.
 
 
-_INV_INT16_SCALE = np.float32(1.0 / 32768.0)  # pre-computed [-1, 1] normalisation scale, reused every call
-
-
-def prepare_audio_input(audio_int16: np.ndarray, input_audio_dtype: str, target_rms: float = 8192.0) -> np.ndarray:
+def prepare_audio_input(
+    audio_int16: np.ndarray,
+    target_dtype: np.dtype,
+    audio_pcm_scale: int,
+    target_rms: float = 4096.0,
+) -> np.ndarray:
     # Fold the optional RMS loudness normalisation and the model-dtype conversion into a
     # single pass over the raw int16 PCM that pydub returns, casting to the model's
     # audio input dtype exactly once (no float32<->int16 round-trip for the float paths).
-    # `input_audio_dtype` is derived from the encoder's audio input tensor in the ONNX model.
-    #   "INT16": raw PCM (the graph divides by 32768 internally).
-    #   "F32"/"F16": normalised to [-1, 1] here (÷32768), because the float graph skips the
-    #   in-model division; "F16" stores those values (the graph up-casts back to f32).
-    if not USE_NORMALISE_AUDIO and input_audio_dtype == "INT16":
-        return np.ascontiguousarray(audio_int16, dtype=np.int16)
+    # `target_dtype` is derived exactly from the merged graph's public audio input.
+    if not USE_NORMALISE_AUDIO and target_dtype == np.dtype(np.int16):
+        return np.ascontiguousarray(audio_int16, dtype=target_dtype)
     audio = audio_int16.astype(np.float32)
     if USE_NORMALISE_AUDIO:
         rms = np.sqrt(np.mean(audio * audio, dtype=np.float32), dtype=np.float32)
         if rms > 0:
             audio *= (target_rms / (rms + 1e-7))
-            np.clip(audio, -32768.0, 32767.0, out=audio)
-    if input_audio_dtype == "INT16":
-        return audio.astype(np.int16)
-    audio *= _INV_INT16_SCALE   # fold the pre-computed ÷32768 scale into the same float buffer
-    if input_audio_dtype == "F16":
-        return audio.astype(np.float16)
-    return audio
+            np.clip(
+                audio,
+                -float(audio_pcm_scale),
+                float(audio_pcm_scale) - 1.0,
+                out=audio,
+            )
+    if target_dtype == np.dtype(np.int16):
+        return np.ascontiguousarray(audio, dtype=target_dtype)
+    audio *= np.float32(1.0 / audio_pcm_scale)
+    return np.ascontiguousarray(audio, dtype=target_dtype)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Special-Token IDs & timestamp buckets  (verified from config.json / tokenizer_config.json)
-# ══════════════════════════════════════════════════════════════════════════════
+def _build_alignment_prompt_ids(
+    tokenizer,
+    word_units: List[str],
+    special_token_ids: dict[str, int],
+    timestamp_tokens_per_word: int,
+) -> List[int]:
+    """Encode lexical units and insert every immutable control ID from metadata."""
+    audio_prefix = [
+        int(special_token_ids["audio_start"]),
+        int(special_token_ids["audio_pad"]),
+        int(special_token_ids["audio_end"]),
+    ]
+    timestamp_id = int(special_token_ids["timestamp"])
+    text_ts_ids: List[int] = []
+    for word in word_units:
+        lexical_ids = [
+            int(token_id)
+            for token_id in tokenizer.encode(word, add_special_tokens=False)
+        ]
+        text_ts_ids.extend(lexical_ids)
+        text_ts_ids.extend([timestamp_id] * timestamp_tokens_per_word)
+    return audio_prefix + text_ts_ids
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -177,12 +217,8 @@ class AlignerTextProcessor:
         return tokens
 
     def tokenize_japanese(self, text: str) -> List[str]:
-        try:
-            import nagisa
-            words = nagisa.tagging(text).words
-        except Exception:
-            print("  [WARN] 'nagisa' not available — falling back to whitespace/CJK tokenization for Japanese.")
-            return self.tokenize_space_lang(text)
+        import nagisa
+        words = nagisa.tagging(text).words
         tokens: List[str] = []
         for w in words:
             cleaned = self.clean_token(w)
@@ -191,14 +227,10 @@ class AlignerTextProcessor:
         return tokens
 
     def tokenize_korean(self, text: str) -> List[str]:
-        try:
-            if self.ko_tokenizer is None:
-                from soynlp.tokenizer import LTokenizer
-                self.ko_tokenizer = LTokenizer()
-            raw_tokens = self.ko_tokenizer.tokenize(text)
-        except Exception:
-            print("  [WARN] 'soynlp' not available — falling back to whitespace/CJK tokenization for Korean.")
-            return self.tokenize_space_lang(text)
+        if self.ko_tokenizer is None:
+            from soynlp.tokenizer import LTokenizer
+            self.ko_tokenizer = LTokenizer()
+        raw_tokens = self.ko_tokenizer.tokenize(text)
         tokens: List[str] = []
         for w in raw_tokens:
             cleaned = self.clean_token(w)
@@ -206,17 +238,13 @@ class AlignerTextProcessor:
                 tokens.append(cleaned)
         return tokens
 
-    def encode_timestamp(self, text: str, language: str) -> Tuple[List[str], str]:
+    def word_units(self, text: str, language: str) -> List[str]:
         language = language.lower()
         if language == "japanese":
-            word_list = self.tokenize_japanese(text)
+            return self.tokenize_japanese(text)
         elif language == "korean":
-            word_list = self.tokenize_korean(text)
-        else:
-            word_list = self.tokenize_space_lang(text)
-        input_text = "<timestamp><timestamp>".join(word_list) + "<timestamp><timestamp>"
-        input_text = "<|audio_start|><|audio_pad|><|audio_end|>" + input_text
-        return word_list, input_text
+            return self.tokenize_korean(text)
+        return self.tokenize_space_lang(text)
 
     # ── timestamp post-processing ──────────────────────────────────────────────
     def fix_timestamp(self, data) -> List[int]:
@@ -291,14 +319,23 @@ class AlignerTextProcessor:
                 i += 1
         return [int(res) for res in result]
 
-    def parse_timestamp(self, word_list: List[str], timestamp) -> List[Dict]:
+    def parse_timestamp(
+        self,
+        word_list: List[str],
+        timestamp,
+        timestamp_tokens_per_word: int,
+    ) -> List[Dict]:
         timestamp_output: List[Dict] = []
         timestamp_fixed = self.fix_timestamp(timestamp)
         for i, word in enumerate(word_list):
+            group_start = i * timestamp_tokens_per_word
+            timestamp_group = timestamp_fixed[
+                group_start:group_start + timestamp_tokens_per_word
+            ]
             timestamp_output.append({
                 "text": word,
-                "start_time": timestamp_fixed[i * 2],
-                "end_time": timestamp_fixed[i * 2 + 1],
+                "start_time": timestamp_group[0],
+                "end_time": timestamp_group[-1],
             })
         return timestamp_output
 
@@ -380,24 +417,34 @@ else:
     _ort_device_type = C.OrtDevice.cpu()
 
 _ort_device_obj  = C.OrtDevice(_ort_device_type, C.OrtDevice.default_memory(), DEVICE_ID)
-session_opts_ort = _build_session_opts_ort()
 run_options      = _build_run_options(silent=not ORT_LOG)
-disabled_opts    = ["CastFloat16Transformer", "FuseFp16InitializerToFp32NodeTransformer"] if ORT_FP16 else None
 
-_packed = dict(
-    sess_options=session_opts_ort,
-    providers=ORT_Accelerate_Providers or ["CPUExecutionProvider"],
-    provider_options=provider_options,
-    disabled_optimizers=disabled_opts,
-)
-
-
-def _make_session(path: str) -> onnxruntime.InferenceSession:
-    return onnxruntime.InferenceSession(path, **_packed)
+def _make_session(path: str, shared_path: str | None = None) -> onnxruntime.InferenceSession:
+    session_options = _build_session_opts_ort()
+    shared_refs = None
+    if shared_path is not None:
+        shared_refs = attach_shared_initializers(session_options, Path(shared_path))
+    session = onnxruntime.InferenceSession(
+        path,
+        sess_options=session_options,
+        providers=ORT_Accelerate_Providers or ["CPUExecutionProvider"],
+        provider_options=provider_options,
+        disabled_optimizers=(
+            ["CastFloat16Transformer", "FuseFp16InitializerToFp32NodeTransformer"]
+            if ORT_FP16 else None
+        ),
+    )
+    if shared_refs is not None:
+        # Memmaps and OrtValues must outlive the session. Dropping these references
+        # would leave add_initializer() pointing at released memory.
+        session._qwen_forced_aligner_shared_initializers = shared_refs
+    return session
 
 
 def _ort_from_numpy(arr: np.ndarray) -> onnxruntime.OrtValue:
-    return onnxruntime.OrtValue.ortvalue_from_numpy(arr, device_type, DEVICE_ID)
+    return onnxruntime.OrtValue.ortvalue_from_numpy(
+        np.ascontiguousarray(arr), device_type, DEVICE_ID
+    )
 
 
 def _bind_device_outputs(binding, names) -> None:
@@ -409,10 +456,6 @@ def _run(session, binding) -> None:
     session.run_with_iobinding(binding, run_options=run_options)
 
 
-def _in_names(session):
-    return [x.name for x in session.get_inputs()]
-
-
 def _out_names(session):
     return [x.name for x in session.get_outputs()]
 
@@ -421,156 +464,125 @@ def _out_names(session):
 # ── Inference Demo (single NAR forward per sample) ────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 def run_inference() -> None:
-    # The tokenizer is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
-    tokenizer         = AutoTokenizer.from_pretrained(str(onnx_folder / "tokenizer"), trust_remote_code=True)
+    print("Loading metadata …")
+    ort_session_Metadata = _make_session(onnx_model_Metadata)
+    _model_meta = ort_session_Metadata.get_modelmeta().custom_metadata_map or {}
+    model_file_names = DEFAULT_MODEL_FILE_NAMES
+    merged_path = onnx_folder / model_file_names["merged"]
+    shared_path = onnx_folder / model_file_names["shared_initializers"]
+
+    shared_initializer_path = str(shared_path) if shared_path.exists() else None
+    print("Loading merged compute session …")
+    ort_session_Merged = _make_session(str(merged_path), shared_initializer_path)
+    print(f"  Usable Providers : {ort_session_Merged.get_providers()}")
+    print("  Compute sessions : 1 merged (legacy split pipeline: 4)")
+
+    # The tokenizer is bundled inside the selected model folder, so inference is stand-alone.
+    tokenizer = AutoTokenizer.from_pretrained(str(TOKENIZER_PATH), trust_remote_code=True)
+    SPECIAL_TOKEN_IDS = load_special_token_ids(_model_meta)
+    SUPPORTED_LANGUAGES = load_supported_languages(_model_meta)
     aligner_processor = AlignerTextProcessor()
 
-    print("Loading sessions …")
-    ort_session_Metadata = _make_session(onnx_model_Metadata)
-    ort_session_Embed   = _make_session(onnx_model_Embed)
-    ort_session_Encoder = _make_session(onnx_model_Encoder)
-    ort_session_Rotary  = _make_session(onnx_model_Rotary_Mask)
-    ort_session_Main    = _make_session(onnx_model_Main)
-    print(f"  Usable Providers : {ort_session_Main.get_providers()}")
-
-    _model_meta = ort_session_Metadata.get_modelmeta().custom_metadata_map or {}
-    if _model_meta.get("qwen_forcedaligner_metadata_version") != "1":
-        raise ValueError(
-            f"Required Qwen_ForcedAligner metadata version 1 is missing from {onnx_model_Metadata}. "
-            "Re-export with Export_Qwen_ForcedAligner.py to stamp the model metadata."
-        )
-
-    def _meta_int(key: str) -> int:
-        value = _model_meta.get(key)
-        if value is None:
-            raise KeyError(
-                f"Required metadata key '{key}' is missing from {onnx_model_Metadata}. "
-                "Re-export with Export_Qwen_ForcedAligner.py to stamp the model metadata."
-            )
-        return int(value)
-
-    SAMPLE_RATE = _meta_int("sample_rate")
-    MAX_INPUT_AUDIO_LENGTH = _meta_int("input_audio_length")
-    MAX_SEQ_LEN = _meta_int("max_seq_len")
-    AUDIO_START_TOKEN_ID = _meta_int("audio_start_token_id")
-    AUDIO_END_TOKEN_ID = _meta_int("audio_end_token_id")
-    AUDIO_PAD_TOKEN_ID = _meta_int("audio_pad_token_id")
-    TIMESTAMP_TOKEN_ID = _meta_int("timestamp_token_id")
-    TIMESTAMP_SEGMENT_TIME = _meta_int("timestamp_segment_ms")
+    SAMPLE_RATE = int(_model_meta["sample_rate"])
+    TIMESTAMP_TOKEN_ID = SPECIAL_TOKEN_IDS["timestamp"]
+    TIMESTAMP_SEGMENT_TIME = int(_model_meta["timestamp_segment_ms"])
+    TIMESTAMP_TOKENS_PER_WORD = int(_model_meta["timestamp_tokens_per_word"])
+    AUDIO_PCM_SCALE = int(_model_meta["audio_pcm_scale"])
     print(
-        f"  Model metadata: {len(_model_meta)} keys "
-        f"(sample_rate={SAMPLE_RATE}, input_audio_length={MAX_INPUT_AUDIO_LENGTH}, "
-        f"max_seq_len={MAX_SEQ_LEN}, timestamp_segment_ms={TIMESTAMP_SEGMENT_TIME})."
+        f"  Model metadata: sample_rate={SAMPLE_RATE}, "
+        f"timestamp_segment_ms={TIMESTAMP_SEGMENT_TIME}, "
+        f"timestamp_tokens_per_word={TIMESTAMP_TOKENS_PER_WORD}."
     )
 
-    binding_Embed   = ort_session_Embed.io_binding()
-    binding_Encoder = ort_session_Encoder.io_binding()
-    binding_Rotary  = ort_session_Rotary.io_binding()
-    binding_Main    = ort_session_Main.io_binding()
+    binding_Merged = ort_session_Merged.io_binding()
+    out_name_Merged = _out_names(ort_session_Merged)
 
-    in_name_Embed,   out_name_Embed   = _in_names(ort_session_Embed),   _out_names(ort_session_Embed)
-    in_name_Encoder, out_name_Encoder = _in_names(ort_session_Encoder), _out_names(ort_session_Encoder)
-    in_name_Rotary,  out_name_Rotary  = _in_names(ort_session_Rotary),  _out_names(ort_session_Rotary)
-    in_name_Main,    out_name_Main    = _in_names(ort_session_Main),    _out_names(ort_session_Main)
-
-    # Encoder text_embed input dtype (float16 or float32 depending on quantization).
-    enc_text_meta = ort_session_Encoder._inputs_meta[1]
-    text_embed_np = np.float16 if "float16" in enc_text_meta.type else np.float32
-
-    # Audio input dtype comes straight from the encoder's audio input tensor in the ONNX model
-    # ("int16" -> raw PCM ÷32768 in-graph; "float16"/"float" -> pre-normalised [-1, 1]).
-    _audio_input_type = ort_session_Encoder._inputs_meta[0].type
-    input_audio_dtype = "INT16" if "int16" in _audio_input_type else ("F16" if "float16" in _audio_input_type else "F32")
+    input_meta = metadata_by_name(ort_session_Merged.get_inputs())
+    audio_meta = input_meta["audio"]
+    input_ids_meta = input_meta["input_ids"]
+    audio_dtype = numpy_dtype(audio_meta)
+    audio_sample_dim = audio_meta.shape[2]
+    if not is_dynamic_dim(audio_sample_dim):
+        runtime_audio_limit = int(audio_sample_dim)
+    else:
+        runtime_audio_limit = None
 
     for test_path, transcript, language in TEST_CASES:
-        if not os.path.isfile(test_path):
-            print(f"\n  [WARN] Cannot find '{test_path}' — skipping.")
-            continue
-        try:
-            audio_seg = AudioSegment.from_file(test_path)
-            audio_pcm = np.array(audio_seg.set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
-        except Exception:
-            print(f"\n  [WARN] Cannot load '{test_path}' — skipping.")
-            continue
+        language_code, language_entry = resolve_supported_language(
+            SUPPORTED_LANGUAGES, language
+        )
+        audio_seg = AudioSegment.from_file(test_path)
+        audio_pcm = np.array(audio_seg.set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)
 
         print(f"\nTest audio : {test_path}   ({len(audio_pcm) / SAMPLE_RATE:.2f} s)")
-        print(f"  Language   : {language}")
+        print(f"  Language   : {language_entry['name']} ({language_code})")
         print(f"  Transcript : {transcript}")
         print("─" * 70)
 
-        # 1. Build the alignment prompt and tokenize it.
-        word_list, input_text = aligner_processor.encode_timestamp(transcript, language)
+        # 1. Tokenize lexical units, then insert metadata-owned control IDs.
+        word_list = aligner_processor.word_units(transcript, language_entry["name"])
         if not word_list:
             print("  [WARN] Transcript produced no alignable units — skipping.")
             continue
-        full_ids = tokenizer(input_text, add_special_tokens=False)["input_ids"]
-        expected_audio_prefix = [AUDIO_START_TOKEN_ID, AUDIO_PAD_TOKEN_ID, AUDIO_END_TOKEN_ID]
-        if full_ids[:3] != expected_audio_prefix:
-            raise ValueError(
-                "Tokenizer audio special-token ids do not match ONNX metadata: "
-                f"got {full_ids[:3]}, expected {expected_audio_prefix}."
-            )
-        pad_pos = full_ids.index(AUDIO_PAD_TOKEN_ID)
-        text_ts_ids = full_ids[pad_pos + 2:]   # tokens after <|audio_end|> (words + timestamps)
+        full_ids = _build_alignment_prompt_ids(
+            tokenizer,
+            word_list,
+            SPECIAL_TOKEN_IDS,
+            TIMESTAMP_TOKENS_PER_WORD,
+        )
+        text_ts_ids = full_ids[3:]
         text_len = len(text_ts_ids)
 
-        audio_pcm = audio_pcm[:MAX_INPUT_AUDIO_LENGTH]
-        audio_np  = prepare_audio_input(audio_pcm.reshape(1, 1, -1), input_audio_dtype)
+        if runtime_audio_limit is not None:
+            audio_pcm = audio_pcm[:runtime_audio_limit]
+        audio_np = prepare_audio_input(
+            audio_pcm.reshape(1, 1, -1),
+            audio_dtype,
+            AUDIO_PCM_SCALE,
+        )
+        audio_np = array_for(
+            audio_meta,
+            audio_np,
+            axes={0: 1, 1: 1, 2: audio_np.shape[2]},
+        )
+        text_ids_np = array_for(
+            input_ids_meta,
+            [text_ts_ids],
+            axes={0: 1, 1: text_len},
+        )
         audio_ort = _ort_from_numpy(audio_np)
-        text_ids_ort = _ort_from_numpy(np.array([text_ts_ids], dtype=np.int32))
+        text_ids_ort = _ort_from_numpy(text_ids_np)
 
         t0 = time.time()
 
-        # 2. Embed text/timestamp ids.
-        binding_Embed.bind_ortvalue_input(in_name_Embed[0], text_ids_ort)
-        _bind_device_outputs(binding_Embed, out_name_Embed)
-        _run(ort_session_Embed, binding_Embed)
-        text_embed_ort = _ort_from_numpy(binding_Embed.get_outputs()[0].numpy().astype(text_embed_np))
+        # 2. One NAR graph launch: Embed -> Encoder -> Rotary+Mask -> Decoder Main.
+        binding_Merged.bind_ortvalue_input("audio", audio_ort)
+        binding_Merged.bind_ortvalue_input("input_ids", text_ids_ort)
+        _bind_device_outputs(binding_Merged, out_name_Merged)
+        _run(ort_session_Merged, binding_Merged)
+        output_ids_array = binding_Merged.get_outputs()[0].numpy()
+        output_ids = output_ids_array[0]   # (L,)
 
-        # 3. Encode audio and splice in the token embeddings.
-        binding_Encoder.bind_ortvalue_input(in_name_Encoder[0], audio_ort)
-        binding_Encoder.bind_ortvalue_input(in_name_Encoder[1], text_embed_ort)
-        _bind_device_outputs(binding_Encoder, out_name_Encoder)
-        _run(ort_session_Encoder, binding_Encoder)
-        concat_embed_ort, ids_len_ort = binding_Encoder.get_outputs()
-        ids_len_value = int(ids_len_ort.numpy().reshape(-1)[0])
-        if ids_len_value > MAX_SEQ_LEN:
-            raise ValueError(
-                f"Encoded sequence length {ids_len_value} exceeds metadata max_seq_len={MAX_SEQ_LEN}. "
-                "Use a shorter clip/transcript or re-export with a larger MAX_SEQ_LEN."
-            )
-
-        # 4. Rotary tables + causal mask for the full sequence.
-        binding_Rotary.bind_ortvalue_input(in_name_Rotary[0], ids_len_ort)
-        _bind_device_outputs(binding_Rotary, out_name_Rotary)
-        _run(ort_session_Rotary, binding_Rotary)
-        rotary_cos_ort, rotary_sin_ort, attention_mask_ort = binding_Rotary.get_outputs()
-
-        # 5. One NAR forward -> a timestamp bucket at every position.
-        binding_Main.bind_ortvalue_input(in_name_Main[0], concat_embed_ort)
-        binding_Main.bind_ortvalue_input(in_name_Main[1], rotary_cos_ort)
-        binding_Main.bind_ortvalue_input(in_name_Main[2], rotary_sin_ort)
-        binding_Main.bind_ortvalue_input(in_name_Main[3], attention_mask_ort)
-        _bind_device_outputs(binding_Main, out_name_Main)
-        _run(ort_session_Main, binding_Main)
-        output_ids = binding_Main.get_outputs()[0].numpy()[0]   # (L,)
-
-        # 6. Gather buckets at "<timestamp>" positions and convert to seconds.
+        # 3. Gather buckets at "<timestamp>" positions and convert to seconds.
         total_len    = output_ids.shape[0]
         text_start   = total_len - text_len   # text block sits after [audio_start, audio, audio_end]
         ts_positions = [text_start + j for j, tok in enumerate(text_ts_ids) if tok == TIMESTAMP_TOKEN_ID]
         timestamp_ms = output_ids[ts_positions].astype(np.int64) * TIMESTAMP_SEGMENT_TIME
-        aligned = aligner_processor.parse_timestamp(word_list, timestamp_ms)
+        aligned = aligner_processor.parse_timestamp(
+            word_list,
+            timestamp_ms,
+            TIMESTAMP_TOKENS_PER_WORD,
+        )
 
         t_total = time.time() - t0
-        rtf     = t_total / max(len(audio_pcm) / SAMPLE_RATE, 1e-6)
+        rtf     = t_total / (len(audio_pcm) / SAMPLE_RATE)
 
         print("  Timestamps :")
         for item in aligned:
             start_s = round(item["start_time"] / 1000.0, 3)
             end_s   = round(item["end_time"] / 1000.0, 3)
             print(f"    {start_s:7.3f}s → {end_s:7.3f}s   {item['text']}")
-        print(f"\n  RTF : {rtf:.3f}   total {t_total:.2f}s")
+        print(f"\n  RTF : {rtf:.3f}   total {t_total:.2f}s   graph launches: 1 (split: 4)")
         print("─" * 70)
 
 

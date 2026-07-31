@@ -1,771 +1,828 @@
+"""Run FireRedASR-AED with merged prefill/decode graphs and shared weights."""
+
+from __future__ import annotations
+
 import argparse
-import re
-import time
 import logging
+import re
 import sys
+import time
+from pathlib import Path
+
 import numpy as np
 import onnxruntime
 import sentencepiece as spm
 from onnxruntime.capi import _pybind_state as C
-from pathlib import Path
 from pydub import AudioSegment
 
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _SCRIPT_DIR.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 from Example_Audio import model_audio_paths
+from ORT_IO import (
+    array_for,
+    filled_for,
+    is_dynamic_dim,
+    metadata_by_name,
+    load_special_token_ids,
+    load_supported_languages,
+    numpy_dtype,
+    resolve_shape,
+    scalar_for,
+    resolve_supported_language,
+)
+from Shared_Merged import DEFAULT_MODEL_FILE_NAMES, attach_shared_initializers
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="Run FireRedASR AED ONNX inference.")
-    parser.add_argument("--onnx-folder", "--model-folder", dest="onnx_folder", type=Path, default=_SCRIPT_DIR / "FireRedASR_Optimized", help="Folder containing ONNX graphs, for example FireRedASR_Optimized or FireRedASR_ONNX. The tokenizer assets (dict.txt + train_bpe1000.model) are read from this same folder.")
+    parser = argparse.ArgumentParser(
+        description="Run the merged/shared FireRedASR AED ONNX pipeline."
+    )
+    parser.add_argument(
+        "--onnx-folder",
+        "--model-folder",
+        dest="onnx_folder",
+        type=Path,
+        default=SCRIPT_DIR / "FireRedASR_Optimized",
+        help="Folder containing merged graphs and FireRedASR_SharedInitializers.onnx(.data).",
+    )
+    parser.add_argument(
+        "--vocab-path",
+        "--dict-path",
+        dest="vocab_path",
+        type=Path,
+        default=None,
+        help="Optional token dictionary; defaults to dict.txt in the model folder.",
+    )
+    parser.add_argument(
+        "--tokenizer-path",
+        "--bpe-model-path",
+        dest="tokenizer_path",
+        type=Path,
+        default=None,
+        help="Optional SentencePiece model; defaults to train_bpe1000.model in the model folder.",
+    )
     return parser.parse_args()
 
 
-_ARGS = _parse_args()
+ARGS = _parse_args()
+ONNX_FOLDER = ARGS.onnx_folder.expanduser().resolve()
+METADATA_PATH = ONNX_FOLDER / "ASR_Metadata.onnx"
+VOCAB_PATH = (
+    ARGS.vocab_path.expanduser().resolve()
+    if ARGS.vocab_path is not None
+    else ONNX_FOLDER / "dict.txt"
+)
+TOKENIZER_PATH = (
+    ARGS.tokenizer_path.expanduser().resolve()
+    if ARGS.tokenizer_path is not None
+    else ONNX_FOLDER / "train_bpe1000.model"
+)
 
 
-# -- Optimized ONNX graph paths (Optimize_ONNX.py output): core pipeline (Embed keeps token ids out of the float decoder; Prefill / Decode build position embedding + causal mask) --
-onnx_folder            = _ARGS.onnx_folder.expanduser().resolve()                # Selected ONNX graph folder (also holds the bundled tokenizer assets).
+# ============================================================================
+# User configuration
+# ============================================================================
+# IMPORTANT: CLI options are intentionally path-only. Edit this section for all
+# decoding, audio, demo, and runtime behavior.
+USE_SAMPLING = False  # Sampling takes precedence over deterministic decoding.
+TEMPERATURE = 0.8
+TOP_K = 3
+TOP_P = 0.95
+REPEAT_PENALTY = 0.8  # 1.0 selects greedy; another value selects penalty-greedy.
+SAMPLING_REPETITION_PENALTY = 1.0
+PENALTY_RANGE = 10
+USE_NORMALISE_AUDIO = False
+SLIDING_WINDOW = 0
+DECODE_MAX_LEN = 0
+LANGUAGE = "zh"
 
-onnx_model_Metadata    = f"{onnx_folder}/ASR_Matadata.onnx"               # Tiny metadata carrier graph.
-onnx_model_Encoder     = f"{onnx_folder}/FireRedASR_Encoder.onnx"                # The exported ONNX encoder model path.
-onnx_model_Decoder     = f"{onnx_folder}/FireRedASR_Decoder.onnx"                # The exported ONNX decoder (main, pure-float) model path.
-onnx_model_Embed       = f"{onnx_folder}/FireRedASR_Decoder_Embed.onnx"          # Token-embedding graph (keeps int ids out of the decoder).
-onnx_model_Prefill     = f"{onnx_folder}/FireRedASR_Position_Mask_Prefill.onnx"  # Prefill position-embedding + causal-mask graph.
-onnx_model_Decode      = f"{onnx_folder}/FireRedASR_Position_Mask_Decode.onnx"   # Decode position-embedding graph for the single new token.
-onnx_model_Greedy      = f"{onnx_folder}/FireRedASR_Greedy_Search.onnx"          # Greedy argmax + save_id history (used with Apply_Penality).
-onnx_model_Argmax      = f"{onnx_folder}/FireRedASR_Argmax.onnx"                 # Bare argmax (greedy decoding without a repetition penalty).
-onnx_model_First_Beam  = f"{onnx_folder}/FireRedASR_First_Beam_Search.onnx"      # First beam-search step.
-onnx_model_Second_Beam = f"{onnx_folder}/FireRedASR_Second_Beam_Search.onnx"     # Subsequent beam-search steps.
-onnx_model_Penality    = f"{onnx_folder}/FireRedASR_Apply_Penality.onnx"         # Sliding-window repetition penalty on the logits.
-
-
-test_audio = model_audio_paths("fireredasr")  # The test audio list.
-
-
-USE_BEAM_SEARCH     = False   # Use beam search or greedy search.
-DECODE_MAX_LEN      = 0       # Match original AED: 0 means use encoder time length.
-REPEAT_PENALITY     = 1.0     # Original FireRedASR-AED uses no repetition penalty; keep 1.0 for parity.
-PENALITY_RANGE      = 10      # Penalizes the most recent output. "30" means the last 30 tokens.
-TOP_K               = 3       # The top k candidate in decoding.
-BEAM_SIZE           = 3       # Number of beams in searching.
-SLIDING_WINDOW      = 0       # Set the sliding window step for test audio reading; use 0 to disable.
-# The audio input dtype is auto-detected from the encoder's audio input tensor in the ONNX model
-# (kaldi fbank keeps the int16 numeric range, so "float16"/"float" carry int16-range values, no ÷32768); no manual setting needed.
-USE_NORMALISE_AUDIO = False   # RMS-normalize the input audio before inference; False = feed raw int16 PCM (matches the original kaldi_native_fbank pipeline).
-
-# ---- ONNX Runtime runtime configuration (IOBinding + shared buffers) ----
-ORT_Accelerate_Providers = []     # ORT execution providers; ['CUDAExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider']
-ORT_LOG                  = False  # Enable ONNX Runtime logging for debugging. Set to False for best performance.
-ORT_FP16                 = False  # Set to True for FP16 ONNX Runtime settings. For CPUs, this requires ARM64-v8.2a or newer.
-MAX_THREADS              = 0      # Parallel CPU threads. Set 0 for auto.
-DEVICE_ID                = 0      # Default to zero.
+test_audio = model_audio_paths("fireredasr")
 
 
-print('\nLoading the FireRedASR models...')
+# ============================================================================
+# ONNX Runtime configuration
+# ============================================================================
+ORT_Accelerate_Providers = []
+ORT_LOG = False
+ORT_FP16 = False
+MAX_THREADS = 0
+DEVICE_ID = 0
 
 
-# ── Tokenizer (inlined from the FireRedASR project so this script is standalone) ──
-# Copied from fireredasr/data/token_dict.py (TokenDict) and
-# fireredasr/tokenizer/aed_tokenizer.py (ChineseCharEnglishSpmTokenizer).
+def prepare_audio_input(
+    audio_int16: np.ndarray,
+    input_audio_dtype: np.dtype,
+    *,
+    audio_pcm_scale: int,
+    target_rms: float = 4096.0,
+) -> np.ndarray:
+    """Convert raw PCM once; Kaldi fbank keeps the int16 numeric range."""
+    if not USE_NORMALISE_AUDIO and input_audio_dtype == np.dtype(np.int16):
+        return np.ascontiguousarray(audio_int16, dtype=input_audio_dtype)
+    audio = audio_int16.astype(np.float32)
+    if USE_NORMALISE_AUDIO:
+        rms = np.sqrt(np.mean(audio * audio, dtype=np.float32), dtype=np.float32)
+        if rms > 0:
+            audio *= target_rms / (rms + 1e-7)
+            np.clip(audio, -32768.0, 32767.0, out=audio)
+    if input_audio_dtype != np.dtype(np.int16):
+        audio *= np.float32(1.0 / audio_pcm_scale)
+    return audio.astype(input_audio_dtype)
+
+
+# ============================================================================
+# Standalone tokenizer implementation
+# ============================================================================
 class TokenDict:
     def __init__(self, dict_path, unk=""):
-        assert dict_path != ""
         self.id2word, self.word2id = self.read_dict(dict_path)
         self.unk = unk
-        assert unk == "" or unk in self.word2id
         self.unkid = self.word2id[unk] if unk else -1
 
     def get(self, key, default):
-        if type(default) == str:
+        if isinstance(default, str):
             default = self.word2id[default]
         return self.word2id.get(key, default)
 
     def __getitem__(self, key):
-        if type(key) == str:
+        if isinstance(key, str):
             if self.unk:
                 return self.word2id.get(key, self.word2id[self.unk])
-            else:
-                return self.word2id[key]
-        elif type(key) == int:
-            return self.id2word[key]
-        else:
-            raise TypeError("Key should be str or int")
+            return self.word2id[key]
+        if isinstance(key, (int, np.integer)):
+            return self.id2word[int(key)]
+        return self.word2id[key]
 
     def __len__(self):
         return len(self.id2word)
 
-    def __contains__(self, query):
-        if type(query) == str:
-            return query in self.word2id
-        elif type(query) == int:
-            return query in self.id2word
-        else:
-            raise TypeError("query should be str or int")
-
-    def read_dict(self, dict_path):
+    @staticmethod
+    def read_dict(dict_path):
         id2word, word2id = [], {}
-        with open(dict_path, encoding='utf8') as f:
-            for i, line in enumerate(f):
-                tokens = line.strip().split()
-                if len(tokens) >= 2:
-                    word, index = tokens[0], int(tokens[1])
-                elif len(tokens) == 1:
-                    word, index = tokens[0], i
-                else:  # empty line or space
-                    logging.info(f"Find empty line or space '{line.strip()}' in {dict_path}:L{i}, set to ' '")
-                    word, index = " ", i
-                assert len(id2word) == index
-                assert len(word2id) == index
+        with open(dict_path, encoding="utf8") as file:
+            for line_number, line in enumerate(file):
+                pieces = line.strip().split()
+                if len(pieces) >= 2:
+                    word, index = pieces[0], int(pieces[1])
+                elif len(pieces) == 1:
+                    word, index = pieces[0], line_number
+                else:
+                    logging.info(
+                        "Empty dictionary line %s:%s becomes a literal space",
+                        dict_path,
+                        line_number,
+                    )
+                    word, index = " ", line_number
                 if word == "<space>":
-                    logging.info(f"NOTE: Find <space> in {dict_path}:L{i} and convert it to ' '")
                     word = " "
                 word2id[word] = index
                 id2word.append(word)
-        assert len(id2word) == len(word2id)
         return id2word, word2id
 
 
 class ChineseCharEnglishSpmTokenizer:
-    """
-    - One Chinese char is a token.
-    - Split English word into SPM and one piece is a token.
-    - Ignore ' ' between Chinese char
-    - Replace ' ' between English word with "▁" by spm_model
-    - Need to put SPM piece into dict file
-    - If not set spm_model, will use English char and <space>
-    """
     SPM_SPACE = "▁"
 
     def __init__(self, dict_path, spm_model, unk="<unk>", space="<space>"):
         self.dict = TokenDict(dict_path, unk=unk)
         self.space = space
-        if spm_model:
-            self.sp = spm.SentencePieceProcessor()
-            self.sp.Load(spm_model)
-        else:
-            self.sp = None
-            print("[WRAN] Not set spm_model, will use English char")
-            print("[WARN] Please check how to deal with ' '(space)")
-            if self.space not in self.dict:
-                print("Please add <space> to your dict, or it will be <unk>")
+        self.sp = spm.SentencePieceProcessor()
+        self.sp.Load(spm_model)
 
     def tokenize(self, text, replace_punc=True):
         text = text.upper()
-        tokens = []
         if replace_punc:
-            text = re.sub(r"[，。？！,\.?!]", " ", text)
-        pattern = re.compile(r'([\u3400-\u4dbf\u4e00-\u9fff])')
-        parts = pattern.split(text.strip())
-        parts = [p for p in parts if len(p.strip()) > 0]
+            text = re.sub(r"[，。？！,\.!?]", " ", text)
+        pattern = re.compile(r"([\u3400-\u4dbf\u4e00-\u9fff])")
+        parts = [part for part in pattern.split(text.strip()) if part.strip()]
+        tokens = []
         for part in parts:
-            if pattern.fullmatch(part) is not None:
+            if pattern.fullmatch(part):
                 tokens.append(part)
             else:
-                if self.sp:
-                    for piece in self.sp.EncodeAsPieces(part.strip()):
-                        tokens.append(piece)
-                else:
-                    for char in part.strip():
-                        tokens.append(char if char != " " else self.space)
-        tokens_id = []
-        for token in tokens:
-            tokens_id.append(self.dict.get(token, self.dict.unk))
-        return tokens, tokens_id
+                tokens.extend(self.sp.EncodeAsPieces(part.strip()))
+        return tokens, [self.dict.get(token, self.dict.unk) for token in tokens]
 
     def detokenize(self, inputs, join_symbol="", replace_spm_space=True):
-        """inputs is ids or tokens, do not need self.sp"""
-        if len(inputs) > 0 and type(inputs[0]) == int:
-            tokens = [self.dict[id] for id in inputs]
-        else:
-            tokens = inputs
-        s = f"{join_symbol}".join(tokens)
-        if replace_spm_space:
-            s = s.replace(self.SPM_SPACE, ' ').strip()
-        return s
+        tokens = (
+            [self.dict[int(index)] for index in inputs]
+            if len(inputs) > 0 and isinstance(inputs[0], (int, np.integer))
+            else inputs
+        )
+        text = join_symbol.join(tokens)
+        return text.replace(self.SPM_SPACE, " ").strip() if replace_spm_space else text
 
 
+# ============================================================================
+# ORT helpers
+# ============================================================================
 def _build_run_options(silent):
-    ro                     = onnxruntime.RunOptions()
-    ro.log_severity_level  = 0 if not silent else 4
-    ro.log_verbosity_level = 4
-    ro.add_run_config_entry("disable_synchronize_execution_providers", "0")
-    return ro
+    options = onnxruntime.RunOptions()
+    options.log_severity_level = 4 if silent else 0
+    options.log_verbosity_level = 4
+    options.add_run_config_entry("disable_synchronize_execution_providers", "0")
+    return options
 
 
-def _build_session_opts_ort():
-    opts                          = onnxruntime.SessionOptions()
-    opts.log_severity_level       = 0 if ORT_LOG else 4
-    opts.log_verbosity_level      = 4
-    opts.inter_op_num_threads     = MAX_THREADS
-    opts.intra_op_num_threads     = MAX_THREADS
-    opts.execution_mode           = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
-    opts.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
-    cfgs = {
-        "session.set_denormal_as_zero"                 : "1",
-        "session.intra_op.allow_spinning"               : "1",
-        "session.inter_op.allow_spinning"               : "1",
-        "session.enable_quant_qdq_cleanup"              : "1",
-        "session.qdq_matmulnbits_accuracy_level"        : "2" if ORT_FP16 else "4",
-        "session.use_device_allocator_for_initializers" : "1",
-        "session.graph_optimizations_loop_level"        : "2",
-        "optimization.enable_gelu_approximation"        : "1",
-        "optimization.minimal_build_optimizations"      : "",
-        "optimization.enable_cast_chain_elimination"    : "1",
-        "optimization.disable_specified_optimizers"     : (
+def _build_session_options():
+    options = onnxruntime.SessionOptions()
+    options.log_severity_level = 0 if ORT_LOG else 4
+    options.log_verbosity_level = 4
+    options.inter_op_num_threads = MAX_THREADS
+    options.intra_op_num_threads = MAX_THREADS
+    options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+    options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+    entries = {
+        "session.set_denormal_as_zero": "1",
+        "session.intra_op.allow_spinning": "1",
+        "session.inter_op.allow_spinning": "1",
+        "session.enable_quant_qdq_cleanup": "1",
+        "session.qdq_matmulnbits_accuracy_level": "2" if ORT_FP16 else "4",
+        "session.use_device_allocator_for_initializers": "1",
+        "session.graph_optimizations_loop_level": "2",
+        "optimization.enable_gelu_approximation": "1",
+        "optimization.minimal_build_optimizations": "",
+        "optimization.enable_cast_chain_elimination": "1",
+        "optimization.disable_specified_optimizers": (
             "CastFloat16Transformer;FuseFp16InitializerToFp32NodeTransformer"
-            if ORT_FP16 else ""
+            if ORT_FP16
+            else ""
         ),
     }
-    for key, value in cfgs.items():
-        opts.add_session_config_entry(key, value)
-    return opts
+    for key, value in entries.items():
+        options.add_session_config_entry(key, value)
+    return options
 
 
-if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
-    provider_options = [{
-        'device_type'              : 'CPU',
-        'precision'                : 'ACCURACY',
-        'num_of_threads'           : MAX_THREADS if MAX_THREADS != 0 else 8,
-        'num_streams'              : 1,
-        'enable_opencl_throttling' : False,
-        'enable_qdq_optimizer'     : False,
-        'disable_dynamic_shapes'   : False,
-    }]
-    device_type      = "cpu"
-    _ort_device_type = C.OrtDevice.cpu()
+def _resolve_provider():
+    if "OpenVINOExecutionProvider" in ORT_Accelerate_Providers:
+        return "cpu", C.OrtDevice.cpu(), [{
+            "device_type": "CPU",
+            "precision": "ACCURACY",
+            "num_of_threads": MAX_THREADS if MAX_THREADS else 8,
+            "num_streams": 1,
+            "enable_opencl_throttling": False,
+            "enable_qdq_optimizer": False,
+            "disable_dynamic_shapes": False,
+        }]
+    if "CUDAExecutionProvider" in ORT_Accelerate_Providers:
+        return "cuda", C.OrtDevice.cuda(), [{
+            "device_id": DEVICE_ID,
+            "gpu_mem_limit": 24 * 1024**3,
+            "arena_extend_strategy": "kNextPowerOfTwo",
+            "cudnn_conv_algo_search": "EXHAUSTIVE",
+            "sdpa_kernel": "2",
+            "use_tf32": "1",
+            "fuse_conv_bias": "0",
+            "cudnn_conv_use_max_workspace": "1",
+            "cudnn_conv1d_pad_to_nc1d": "0",
+            "tunable_op_enable": "0",
+            "tunable_op_tuning_enable": "0",
+            "tunable_op_max_tuning_duration_ms": 10,
+            "do_copy_in_default_stream": "0",
+            "enable_cuda_graph": "0",
+            "prefer_nhwc": "0",
+            "enable_skip_layer_norm_strict_mode": "0",
+            "use_ep_level_unified_stream": "0",
+        }]
+    if "DmlExecutionProvider" in ORT_Accelerate_Providers:
+        return "dml", C.OrtDevice.dml(), [{
+            "device_id": DEVICE_ID,
+            "performance_preference": "high_performance",
+            "device_filter": "gpu",
+            "disable_metacommands": "false",
+            "enable_graph_capture": "false",
+            "enable_graph_serialization": "false",
+        }]
+    return "cpu", C.OrtDevice.cpu(), None
 
-elif "CUDAExecutionProvider" in ORT_Accelerate_Providers:
-    provider_options = [{
-        'device_id'                              : DEVICE_ID,
-        'gpu_mem_limit'                          : 24 * (1024 ** 3),
-        'arena_extend_strategy'                  : 'kNextPowerOfTwo',
-        'cudnn_conv_algo_search'                 : 'EXHAUSTIVE',
-        'sdpa_kernel'                            : '2',
-        'use_tf32'                               : '1',
-        'fuse_conv_bias'                         : '0',
-        'cudnn_conv_use_max_workspace'           : '1',
-        'cudnn_conv1d_pad_to_nc1d'               : '0',
-        'tunable_op_enable'                      : '0',
-        'tunable_op_tuning_enable'               : '0',
-        'tunable_op_max_tuning_duration_ms'      : 10,
-        'do_copy_in_default_stream'              : '0',
-        'enable_cuda_graph'                      : '0',
-        'prefer_nhwc'                            : '0',
-        'enable_skip_layer_norm_strict_mode'     : '0',
-        'use_ep_level_unified_stream'            : '0',
-    }]
-    device_type      = "cuda"
-    _ort_device_type = C.OrtDevice.cuda()
 
-elif "DmlExecutionProvider" in ORT_Accelerate_Providers:
-    provider_options = [{
-        'device_id'                  : DEVICE_ID,
-        'performance_preference'     : 'high_performance',
-        'device_filter'              : 'gpu',
-        'disable_metacommands'       : 'false',
-        'enable_graph_capture'       : 'false',
-        'enable_graph_serialization' : 'false',
-    }]
-    device_type      = "dml"
-    _ort_device_type = C.OrtDevice.dml()
-
-else:
-    provider_options = None
-    device_type      = "cpu"
-    _ort_device_type = C.OrtDevice.cpu()
-
-_ort_device_obj = C.OrtDevice(_ort_device_type, C.OrtDevice.default_memory(), DEVICE_ID)
-session_opts_ort = _build_session_opts_ort()
-run_options      = _build_run_options(silent=not ORT_LOG)
-disabled_opts    = (
-    ["CastFloat16Transformer", "FuseFp16InitializerToFp32NodeTransformer"]
-    if ORT_FP16 else None
+RUN_OPTIONS = _build_run_options(silent=not ORT_LOG)
+DEVICE_TYPE, ORT_DEVICE_TYPE, PROVIDER_OPTIONS = _resolve_provider()
+ORT_DEVICE = C.OrtDevice(
+    ORT_DEVICE_TYPE, C.OrtDevice.default_memory(), DEVICE_ID
 )
-_packed = {
-    'sess_options'        : session_opts_ort,
-    'providers'           : ORT_Accelerate_Providers or ["CPUExecutionProvider"],
-    'provider_options'    : provider_options,
-    'disabled_optimizers' : disabled_opts,
-}
+PROVIDERS = ORT_Accelerate_Providers or ["CPUExecutionProvider"]
 
 
-def _make_session(path):
-    return onnxruntime.InferenceSession(path, **_packed)
+def _make_session(path: Path, shared_path: Path | None = None):
+    options = _build_session_options()
+    refs = None
+    if shared_path is not None:
+        refs = attach_shared_initializers(options, shared_path)
+    session = onnxruntime.InferenceSession(
+        str(path),
+        sess_options=options,
+        providers=PROVIDERS,
+        provider_options=PROVIDER_OPTIONS,
+        disabled_optimizers=(
+            ["CastFloat16Transformer", "FuseFp16InitializerToFp32NodeTransformer"]
+            if ORT_FP16
+            else None
+        ),
+    )
+    if refs is not None:
+        # The memmaps and OrtValues must outlive SessionOptions.add_initializer().
+        session._native_llm_shared_initializers = refs
+    return session
 
 
-def _ort_from_numpy(arr):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(arr, device_type, DEVICE_ID)
+def _run(session, binding):
+    session.run_with_iobinding(binding, run_options=RUN_OPTIONS)
 
 
-def _ort_zeros(shape, dtype):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(shape, dtype=dtype), device_type, DEVICE_ID)
+def _inputs(session):
+    return [value.name for value in session.get_inputs()]
 
 
-def _ort_from_data(data, dtype):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(np.array(data, dtype=dtype), device_type, DEVICE_ID)
+def _outputs(session):
+    return [value.name for value in session.get_outputs()]
 
 
-def _bind_inputs(binding, names, values):
-    for name, value in zip(names, values):
-        binding.bind_ortvalue_input(name, value)
+def _ort_value(array, target_device=None):
+    return onnxruntime.OrtValue.ortvalue_from_numpy(
+        np.ascontiguousarray(array), target_device or DEVICE_TYPE, DEVICE_ID
+    )
 
 
 def _bind_device_outputs(binding, names):
     for name in names:
-        binding._iobinding.bind_output(name, _ort_device_obj)
+        binding._iobinding.bind_output(name, ORT_DEVICE)
 
 
-def _run(session, binding):
-    session.run_with_iobinding(binding, run_options=run_options)
+def _load_metadata(path: Path):
+    options = onnxruntime.SessionOptions()
+    options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
+    options.log_severity_level = 4
+    session = onnxruntime.InferenceSession(
+        str(path), sess_options=options, providers=["CPUExecutionProvider"]
+    )
+    return session.get_modelmeta().custom_metadata_map or {}
 
 
-def _in_names(session):
-    return [x.name for x in session.get_inputs()]
+MODEL_META = _load_metadata(METADATA_PATH)
 
 
-def _out_names(session):
-    return [x.name for x in session.get_outputs()]
+MODEL_FILES = DEFAULT_MODEL_FILE_NAMES
+AUDIO_PCM_SCALE = int(MODEL_META["audio_pcm_scale"])
+MAX_SEQ_LEN = int(MODEL_META["max_seq_len"])
+SAMPLE_RATE = int(MODEL_META["sample_rate"])
+SPECIAL_TOKEN_IDS = load_special_token_ids(MODEL_META)
+SUPPORTED_LANGUAGES = load_supported_languages(MODEL_META)
+LANGUAGE_CODE, LANGUAGE_ENTRY = resolve_supported_language(
+    SUPPORTED_LANGUAGES, LANGUAGE
+)
 
+tokenizer = ChineseCharEnglishSpmTokenizer(str(VOCAB_PATH), str(TOKENIZER_PATH))
+SOS_TOKEN = SPECIAL_TOKEN_IDS["sos"]
+STOP_TOKENS = {SPECIAL_TOKEN_IDS["stop"]}
 
-def _np_dtype(meta):
-    return np.float16 if "float16" in meta.type else np.float32
-
-
-def prepare_audio_input(audio_int16: np.ndarray, input_audio_dtype: str, target_rms: float = 8192.0) -> np.ndarray:
-    # Fold the optional RMS loudness normalisation and the model-dtype conversion into a
-    # single pass over the raw int16 PCM that pydub returns, casting to the model's audio input
-    # dtype exactly once. `input_audio_dtype` is derived from the ONNX model's audio input tensor.
-    # The Kaldi fbank front-end consumes the int16 numeric range directly, so the float variants
-    # carry int16-range values (there is NO ÷32768 here).
-    if not USE_NORMALISE_AUDIO and input_audio_dtype == "INT16":
-        return np.ascontiguousarray(audio_int16, dtype=np.int16)
-    audio = audio_int16.astype(np.float32)
-    if USE_NORMALISE_AUDIO:
-        rms = np.sqrt(np.mean(audio * audio, dtype=np.float32), dtype=np.float32)
-        if rms > 0:
-            audio *= (target_rms / (rms + 1e-7))
-            np.clip(audio, -32768.0, 32767.0, out=audio)
-    if input_audio_dtype == "INT16":
-        return audio.astype(np.int16)
-    if input_audio_dtype == "F16":
-        return audio.astype(np.float16)   # NOTE: int16-range in f16 is lossy (~±16 ULP near 32768)
-    return audio                          # F32: int16-range values as float32 (kaldi keeps this range)
-
-
-# ---- Core pipeline sessions ----
-ort_session_Metadata = _make_session(onnx_model_Metadata)
-ort_session_Encoder = _make_session(onnx_model_Encoder)
-print(f"\nUsable Providers: {ort_session_Encoder.get_providers()}")
-shape_value_in = ort_session_Encoder._inputs_meta[0].shape[-1]
-in_name_Encoder = _in_names(ort_session_Encoder)
-out_name_Encoder = _out_names(ort_session_Encoder)
-in_name_Encoder0 = in_name_Encoder[0]
-binding_Encoder = ort_session_Encoder.io_binding()
-
-# The audio input dtype is taken straight from the encoder's audio input tensor in the ONNX model,
-# so it always matches how the model was exported (kaldi fbank keeps the int16 numeric range;
-# "float16"/"float" carry int16-range values with no ÷32768).
-_audio_input_type = ort_session_Encoder._inputs_meta[0].type
-input_audio_dtype = "INT16" if "int16" in _audio_input_type else ("F16" if "float16" in _audio_input_type else "F32")
-_audio_np_dtype = {"INT16": np.int16, "F32": np.float32, "F16": np.float16}[input_audio_dtype]   # sliding-window buffer dtype
-
-_model_meta = ort_session_Metadata.get_modelmeta().custom_metadata_map or {}
-
-def _meta_int(key):
-    value = _model_meta.get(key)
-    if value is None:
-        raise KeyError(
-            f"Required metadata key '{key}' is missing from {onnx_model_Metadata}. "
-            f"Re-export with Export_FireRedASR_AED.py to stamp the model metadata."
-        )
-    return int(value)
-
-
-def _meta_int_list(key):
-    value = _model_meta.get(key)
-    if value is None:
-        raise KeyError(
-            f"Required metadata key '{key}' is missing from {onnx_model_Metadata}. "
-            f"Re-export with Export_FireRedASR_AED.py to stamp the model metadata."
-        )
-    return [int(x) for x in value.split(",") if x != ""]
-
-
-METADATA_INPUT_AUDIO_LENGTH = _meta_int("input_audio_length")
-MAX_SEQ_LEN = _meta_int("max_seq_len")
-SAMPLE_RATE = _meta_int("sample_rate")
-SOS_TOKEN = _meta_int("sos_token_id")
-STOP_TOKEN = _meta_int_list("stop_token_ids")
-print(f"\nModel metadata: {len(_model_meta)} keys "
-    f"(input_audio_length={METADATA_INPUT_AUDIO_LENGTH}, max_seq_len={MAX_SEQ_LEN}, "
-      f"sample_rate={SAMPLE_RATE}, sos={SOS_TOKEN}, stop_token_ids={STOP_TOKEN}).")
-
-ort_session_Decoder = _make_session(onnx_model_Decoder)
-in_name_Decoder = _in_names(ort_session_Decoder)
-out_name_Decoder = _out_names(ort_session_Decoder)
-amount_of_outputs_Decoder = len(out_name_Decoder)
-binding_Decoder = ort_session_Decoder.io_binding()
-
-num_layers = (amount_of_outputs_Decoder - 1) // 2          # outputs = decoder K/V caches (2 * L) + logits.
-num_keys_values = num_layers + num_layers
-# Beam search I/O indices (Qwen ASR layout). Inputs: caches(2L), logits, save_id[, prev_prob], beam_size[, topK].
-# Outputs: caches(2L), save_id, top_beam_prob, top_beam_indices (next token), max_logits_idx.
-beam_logits_in_idx   = num_keys_values                # logits input to First/Second beam.
-beam_save_id_in_idx  = num_keys_values + 1            # save_id input to First/Second beam.
-first_beam_size_idx  = num_keys_values + 2            # beam_size input (First beam).
-second_prev_prob_idx = num_keys_values + 2            # previous_prob input (Second beam).
-second_beam_size_idx = num_keys_values + 3            # beam_size input (Second beam).
-second_topk_idx      = num_keys_values + 4            # topK input (Second beam).
-beam_save_id_out_idx = num_keys_values                # save_id output.
-beam_prob_out_idx    = num_keys_values + 1            # top_beam_prob output.
-beam_ids_out_idx     = num_keys_values + 2            # top_beam_indices output (next token to embed).
-beam_max_out_idx     = num_keys_values + 3            # max_logits_idx output (stop check).
-idx_en_key = num_keys_values                          # decoder inputs: en cross-attn keys start (2 * L).
-idx_en_value = idx_en_key + num_layers                # en cross-attn values start (3 * L).
-idx_hidden = idx_en_value + num_layers                # token-embedding (hidden_states) input (4 * L).
-idx_position = idx_hidden + 1                         # position-embedding input (4 * L + 1); mask is in_name_Decoder[-1].
-out_name_Decoder_kv = out_name_Decoder[:num_keys_values]
-out_name_Decoder_logits = out_name_Decoder[num_keys_values]
-in_name_Decoder_self_kv = in_name_Decoder[:num_keys_values]         # decoder self-attn K/V cache feedback (beam / greedy).
-in_name_Decoder_en_kv = in_name_Decoder[idx_en_key: idx_hidden]     # encoder cross-attn K/V (rebound once per window).
-in_name_Decoder_hidden = in_name_Decoder[idx_hidden]               # token-embedding (hidden_states) input.
-in_name_Decoder_position = in_name_Decoder[idx_position]           # position-embedding input.
-in_name_Decoder_mask = in_name_Decoder[-1]                         # causal attention-mask input.
-vocab_size = ort_session_Decoder._outputs_meta[num_keys_values].shape[-1]
-hidden_size = ort_session_Decoder._inputs_meta[idx_hidden].shape[-1]
-
-kv_cache_dtype = _np_dtype(ort_session_Decoder._inputs_meta[0])
-logits_dtype = _np_dtype(ort_session_Decoder._outputs_meta[num_keys_values])
-hidden_dtype = _np_dtype(ort_session_Decoder._inputs_meta[idx_hidden])
-position_dtype = _np_dtype(ort_session_Decoder._inputs_meta[idx_position])
-mask_dtype = _np_dtype(ort_session_Decoder._inputs_meta[-1])
-
-ort_session_Embed = _make_session(onnx_model_Embed)
-in_name_Embed = _in_names(ort_session_Embed)
-out_name_Embed = _out_names(ort_session_Embed)
-in_name_Embed0 = in_name_Embed[0]
-out_name_Embed0 = out_name_Embed[0]
-binding_Embed = ort_session_Embed.io_binding()
-
-ort_session_Prefill = _make_session(onnx_model_Prefill)
-in_name_Prefill = _in_names(ort_session_Prefill)
-out_name_Prefill = _out_names(ort_session_Prefill)
-binding_Prefill = ort_session_Prefill.io_binding()
-
-ort_session_Decode = _make_session(onnx_model_Decode)
-in_name_Decode = _in_names(ort_session_Decode)
-out_name_Decode = _out_names(ort_session_Decode)
-in_name_Decode0 = in_name_Decode[0]
-out_name_Decode_position = out_name_Decode[0]
-out_name_Decode_kv_seq_len = out_name_Decode[1]
-binding_Decode = ort_session_Decode.io_binding()
-
-# Tokenizer assets are bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
-tokenizer = ChineseCharEnglishSpmTokenizer(str(onnx_folder / "dict.txt"), str(onnx_folder / "train_bpe1000.model"))
-
-# ---- Decoding-strategy resolution ----
-if USE_BEAM_SEARCH and (TOP_K < BEAM_SIZE):
-    TOP_K = BEAM_SIZE
-if (TOP_K < 2) or (BEAM_SIZE < 2):
-    USE_BEAM_SEARCH = False
-    print("\nInappropriate Beam Search setting detected. Falling back to Greedy Search.")
-if not USE_BEAM_SEARCH:
-    BEAM_SIZE = 1
-decode_batch = BEAM_SIZE
-do_repeat_penality = REPEAT_PENALITY != 1.0
-
-beam_size_ort = _ort_from_data([BEAM_SIZE], np.int64)
-topK_ort = _ort_from_data([TOP_K], np.int64)
-
-if USE_BEAM_SEARCH:
-    ort_session_First_Beam = _make_session(onnx_model_First_Beam)
-    in_name_First_Beam = _in_names(ort_session_First_Beam)
-    out_name_First_Beam = _out_names(ort_session_First_Beam)
-    binding_First_Beam = ort_session_First_Beam.io_binding()
-
-    ort_session_Second_Beam = _make_session(onnx_model_Second_Beam)
-    in_name_Second_Beam = _in_names(ort_session_Second_Beam)
-    out_name_Second_Beam = _out_names(ort_session_Second_Beam)
-    binding_Second_Beam = ort_session_Second_Beam.io_binding()
-
-    # Pre-slice the beam I/O names once so the hot decode loop never re-slices these lists.
-    in_name_First_Beam_kv = in_name_First_Beam[:num_keys_values]
-    out_name_First_Beam_kv = out_name_First_Beam[:num_keys_values]
-    in_name_First_Beam_logits = in_name_First_Beam[beam_logits_in_idx]
-    in_name_First_Beam_save_id = in_name_First_Beam[beam_save_id_in_idx]
-    out_name_First_Beam_save_id = out_name_First_Beam[beam_save_id_out_idx]
-    out_name_First_Beam_prob = out_name_First_Beam[beam_prob_out_idx]
-    out_name_First_Beam_ids = out_name_First_Beam[beam_ids_out_idx]
-    out_name_First_Beam_max = out_name_First_Beam[beam_max_out_idx]
-    in_name_Second_Beam_kv = in_name_Second_Beam[:num_keys_values]
-    out_name_Second_Beam_kv = out_name_Second_Beam[:num_keys_values]
-    in_name_Second_Beam_logits = in_name_Second_Beam[beam_logits_in_idx]
-    in_name_Second_Beam_save_id = in_name_Second_Beam[beam_save_id_in_idx]
-    in_name_Second_Beam_prev_prob = in_name_Second_Beam[second_prev_prob_idx]
-    out_name_Second_Beam_save_id = out_name_Second_Beam[beam_save_id_out_idx]
-    out_name_Second_Beam_prob = out_name_Second_Beam[beam_prob_out_idx]
-    out_name_Second_Beam_ids = out_name_Second_Beam[beam_ids_out_idx]
-    out_name_Second_Beam_max = out_name_Second_Beam[beam_max_out_idx]
-
-    prob_dtype = _np_dtype(ort_session_First_Beam._outputs_meta[beam_prob_out_idx])
-
-    # Shared beam buffers (fixed shape, reused every step).
-    beam_ids_buf = _ort_zeros((BEAM_SIZE, 1), np.int32)              # top_beam_indices (next token to embed).
-    beam_score_buf = _ort_zeros((BEAM_SIZE, 1), prob_dtype)         # top_beam_prob / previous_prob (self-aliased).
-
-    # Static beam inputs (bound once).
-    binding_First_Beam.bind_ortvalue_input(in_name_First_Beam[first_beam_size_idx], beam_size_ort)
-    binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam[second_beam_size_idx], beam_size_ort)
-    binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam[second_topk_idx], topK_ort)
+# Sampling owns its sign-aware repetition penalty and takes precedence. The
+# deterministic path keeps the legacy direct logit multiplier isolated.
+if USE_SAMPLING:
+    STRATEGY = "sampling"
+    USE_PENALTY = False
 else:
-    ort_session_Greedy = _make_session(onnx_model_Greedy)
-    in_name_Greedy = _in_names(ort_session_Greedy)
-    out_name_Greedy = _out_names(ort_session_Greedy)
-    binding_Greedy = ort_session_Greedy.io_binding()
-    in_name_Greedy_logits = in_name_Greedy[0]
-    in_name_Greedy_save_id = in_name_Greedy[1]
-    out_name_Greedy_max = out_name_Greedy[0]
-    out_name_Greedy_save_id = out_name_Greedy[1]
+    USE_PENALTY = REPEAT_PENALTY != 1.0
+    STRATEGY = "penalty_greedy" if USE_PENALTY else "greedy"
 
-    ort_session_Argmax = _make_session(onnx_model_Argmax)
-    in_name_Argmax = _in_names(ort_session_Argmax)
-    out_name_Argmax = _out_names(ort_session_Argmax)
-    binding_Argmax = ort_session_Argmax.io_binding()
-    in_name_Argmax_logits = in_name_Argmax[0]
-    out_name_Argmax_max = out_name_Argmax[0]
+GRAPH_PAIRS = {
+    "greedy": ("prefill_greedy", "decode_greedy"),
+    "penalty_greedy": ("prefill_penalty_greedy", "decode_penalty_greedy"),
+    "sampling": ("prefill_sampling", "decode_sampling"),
+}
+PREFILL_ROLE, DECODE_ROLE = GRAPH_PAIRS[STRATEGY]
+PREFILL_PATH = ONNX_FOLDER / MODEL_FILES[PREFILL_ROLE]
+DECODE_PATH = ONNX_FOLDER / MODEL_FILES[DECODE_ROLE]
+SHARED_PATH = ONNX_FOLDER / MODEL_FILES["shared_initializers"]
 
-# Repetition penalty is a standalone pass applied to the logits before greedy / beam selection (Qwen ASR style).
-if do_repeat_penality:
-    ort_session_Penality = _make_session(onnx_model_Penality)
-    in_name_Penality = _in_names(ort_session_Penality)
-    out_name_Penality = _out_names(ort_session_Penality)[0]
-    binding_Penality = ort_session_Penality.io_binding()
-    in_name_Penality_logits = in_name_Penality[0]
-    in_name_Penality_save_id = in_name_Penality[1]
-    num_penality_inputs = len(in_name_Penality)
-    # penality_range is baked into the graph via int(), so ORT may prune it as a dead input; guard the binds.
-    if num_penality_inputs > 2:
-        penality_value_dtype = _np_dtype(ort_session_Penality._inputs_meta[2])
-        penality_value_ort = _ort_from_data([REPEAT_PENALITY], penality_value_dtype)
-        binding_Penality.bind_ortvalue_input(in_name_Penality[2], penality_value_ort)
-    if num_penality_inputs > 3:
-        penality_range_ort = _ort_from_data([PENALITY_RANGE], np.int64)
-        binding_Penality.bind_ortvalue_input(in_name_Penality[3], penality_range_ort)
 
-# ---- Fixed shared buffers (sized from model meta; the audio window is a fresh OrtValue per clip) ----
-history_len_ort = _ort_from_data([0], np.int64)                    # history_len = 0 (each prefill starts fresh).
-hidden_states_buf = _ort_zeros((decode_batch, 1, hidden_size), hidden_dtype)
-position_buf = _ort_zeros((1, 1, hidden_size), position_dtype)
-decode_mask_buf = _ort_zeros((1, 1, 1), mask_dtype)                # decode-phase mask is all-zeros (the new token sees every cached position).
-prefill_logits_buf = _ort_zeros((1, vocab_size), logits_dtype)
-decode_logits_buf = _ort_zeros((decode_batch, vocab_size), logits_dtype)
-max_idx_buf = _ort_zeros((1, 1), np.int32)                        # next-token (greedy) / stop-check (beam) buffer.
+def _leading_names(names, prefix):
+    result = []
+    for name in names:
+        if not name.startswith(prefix):
+            break
+        result.append(name)
+    return result
 
-input_ids_np = np.array([[SOS_TOKEN]], dtype=np.int32)            # FireRedASR-AED prompt is the single SOS token.
-input_ids_buf = _ort_from_numpy(input_ids_np)
-input_ids_len_ort = _ort_from_data([input_ids_np.shape[-1]], np.int64)
-max_generate_limit = MAX_SEQ_LEN - input_ids_np.shape[-1]
 
-# FireRedASR-AED always starts from the same one-token SOS prompt. Precompute its embedding and
-# prefill position/mask once, then keep the Embed graph rebound to the decode-token shared buffer.
-prompt_embed_buf = _ort_zeros((1, input_ids_np.shape[-1], hidden_size), hidden_dtype)
-prefill_position_buf = _ort_zeros((1, input_ids_np.shape[-1], hidden_size), position_dtype)
-prefill_mask_buf = _ort_zeros((1, input_ids_np.shape[-1], input_ids_np.shape[-1]), mask_dtype)
-prefill_kv_seq_len_seed = _ort_zeros((1,), np.int64)
-kv_seq_len_seed_np = np.array([input_ids_np.shape[-1]], dtype=np.int64)
-kv_seq_len_ort = _ort_zeros((1,), np.int64)
+def _plan_merged_io(session, strategy, is_decode):
+    inputs = _inputs(session)
+    outputs = _outputs(session)
+    state_inputs = _leading_names(inputs, "in_de_")
+    state_outputs = _leading_names(outputs, "out_de_")
 
-binding_Embed.bind_ortvalue_input(in_name_Embed0, input_ids_buf)
-binding_Embed.bind_ortvalue_output(out_name_Embed0, prompt_embed_buf)
-_run(ort_session_Embed, binding_Embed)
-
-_bind_inputs(binding_Prefill, in_name_Prefill, [input_ids_len_ort, history_len_ort])
-binding_Prefill.bind_ortvalue_output(out_name_Prefill[0], prefill_position_buf)
-binding_Prefill.bind_ortvalue_output(out_name_Prefill[1], prefill_mask_buf)
-binding_Prefill.bind_ortvalue_output(out_name_Prefill[2], prefill_kv_seq_len_seed)
-_run(ort_session_Prefill, binding_Prefill)
-
-if USE_BEAM_SEARCH:
-    binding_Embed.bind_ortvalue_input(in_name_Embed0, beam_ids_buf)
-else:
-    binding_Embed.bind_ortvalue_input(in_name_Embed0, max_idx_buf)
-binding_Embed.bind_ortvalue_output(out_name_Embed0, hidden_states_buf)
-
-binding_Decode.bind_ortvalue_input(in_name_Decode0, kv_seq_len_ort)
-binding_Decode.bind_ortvalue_output(out_name_Decode_position, position_buf)
-binding_Decode.bind_ortvalue_output(out_name_Decode_kv_seq_len, kv_seq_len_ort)
-
-# Empty decoder self-attention caches (batch 1) reused for every prefill pass.
-past_keys_Decoder = _ort_zeros((1, ort_session_Decoder._outputs_meta[0].shape[1], ort_session_Decoder._outputs_meta[0].shape[2], 0), kv_cache_dtype)
-past_values_Decoder = _ort_zeros((1, ort_session_Decoder._outputs_meta[num_layers].shape[1], 0, ort_session_Decoder._outputs_meta[num_layers].shape[3]), kv_cache_dtype)
-
-# Load the input audio
-for language_idx, test in enumerate(test_audio):
-    print("----------------------------------------------------------------------------------------------------------")
-    print(f"\nTest Input Audio: {test}")
-    audio = np.array(AudioSegment.from_file(test).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)  # Raw int16 PCM; prepare_audio_input owns the optional RMS + dtype conversion.
-    audio_len = len(audio)
-    audio = prepare_audio_input(audio.reshape(1, 1, -1), input_audio_dtype)
-    if SLIDING_WINDOW <= 0:
-        INPUT_AUDIO_LENGTH = min(METADATA_INPUT_AUDIO_LENGTH, audio_len) if isinstance(shape_value_in, str) else shape_value_in
-        stride_step = INPUT_AUDIO_LENGTH
+    if strategy == "sampling":
+        max_output = "sampling_sampled_id"
+        next_token_output = max_output
+        save_output = "sampling_save_id_out"
+    elif strategy == "penalty_greedy":
+        max_output = "greedy_max_logits_idx"
+        next_token_output = max_output
+        save_output = "greedy_save_id_out"
     else:
-        INPUT_AUDIO_LENGTH = min(METADATA_INPUT_AUDIO_LENGTH, audio_len) if isinstance(shape_value_in, str) else shape_value_in
-        stride_step = SLIDING_WINDOW
-    if SLIDING_WINDOW > 0 and audio_len > INPUT_AUDIO_LENGTH:
-        num_windows = int(np.ceil((audio_len - INPUT_AUDIO_LENGTH) / stride_step)) + 1
-        total_length_needed = (num_windows - 1) * stride_step + INPUT_AUDIO_LENGTH
-        pad_amount = total_length_needed - audio_len
-        final_slice = audio[:, :, -pad_amount:].astype(np.float32)
-        white_noise = (np.sqrt(np.mean(final_slice * final_slice)) * np.random.normal(loc=0.0, scale=1.0, size=(1, 1, pad_amount))).astype(audio.dtype)
-        audio = np.concatenate((audio, white_noise), axis=-1)
-    elif SLIDING_WINDOW > 0 and audio_len < INPUT_AUDIO_LENGTH:
-        audio_float = audio.astype(np.float32)
-        white_noise = (np.sqrt(np.mean(audio_float * audio_float)) * np.random.normal(loc=0.0, scale=1.0, size=(1, 1, INPUT_AUDIO_LENGTH - audio_len))).astype(audio.dtype)
-        audio = np.concatenate((audio, white_noise), axis=-1)
-    aligned_len = audio.shape[-1]
+        max_output = "argmax_max_logits_idx"
+        next_token_output = max_output
+        save_output = None
 
-    slice_start = 0
-    slice_end = INPUT_AUDIO_LENGTH
-    audio_buffer = _ort_zeros((1, 1, INPUT_AUDIO_LENGTH), _audio_np_dtype)
-    save_token_array = np.zeros(0, dtype=np.int32)
-    # Start to run FireRedASR
+    kv_seq_candidates = [
+        name
+        for name in outputs
+        if name.startswith(("prefill_kv_seq_len", "decode_kv_seq_len_next"))
+    ]
+    kv_seq_output = kv_seq_candidates[0]
+    cross_inputs = [
+        name for name in inputs if name.startswith(("en_key_", "en_value_"))
+    ]
+    cross_outputs = [
+        name
+        for name in outputs
+        if name.startswith(("encoder_en_key_", "encoder_en_value_"))
+    ]
+    cross_source = cross_inputs if is_decode else [
+        name.removeprefix("encoder_") for name in cross_outputs
+    ]
+    key_cross = [name for name in cross_source if name.startswith("en_key_")]
+    num_layers = len(key_cross)
+    if strategy == "sampling":
+        save_inputs = ["sampling_previous_ids"]
+    elif strategy == "penalty_greedy":
+        save_inputs = ["greedy_save_id_in"]
+        if is_decode:
+            save_inputs.append("penalty_save_id_in")
+    else:
+        save_inputs = []
+
+    sampling_inputs = [
+        "sampling_temperature",
+        "sampling_top_k",
+        "sampling_top_p",
+        "sampling_repetition_penalty",
+    ]
+    if strategy != "sampling":
+        sampling_inputs = []
+    return {
+        "inputs": inputs,
+        "outputs": outputs,
+        "state_inputs": state_inputs,
+        "state_outputs": state_outputs,
+        "cross_inputs": cross_inputs,
+        "cross_outputs": cross_outputs,
+        "token_input": "embed_input_ids",
+        "kv_seq_input": "decode_kv_seq_len" if is_decode else None,
+        "kv_seq_output": kv_seq_output,
+        "max_output": max_output,
+        "next_token_output": next_token_output,
+        "save_inputs": save_inputs,
+        "save_output": save_output,
+        "sampling_inputs": sampling_inputs,
+        "num_layers": num_layers,
+    }
+
+
+def _empty_self_kv(meta):
+    sequence_axis = _self_kv_sequence_axis(meta.name)
+    return filled_for(meta, axes={0: 1, sequence_axis: 0})
+
+
+def _bind_array(binding, meta, value, keepalive, *, axes, target_device=None):
+    ort_value = _ort_value(
+        array_for(meta, value, axes=axes), target_device
+    )
+    keepalive.append(ort_value)
+    binding.bind_ortvalue_input(meta.name, ort_value)
+    return ort_value
+
+
+def _bind_scalar(binding, meta, value, keepalive, target_device=None):
+    ort_value = _ort_value(scalar_for(meta, value), target_device)
+    keepalive.append(ort_value)
+    binding.bind_ortvalue_input(meta.name, ort_value)
+    return ort_value
+
+
+def _bind_feedback(binding, meta, value):
+    binding.bind_ortvalue_input(meta.name, value)
+
+
+def _bind_sampling_controls(binding, plan, input_meta, keepalive):
+    values = {
+        "sampling_temperature": [TEMPERATURE],
+        "sampling_top_k": [TOP_K],
+        "sampling_top_p": [TOP_P],
+        "sampling_repetition_penalty": [SAMPLING_REPETITION_PENALTY],
+    }
+    for name in plan["sampling_inputs"]:
+        _bind_scalar(binding, input_meta[name], values[name][0], keepalive)
+
+
+print("\nLoading merged FireRedASR sessions and one shared initializer mmap ...")
+PREFILL_SESSION = _make_session(PREFILL_PATH, SHARED_PATH)
+DECODE_SESSION = _make_session(DECODE_PATH, SHARED_PATH)
+print(f"Usable Providers: {DECODE_SESSION.get_providers()}")
+print(
+    f"Decoder strategy: {STRATEGY}; sessions=2 (Encoder+prefill + decode); "
+    "decode launches/token=1; shared initializer blob=1."
+)
+PREFILL_PLAN = _plan_merged_io(PREFILL_SESSION, STRATEGY, False)
+DECODE_PLAN = _plan_merged_io(DECODE_SESSION, STRATEGY, True)
+KV_NUM_TENSORS = len(DECODE_PLAN["state_inputs"])
+PREFILL_INPUT_META = metadata_by_name(PREFILL_SESSION.get_inputs())
+DECODE_INPUT_META = metadata_by_name(DECODE_SESSION.get_inputs())
+
+
+def _self_kv_sequence_axis(name):
+    meta = DECODE_INPUT_META.get(name)
+    if meta is None:
+        meta = PREFILL_INPUT_META.get(name)
+    candidates = [
+        axis
+        for axis, dim in enumerate(meta.shape)
+        if axis != 0 and is_dynamic_dim(dim)
+    ]
+    return candidates[-1]
+
+PREFILL_OUTPUT_INDEX = {
+    name: index for index, name in enumerate(PREFILL_PLAN["outputs"])
+}
+DECODE_OUTPUT_INDEX = {
+    name: index for index, name in enumerate(DECODE_PLAN["outputs"])
+}
+
+AUDIO_INPUT = PREFILL_INPUT_META["audio"]
+AUDIO_NP_DTYPE = numpy_dtype(AUDIO_INPUT)
+
+def _prefill(audio_buffer, audio_window):
+    binding = PREFILL_SESSION.io_binding()
+    keepalive = []
+    audio_buffer.update_inplace(
+        array_for(
+            AUDIO_INPUT,
+            audio_window,
+            axes={0: 1, 1: 1, 2: audio_window.shape[2]},
+        )
+    )
+    _bind_feedback(binding, AUDIO_INPUT, audio_buffer)
+    kv_device = "cpu" if DEVICE_TYPE == "dml" else DEVICE_TYPE
+    for name in PREFILL_PLAN["state_inputs"]:
+        meta = PREFILL_INPUT_META[name]
+        _bind_array(
+            binding,
+            meta,
+            _empty_self_kv(meta),
+            keepalive,
+            axes={0: 1, _self_kv_sequence_axis(name): 0},
+            target_device=kv_device,
+        )
+    token_meta = PREFILL_INPUT_META[PREFILL_PLAN["token_input"]]
+    prompt = array_for(token_meta, [[SOS_TOKEN]], axes={0: 1, 1: 1})
+    _bind_array(
+        binding,
+        token_meta,
+        prompt,
+        keepalive,
+        axes={0: 1, 1: 1},
+    )
+    _bind_scalar(binding, PREFILL_INPUT_META["prefill_ids_len"], 1, keepalive)
+    _bind_scalar(binding, PREFILL_INPUT_META["prefill_history_len"], 0, keepalive)
+    for name in PREFILL_PLAN["save_inputs"]:
+        meta = PREFILL_INPUT_META[name]
+        _bind_array(
+            binding,
+            meta,
+            filled_for(meta, axes={0: 1, 1: 0}),
+            keepalive,
+            axes={0: 1, 1: 0},
+        )
+    _bind_sampling_controls(binding, PREFILL_PLAN, PREFILL_INPUT_META, keepalive)
+    _bind_device_outputs(binding, PREFILL_PLAN["outputs"])
+    _run(PREFILL_SESSION, binding)
+    return binding.get_outputs()
+
+
+def _decode_tokens(prefill_outputs, generate_limit):
+    state = prefill_outputs[:KV_NUM_TENSORS]
+    cross_kv = {
+        decode_name: prefill_outputs[PREFILL_OUTPUT_INDEX[prefill_name]]
+        for prefill_name, decode_name in zip(
+            PREFILL_PLAN["cross_outputs"],
+            DECODE_PLAN["cross_inputs"],
+        )
+    }
+    next_token = prefill_outputs[
+        PREFILL_OUTPUT_INDEX[PREFILL_PLAN["next_token_output"]]
+    ]
+    kv_seq_len = prefill_outputs[
+        PREFILL_OUTPUT_INDEX[PREFILL_PLAN["kv_seq_output"]]
+    ]
+    selected = int(
+        prefill_outputs[
+            PREFILL_OUTPUT_INDEX[PREFILL_PLAN["max_output"]]
+        ].numpy().reshape(-1)[0]
+    )
+    save_id = (
+        prefill_outputs[PREFILL_OUTPUT_INDEX[PREFILL_PLAN["save_output"]]]
+        if PREFILL_PLAN["save_output"] is not None
+        else None
+    )
+
+    generated_tokens = []
+    generated_count = 0
+    if selected not in STOP_TOKENS and generate_limit > 0:
+        generated_count = 1
+        if save_id is None:
+            generated_tokens.append(selected)
+
+    # Batch-one decoding alternates two bindings so every growing cache, history,
+    # and kv_seq_len output is distinct from the same invocation's input buffers.
+    bindings = [DECODE_SESSION.io_binding(), DECODE_SESSION.io_binding()]
+    static_keepalive = [[], []]
+    for binding, keepalive in zip(bindings, static_keepalive):
+        for name in DECODE_PLAN["cross_inputs"]:
+            _bind_feedback(
+                binding,
+                DECODE_INPUT_META[name],
+                cross_kv[name],
+            )
+        if STRATEGY == "penalty_greedy":
+            _bind_scalar(
+                binding,
+                DECODE_INPUT_META["penalty_penalty_range"],
+                PENALTY_RANGE,
+                keepalive,
+            )
+        _bind_sampling_controls(binding, DECODE_PLAN, DECODE_INPUT_META, keepalive)
+
+    penalty_off = penalty_on = None
+    if "penalty_penalty_value" in DECODE_PLAN["inputs"]:
+        penalty_meta = DECODE_INPUT_META["penalty_penalty_value"]
+        penalty_off = _ort_value(scalar_for(penalty_meta, 1.0))
+        penalty_on = _ort_value(scalar_for(penalty_meta, REPEAT_PENALTY))
+        for keepalive in static_keepalive:
+            keepalive.extend((penalty_off, penalty_on))
+
+    final_save_id = save_id
+    decode_steps = 0
+    start = time.time()
+    while generated_count < generate_limit and selected not in STOP_TOKENS:
+        binding = bindings[decode_steps & 1]
+        _bind_feedback(
+            binding,
+            DECODE_INPUT_META[DECODE_PLAN["token_input"]],
+            next_token,
+        )
+        _bind_feedback(
+            binding,
+            DECODE_INPUT_META[DECODE_PLAN["kv_seq_input"]],
+            kv_seq_len,
+        )
+        for name, value in zip(DECODE_PLAN["state_inputs"], state):
+            _bind_feedback(
+                binding,
+                DECODE_INPUT_META[name],
+                value,
+            )
+        for name in DECODE_PLAN["save_inputs"]:
+            _bind_feedback(binding, DECODE_INPUT_META[name], save_id)
+        if penalty_on is not None:
+            _bind_feedback(
+                binding,
+                DECODE_INPUT_META["penalty_penalty_value"],
+                penalty_on if generated_count >= PENALTY_RANGE else penalty_off,
+            )
+
+        binding.clear_binding_outputs()
+        _bind_device_outputs(binding, DECODE_PLAN["outputs"])
+        _run(DECODE_SESSION, binding)
+        outputs = binding.get_outputs()
+        state = outputs[:KV_NUM_TENSORS]
+        next_token = outputs[
+            DECODE_OUTPUT_INDEX[DECODE_PLAN["next_token_output"]]
+        ]
+        kv_seq_len = outputs[
+            DECODE_OUTPUT_INDEX[DECODE_PLAN["kv_seq_output"]]
+        ]
+        selected = int(
+            outputs[DECODE_OUTPUT_INDEX[DECODE_PLAN["max_output"]]]
+            .numpy()
+            .reshape(-1)[0]
+        )
+        if DECODE_PLAN["save_output"] is not None:
+            save_id = outputs[
+                DECODE_OUTPUT_INDEX[DECODE_PLAN["save_output"]]
+            ]
+            final_save_id = save_id
+        if selected not in STOP_TOKENS:
+            generated_count += 1
+            if save_id is None:
+                generated_tokens.append(selected)
+        decode_steps += 1
+
+    elapsed = time.time() - start
+    if final_save_id is not None:
+        generated_tokens = []
+        for token in final_save_id.numpy()[0]:
+            token = int(token)
+            if token in STOP_TOKENS or len(generated_tokens) >= generate_limit:
+                break
+            generated_tokens.append(token)
+    return generated_tokens, decode_steps, elapsed
+
+
+# ============================================================================
+# End-to-end demo
+# ============================================================================
+for test in test_audio:
+    print("-" * 106)
+    print(f"\nTest Input Audio: {test}")
+    segment = (
+        AudioSegment.from_file(test)
+        .set_channels(1)
+        .set_frame_rate(SAMPLE_RATE)
+        .set_sample_width(2)
+    )
+    raw_audio = np.asarray(segment.get_array_of_samples(), dtype=np.int16)
+    audio_len = raw_audio.size
+    audio_prefix = resolve_shape(
+        AUDIO_INPUT, axes={0: 1, 1: 1, 2: audio_len}
+    )[:2]
+    audio = prepare_audio_input(
+        raw_audio.reshape(*audio_prefix, audio_len),
+        AUDIO_NP_DTYPE,
+        audio_pcm_scale=AUDIO_PCM_SCALE,
+    )
+
+    fixed_shape = PREFILL_INPUT_META["audio"].shape[-1]
+    window_length = (
+        audio_len
+        if is_dynamic_dim(fixed_shape)
+        else fixed_shape
+    )
+    audio_shape = resolve_shape(
+        AUDIO_INPUT, axes={0: 1, 1: 1, 2: window_length}
+    )
+    stride = window_length if SLIDING_WINDOW <= 0 else SLIDING_WINDOW
+    if audio_len <= window_length:
+        windows = 1
+    else:
+        windows = int(np.ceil((audio_len - window_length) / stride)) + 1
+    aligned_length = (windows - 1) * stride + window_length
+    if audio.shape[-1] < aligned_length:
+        audio = np.concatenate(
+            [
+                audio,
+                np.zeros(
+                    (*audio_shape[:2], aligned_length - audio.shape[-1]),
+                    dtype=numpy_dtype(AUDIO_INPUT),
+                ),
+            ],
+            axis=-1,
+        )
+
+    audio_buffer = _ort_value(
+        filled_for(AUDIO_INPUT, axes={0: 1, 1: 1, 2: window_length})
+    )
+    all_tokens = []
+    total_decode_steps = 0
+    total_decode_time = 0.0
     start_time = time.time()
-    while slice_end <= aligned_len:
-        # ---- Encoder (per-clip shared buffer keeps the dynamic input length while avoiding per-window OrtValue churn) ----
-        audio_buffer.update_inplace(np.ascontiguousarray(audio[:, :, slice_start: slice_end]))
-        binding_Encoder.bind_ortvalue_input(in_name_Encoder0, audio_buffer)
-        _bind_device_outputs(binding_Encoder, out_name_Encoder)
-        _run(ort_session_Encoder, binding_Encoder)
-        encoder_outputs = binding_Encoder.get_outputs()                    # f16 cross-attn K/V, already sliced to valid encoder length.
-        _bind_inputs(binding_Decoder, in_name_Decoder_en_kv, encoder_outputs)
-        encoder_time_len = encoder_outputs[0].shape()[-1]
-        generate_limit = min(max_generate_limit, DECODE_MAX_LEN if DECODE_MAX_LEN > 0 else encoder_time_len)
+    for window_index in range(windows):
+        start_sample = window_index * stride
+        audio_window = array_for(
+            AUDIO_INPUT,
+            audio[:, :, start_sample : start_sample + window_length],
+            axes={0: audio_shape[0], 1: audio_shape[1], 2: window_length},
+        )
+        prefill_outputs = _prefill(
+            audio_buffer,
+            audio_window,
+        )
+        first_cross = PREFILL_PLAN["cross_outputs"][0]
+        encoder_time_len = prefill_outputs[
+            PREFILL_OUTPUT_INDEX[first_cross]
+        ].shape()[-1]
+        generate_limit = min(
+            MAX_SEQ_LEN - 1,
+            DECODE_MAX_LEN if DECODE_MAX_LEN > 0 else encoder_time_len,
+        )
+        window_tokens, decode_steps, decode_time = _decode_tokens(
+            prefill_outputs, generate_limit
+        )
+        all_tokens.extend(window_tokens)
+        total_decode_steps += decode_steps
+        total_decode_time += decode_time
 
-        # ---- Prompt prefill: embed [sos], build its position embedding + causal mask, run the decoder once ----
-        _bind_inputs(binding_Decoder, in_name_Decoder[:num_layers], [past_keys_Decoder] * num_layers)
-        _bind_inputs(binding_Decoder, in_name_Decoder[num_layers:num_keys_values], [past_values_Decoder] * num_layers)
-
-        kv_seq_len_ort.update_inplace(kv_seq_len_seed_np)
-        binding_Decoder.bind_ortvalue_input(in_name_Decoder_hidden, prompt_embed_buf)
-        binding_Decoder.bind_ortvalue_input(in_name_Decoder_position, prefill_position_buf)
-        binding_Decoder.bind_ortvalue_input(in_name_Decoder_mask, prefill_mask_buf)
-        _bind_device_outputs(binding_Decoder, out_name_Decoder_kv)
-        binding_Decoder.bind_ortvalue_output(out_name_Decoder_logits, prefill_logits_buf)
-
-        if USE_BEAM_SEARCH:
-            save_id_buf = _ort_zeros((BEAM_SIZE, 0), np.int32)             # initial empty per-beam history.
-            save_id = save_id_buf                                          # current on-device save_id (penalty / feedback).
-            latest_save_id = save_id_buf                                   # last beam save_id for final detokenisation.
-            binding_First_Beam.bind_ortvalue_input(in_name_First_Beam[beam_save_id_in_idx], save_id_buf)
-        else:
-            save_id = _ort_zeros((1, 0), np.int32)                         # on-device greedy history (used when penalty is on).
-            save_id_greedy = np.zeros(MAX_SEQ_LEN, dtype=np.int32)         # host-side history (used by the argmax path).
-
-        num_decode = 0
-        is_prefill_step = True
-        while num_decode < generate_limit:
-            _run(ort_session_Decoder, binding_Decoder)
-            outputs_Decoder = binding_Decoder.get_outputs()
-            cur_logits_buf = prefill_logits_buf if is_prefill_step else decode_logits_buf
-
-            # Repetition penalty: a standalone in-place pass over the most recent tokens (Qwen ASR style).
-            if do_repeat_penality and (num_decode >= PENALITY_RANGE):
-                binding_Penality.bind_ortvalue_input(in_name_Penality_logits, cur_logits_buf)
-                binding_Penality.bind_ortvalue_input(in_name_Penality_save_id, save_id)
-                binding_Penality.bind_ortvalue_output(out_name_Penality, cur_logits_buf)
-                _run(ort_session_Penality, binding_Penality)
-
-            if USE_BEAM_SEARCH:
-                if num_decode < 1:
-                    _bind_inputs(binding_First_Beam, in_name_First_Beam_kv, outputs_Decoder[:num_keys_values])
-                    binding_First_Beam.bind_ortvalue_input(in_name_First_Beam_logits, cur_logits_buf)
-                    binding_First_Beam.bind_ortvalue_input(in_name_First_Beam_save_id, save_id)
-                    # Bind outputs in graph order; get_outputs() returns values in bind order, so the order must match the graph.
-                    _bind_device_outputs(binding_First_Beam, out_name_First_Beam_kv)                                         # caches 0..2L-1
-                    binding_First_Beam._iobinding.bind_output(out_name_First_Beam_save_id, _ort_device_obj)                  # save_id
-                    binding_First_Beam.bind_ortvalue_output(out_name_First_Beam_prob, beam_score_buf)                       # top_beam_prob
-                    binding_First_Beam.bind_ortvalue_output(out_name_First_Beam_ids, beam_ids_buf)                          # top_beam_indices (next token)
-                    binding_First_Beam.bind_ortvalue_output(out_name_First_Beam_max, max_idx_buf)                           # max_logits_idx (stop check)
-                    _run(ort_session_First_Beam, binding_First_Beam)
-                    outputs_Beam = binding_First_Beam.get_outputs()
-                else:
-                    _bind_inputs(binding_Second_Beam, in_name_Second_Beam_kv, outputs_Decoder[:num_keys_values])
-                    binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam_logits, cur_logits_buf)
-                    if num_decode < 2:
-                        binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam_prev_prob, beam_score_buf)
-                    # Bind outputs in graph order every step; get_outputs() returns values in bind order.
-                    _bind_device_outputs(binding_Second_Beam, out_name_Second_Beam_kv)                                       # caches 0..2L-1
-                    binding_Second_Beam._iobinding.bind_output(out_name_Second_Beam_save_id, _ort_device_obj)                # save_id
-                    binding_Second_Beam.bind_ortvalue_output(out_name_Second_Beam_prob, beam_score_buf)                     # top_beam_prob
-                    binding_Second_Beam.bind_ortvalue_output(out_name_Second_Beam_ids, beam_ids_buf)                        # top_beam_indices (next token)
-                    binding_Second_Beam.bind_ortvalue_output(out_name_Second_Beam_max, max_idx_buf)                         # max_logits_idx (stop check)
-                    _run(ort_session_Second_Beam, binding_Second_Beam)
-                    outputs_Beam = binding_Second_Beam.get_outputs()
-
-                save_id = outputs_Beam[beam_save_id_out_idx]
-                latest_save_id = save_id
-                max_logits_idx = max_idx_buf.numpy().flat[0]
-                if max_logits_idx in STOP_TOKEN:
-                    break
-
-                _bind_inputs(binding_Decoder, in_name_Decoder_self_kv, outputs_Beam[:num_keys_values])
-                binding_Second_Beam.bind_ortvalue_input(in_name_Second_Beam_save_id, save_id)
-            else:
-                if do_repeat_penality:
-                    binding_Greedy.bind_ortvalue_input(in_name_Greedy_logits, cur_logits_buf)
-                    binding_Greedy.bind_ortvalue_input(in_name_Greedy_save_id, save_id)
-                    binding_Greedy.bind_ortvalue_output(out_name_Greedy_max, max_idx_buf)
-                    binding_Greedy._iobinding.bind_output(out_name_Greedy_save_id, _ort_device_obj)
-                    _run(ort_session_Greedy, binding_Greedy)
-                    save_id = binding_Greedy.get_outputs()[1]
-                else:
-                    binding_Argmax.bind_ortvalue_input(in_name_Argmax_logits, cur_logits_buf)
-                    binding_Argmax.bind_ortvalue_output(out_name_Argmax_max, max_idx_buf)
-                    _run(ort_session_Argmax, binding_Argmax)
-
-                max_logits_idx = max_idx_buf.numpy().flat[0]
-                if max_logits_idx in STOP_TOKEN:
-                    break
-                if not do_repeat_penality:
-                    save_id_greedy[num_decode] = max_logits_idx
-                _bind_inputs(binding_Decoder, in_name_Decoder_self_kv, outputs_Decoder[:num_keys_values])
-
-            _bind_device_outputs(binding_Decoder, out_name_Decoder_kv)
-            if is_prefill_step:
-                binding_Decoder.bind_ortvalue_input(in_name_Decoder_hidden, hidden_states_buf)
-                binding_Decoder.bind_ortvalue_input(in_name_Decoder_position, position_buf)
-                binding_Decoder.bind_ortvalue_input(in_name_Decoder_mask, decode_mask_buf)
-                is_prefill_step = False
-            binding_Decoder.bind_ortvalue_output(out_name_Decoder_logits, decode_logits_buf)
-
-            _run(ort_session_Embed, binding_Embed)
-            _run(ort_session_Decode, binding_Decode)
-            num_decode += 1
-
-        if USE_BEAM_SEARCH:
-            save_token_array = latest_save_id.numpy()[0]
-            for i, idx in enumerate(save_token_array):
-                if idx in STOP_TOKEN:
-                    save_token_array = save_token_array[:i]
-                    break
-        elif do_repeat_penality:
-            # Greedy with penalty keeps its token history on-device (GREEDY_SEARCH appends each step).
-            save_token_array = save_id.numpy()[0]
-            for i, idx in enumerate(save_token_array):
-                if idx in STOP_TOKEN:
-                    save_token_array = save_token_array[:i]
-                    break
-        else:
-            save_token_array = save_id_greedy[:num_decode]
-        slice_start += stride_step
-        slice_end = slice_start + INPUT_AUDIO_LENGTH
-    count_time = time.time() - start_time
-    rtf = count_time / max(audio_len / SAMPLE_RATE, 1e-6)
-    text = tokenizer.detokenize([int(id) for id in save_token_array])
-    print(f"\nASR Result:\n{text}\n\nRTF: {rtf:.3f}   ({count_time:.3f}s for {audio_len / SAMPLE_RATE:.2f}s audio, {len(save_token_array)} tokens)")
-    print("----------------------------------------------------------------------------------------------------------")
+    elapsed = time.time() - start_time
+    rtf = elapsed / (audio_len / SAMPLE_RATE)
+    text = tokenizer.detokenize(all_tokens)
+    decode_rate = total_decode_steps / total_decode_time
+    print(
+        f"\nASR Result:\n{text}\n\n"
+        f"RTF: {rtf:.3f}   ({elapsed:.3f}s for {audio_len / SAMPLE_RATE:.2f}s audio, "
+        f"{len(all_tokens)} tokens; merged decode {decode_rate:.2f} token/s; "
+        "1 graph launch/token)"
+    )
+    print("-" * 106)

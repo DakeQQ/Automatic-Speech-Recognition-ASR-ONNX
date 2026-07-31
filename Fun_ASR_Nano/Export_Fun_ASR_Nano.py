@@ -3,86 +3,100 @@ os.environ["HF_HUB_OFFLINE"] = "1"          # Load all HuggingFace assets from l
 os.environ["TRANSFORMERS_OFFLINE"] = "1"    # Disable transformers' network HEAD/update checks
 
 import gc
+import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio
 from funasr import AutoModel
 from funasr.register import tables
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 from STFT_Process import STFT_Process
+import Shared_Merged
 
 
-model_path                     = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512'            # Set the path where the [Fun-ASR-Nano-2512, Fun-ASR-MLT-Nano-2512] downloaded. URL: https://modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512 / https://modelscope.cn/models/FunAudioLLM/Fun-ASR-MLT-Nano-2512
-tokenizer_path                 = r'/home/DakeQQ/Downloads/Fun-ASR-Nano-2512/Qwen3-0.6B' # Set the tokenizer path.
+# =================================================================================================
+# User configuration: these are the only values intended to be edited for a deployment export.
+# =================================================================================================
+model_path                     = str(Path.home() / "Downloads" / "Fun-ASR-Nano-2512")                    # Downloaded [Fun-ASR-Nano-2512, Fun-ASR-MLT-Nano-2512] checkpoint folder.
+tokenizer_path                 = str(Path.home() / "Downloads" / "Fun-ASR-Nano-2512" / "Qwen3-0.6B")  # Matching local Qwen tokenizer folder.
+INPUT_AUDIO_DTYPE              = "F32"      # Public ONNX audio input type: "INT16", "F32", or "F16"; float inputs still carry int16-range PCM values.
+USE_FP16_KV                    = True       # Store KV caches and run minimum-cast attention in float16 for normal deployment exports.
+COMPUTE_IN_F32                 = False      # With f16 KV storage, upcast attention K/V/mask and compute attention in float32.
+USE_CTC_DECODER                = True       # Export the optional standalone fast CTC transcription graph.
 
-# Store (and later load) the exported ONNX models in a local folder next to this script; created automatically if missing.
-onnx_folder                    = Path(__file__).resolve().parent / "Fun_ASR_Nano_ONNX"  # Local folder holding all exported ONNX graphs.
+
+# Export implementation policy (not user/model configuration).
+DYNAMIC_AXES                   = True       # Keep audio, query, token, batch, and cache sequence dimensions dynamic.
+REORDER_DOWNPROJ_FOR_QUANT     = True       # Exact MLP intermediate-channel reorder for later block quantization.
+REORDER_OPROJ_FOR_QUANT        = True       # Exact per-head V/o_proj reorder for later block quantization.
+REORDER_KEY                    = "absmean"  # "absmean" | "L4" | "rms" | "std".
+OPSET                          = 20         # ONNX opset emitted by this exporter.
+
+
+# Fixed checkpoint/model constants, validated graph limits, and metadata defaults; these are not user tunables.
+MAX_INPUT_AUDIO_LENGTH         = 480000     # Fixed 30-second graph/metadata audio limit at the model's 16-kHz sample rate.
+MAX_SEQ_LEN                    = 1024       # Fixed decoder rotary/mask-table and metadata context limit.
+SAMPLE_RATE                    = 16000
+WINDOW_TYPE                    = "hamming"  # Kaldi WavFrontend uses a symmetric Hamming window.
+N_MELS                         = 80
+NFFT_STFT                      = 512        # Kaldi rounds the 400-sample frame to the next power of two.
+WINDOW_LENGTH                  = 400        # 25 ms at 16 kHz; zero-padded to NFFT_STFT before the DFT.
+HOP_LENGTH                     = 160        # 10 ms at 16 kHz.
+PRE_EMPHASIZE                  = 0.97
+LFR_M                          = 7
+LFR_N                          = 6
+
+# Raw split graphs are temporary staging for composition and validation. Only the
+# final cross-graph-composed deployment bundle is retained after the export process.
+_SCRIPT_DIR                    = Path(__file__).resolve().parent
+onnx_folder                    = _SCRIPT_DIR / "Fun_ASR_Nano_ONNX"
+_split_export_temp             = tempfile.TemporaryDirectory(prefix="fun-asr-nano-export-")
+split_export_folder            = Path(_split_export_temp.name)
+optimized_folder               = _SCRIPT_DIR / "Fun_ASR_Nano_Optimized"
 onnx_folder.mkdir(parents=True, exist_ok=True)
 
-onnx_model_Metadata            = str(onnx_folder / "ASR_Matadata.onnx")         # Tiny metadata carrier graph.
-onnx_model_Encoder             = str(onnx_folder / "FunASR_Nano_Encoder.onnx")          # The exported onnx model path.
-onnx_model_CTC_Decoder         = str(onnx_folder / "FunASR_Nano_CTC_Decoder.onnx")      # Optional fast CTC transcription head; exported & loaded only when USE_CTC_DECODER=True.
-onnx_model_Embed               = str(onnx_folder / "FunASR_Nano_Decoder_Embed.onnx")
-onnx_model_Main                = str(onnx_folder / "FunASR_Nano_Decoder_Main.onnx")
-onnx_model_Rotary_Mask_Prefill = str(onnx_folder / "FunASR_Nano_Rotary_Mask_Text_Prefill.onnx")
-onnx_model_Rotary_Mask_Decode  = str(onnx_folder / "FunASR_Nano_Rotary_Mask_Text_Decode.onnx")
-onnx_model_Greedy              = str(onnx_folder / "FunASR_Nano_Greedy_Search.onnx")
-onnx_model_First_Beam          = str(onnx_folder / "FunASR_Nano_First_Beam_Search.onnx")
-onnx_model_Second_Beam         = str(onnx_folder / "FunASR_Nano_Second_Beam_Search.onnx")
-onnx_model_Penalty             = str(onnx_folder / "FunASR_Nano_Apply_Penalty.onnx")
-onnx_model_Argmax              = str(onnx_folder / "FunASR_Nano_Argmax.onnx")
+MODEL_FILE_NAMES               = Shared_Merged.model_file_names()
 
+onnx_model_Metadata            = str(split_export_folder / MODEL_FILE_NAMES["metadata"])
+onnx_model_Encoder             = str(split_export_folder / MODEL_FILE_NAMES["encoder"])
+onnx_model_CTC_Decoder         = str(split_export_folder / MODEL_FILE_NAMES["ctc_decoder"])
+onnx_model_Embed               = str(split_export_folder / MODEL_FILE_NAMES["embed"])
+onnx_model_Main                = str(split_export_folder / MODEL_FILE_NAMES["main"])
+onnx_model_Rotary_Mask_Prefill = str(split_export_folder / MODEL_FILE_NAMES["rotary_prefill"])
+onnx_model_Rotary_Mask_Decode  = str(split_export_folder / MODEL_FILE_NAMES["rotary_decode"])
+onnx_model_Greedy              = str(split_export_folder / MODEL_FILE_NAMES["penalty_greedy"])
+onnx_model_TopKTopP_Sampling   = str(split_export_folder / MODEL_FILE_NAMES["sampling"])
+onnx_model_Penalty             = str(split_export_folder / MODEL_FILE_NAMES["penalty"])
+onnx_model_Argmax              = str(split_export_folder / MODEL_FILE_NAMES["greedy"])
 
-
-# Audio & STFT Configuration
-SAMPLE_RATE                   = 16000       # The model parameter, do not edit the value.
-WINDOW_TYPE                   = 'hamming'   # Type of window function used in the STFT. Kaldi WavFrontend uses a symmetric Hamming window.
-N_MELS                        = 80          # Number of Mel bands to generate in the Mel-spectrogram, edit it carefully.
-NFFT_STFT                     = 512         # FFT size. Kaldi rounds the 400-sample window up to the next power of two (round_to_power_of_two).
-WINDOW_LENGTH                 = 400         # Kaldi frame length (25 ms = 400 samples). Zero-padded to NFFT_STFT before the DFT.
-HOP_LENGTH                    = 160         # Number of samples between successive frames in the STFT, edit it carefully.
-PRE_EMPHASIZE                 = 0.97        # Kaldi per-frame pre-emphasis coefficient (baked into the STFT kernel).
-INPUT_AUDIO_DTYPE             = "INT16"     # ONNX audio input dtype: "INT16", "F32", or "F16". Must match export. Kaldi fbank works on the int16 numeric range, so "F32"/"F16" carry int16-range values (no ÷32768).
-
-# Model Parameters
-LFR_M                         = 7                 # The model parameter, do not edit the value.
-LFR_N                         = 6                 # The model parameter, do not edit the value.
-STOP_TOKEN                    = [151643, 151645]  # The stop_id in Qwen is "151643" & "151645"
-MAX_SEQ_LEN                   = 1024              # The max context length.
-USE_FP16_KV                   = True              # Use fp16 KV cache + minimum-cast f16 attention (q/k/v/mask/softmax in f16; only the context is cast back to f32 for o_proj).
-COMPUTE_IN_F32                = False             # F16-KV compute precision. False = minimum-cast f16 attention (above). True = keep the f16 KV *storage* (cache I/O dtype unchanged) but upcast K/V (and the mask, internally) to f32 at the attention use points, Q/softmax in f32 (f16 storage, f32 compute). No effect when USE_FP16_KV=False.
-USE_CTC_DECODER               = True              # If True, the Encoder graph also emits the fast CTC transcription (greedy-collapsed token ids). If False, the CTC decoder & head are excluded to shrink the model and cut computation.
-
-# Weight-Quantization-Friendly Reorder (EXACT, zero runtime cost; helps only when weight-quant group_size < head_dim)
-REORDER_DOWNPROJ_FOR_QUANT    = True       # Reorder MLP intermediate channels so down_proj block-quant groups are magnitude-homogeneous (absorbed into gate_up + down_proj).
-REORDER_OPROJ_FOR_QUANT       = True       # Reorder each head's head_dim so o_proj sub-head groups are homogeneous (compensated on the qkv v-rows). Pure win for f16 KV.
-REORDER_KEY                   = "absmean"  # Channel key: "absmean" (robust; best at group=32) | "L4" (best at group=128) | "rms" | "std".
-
-# Input & Processing Limits
-MAX_INPUT_AUDIO_LENGTH        = 480000  # The maximum input audio length.
-DYNAMIC_AXES                  = True    # The default dynamic_axes is the input audio length. Note that some providers only support static axes.
-
-# Decoding Strategy
-USE_BEAM_SEARCH                = False  # Use beam search or greedy search. It recommended to use greedy search for Fun-ASR-Nano.
-TOP_K                          = 3      # The top k candidate in decoding.
-BEAM_SIZE                      = 3      # Number of beams in searching.
-PENALTY_RANGE                  = 10     # Penalizes the most recent output. "10" means the last 10 tokens.
-MAX_BEAM_SIZE                  = 10     # Max beams for exported model.
-REPEAT_PENALTY                 = 1.0    # Range from 0.0 to 1.0; "1.0" means no penalty.
-
-# Runtime & Export Settings
-OPSET                        = 20  # ONNX Runtime opset version.
+for _artifact_folder in (split_export_folder, onnx_folder, optimized_folder):
+    _removed_artifacts = Shared_Merged.delete_obsolete_strategy_artifacts(
+        _artifact_folder,
+        MODEL_FILE_NAMES,
+    )
+    if _removed_artifacts:
+        print(
+            f"[Cleanup] Removed {len(_removed_artifacts)} obsolete strategy artifact(s) "
+            f"from {_artifact_folder}."
+        )
 
 
 def build_model_metadata(*sections):
     def _norm(value):
         if isinstance(value, bool):
             return "1" if value else "0"
+        if isinstance(value, (dict, list)):
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         return str(value)
 
     merged = {}
@@ -93,9 +107,11 @@ def build_model_metadata(*sections):
     return merged
 
 
-def write_onnx_metadata(onnx_path, metadata):
+def write_onnx_metadata(onnx_path, metadata, *, replace=False):
     import onnx
     model = onnx.load(onnx_path, load_external_data=False)
+    if replace:
+        del model.metadata_props[:]
     existing = {prop.key: prop for prop in model.metadata_props}
     for key, value in metadata.items():
         if key in existing:
@@ -103,6 +119,14 @@ def write_onnx_metadata(onnx_path, metadata):
         else:
             model.metadata_props.add(key=key, value=value)
     onnx.save(model, onnx_path)
+
+
+def write_metadata_carrier(onnx_path, metadata):
+    write_onnx_metadata(
+        onnx_path,
+        {str(key): str(value) for key, value in metadata.items()},
+        replace=True,
+    )
 
 
 MAX_STFT_SIGNAL_LENGTH = (MAX_INPUT_AUDIO_LENGTH - WINDOW_LENGTH) // HOP_LENGTH + 1   # Kaldi snip_edges frame count (no centering)
@@ -230,8 +254,6 @@ class FunASRNano(nn.Module):
                 ctc_tokenizer_class = tables.tokenizer_classes.get(ctc_tokenizer)
                 ctc_tokenizer = ctc_tokenizer_class(**ctc_tokenizer_conf)
                 self.ctc_tokenizer = ctc_tokenizer
-            assert ctc_tokenizer is not None, f"ctc_tokenizer must be set"
-
             ctc_vocab_size = kwargs.get("ctc_vocab_size", 60515)
             ctc_decoder_conf = kwargs.get("ctc_decoder_conf", {})
             if audio_encoder_output_size > 0:
@@ -281,79 +303,45 @@ class GREEDY_SEARCH(torch.nn.Module):
         return max_logits_idx, save_id
 
 
-class FIRST_BEAM_SEARCH(torch.nn.Module):
-    """First beam-search step: expand a single hypothesis into `beam_size` beams."""
+class TOPK_TOPP_SAMPLING(torch.nn.Module):
+    NEG_INF = float("-inf")
+    GUMBEL_EPS = 1.0e-7
 
-    def __init__(self, total_layers):
+    def __init__(self):
         super().__init__()
-        self.total_layers = total_layers
-        self.save_keys_values = [None] * self.total_layers
-
-    def forward(self, *all_inputs):
-        logits = all_inputs[-3]
-        save_id = all_inputs[-2]
-        beam_size = all_inputs[-1]
-
-        row_logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
-        top_beam_logits, top_beam_indices = torch.topk(logits, dim=-1, k=beam_size, sorted=True, largest=True)
-        top_beam_prob = top_beam_logits - row_logsumexp
-
-        for i in range(self.total_layers):
-            kv = all_inputs[i]
-            self.save_keys_values[i] = kv.repeat(beam_size, *([1] * (kv.dim() - 1)))
-
-        top_beam_indices = top_beam_indices.transpose(0, 1).int()
-        save_id = torch.cat([save_id, top_beam_indices], dim=-1)
-        max_logits_idx = top_beam_indices[[0]]
-
-        return (
-            *self.save_keys_values,
-            save_id,
-            top_beam_prob.transpose(0, 1),
-            top_beam_indices,
-            max_logits_idx
+        self.register_buffer("neg_inf", torch.tensor(self.NEG_INF, dtype=torch.float32), persistent=False)
+        self.register_buffer("gumbel_min", torch.tensor(self.GUMBEL_EPS, dtype=torch.float32), persistent=False)
+        self.register_buffer(
+            "gumbel_max",
+            torch.tensor(1.0 - self.GUMBEL_EPS, dtype=torch.float32),
+            persistent=False,
         )
 
-
-class SECOND_BEAM_SEARCH(torch.nn.Module):
-    """Subsequent beam-search steps: prune and re-expand beams."""
-
-    def __init__(self, total_layers):
-        super().__init__()
-        self.total_layers = total_layers
-        self.save_keys_values = [None] * self.total_layers
-
-    def forward(self, *all_inputs):
-        logits = all_inputs[-5]
-        save_id = all_inputs[-4]
-        previous_prob = all_inputs[-3]
-        beam_size = all_inputs[-2]
-        top_k = all_inputs[-1]
-
-        row_logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
-        top_k_logits, top_k_indices = torch.topk(logits, k=top_k, dim=-1, largest=True, sorted=True)
-        top_k_prob = top_k_logits - row_logsumexp
-        current_prob = (top_k_prob + previous_prob).view(-1)
-
-        top_beam_prob, flat_beam_indices = torch.topk(current_prob, k=beam_size, dim=-1, largest=True, sorted=True)
-        beam_index = flat_beam_indices // top_k
-        top_beam_indices = top_k_indices.view(-1)[flat_beam_indices]
-
-        for i in range(self.total_layers):
-            self.save_keys_values[i] = torch.index_select(all_inputs[i], dim=0, index=beam_index)
-
-        gathered_save_id = torch.index_select(save_id, dim=0, index=beam_index)
-        top_beam_indices = top_beam_indices.unsqueeze(-1).int()
-        max_logits_idx = top_beam_indices[[0]]
-        save_id = torch.cat([gathered_save_id, top_beam_indices], dim=-1)
-
-        return (
-            *self.save_keys_values,
-            save_id,
-            top_beam_prob.unsqueeze(-1),
-            top_beam_indices,
-            max_logits_idx
+    def forward(self, logits, temperature, top_k, top_p, repetition_penalty, previous_ids):
+        inv_penalty = torch.reciprocal(repetition_penalty)
+        prev_logits = torch.gather(logits, 1, previous_ids)
+        prev_scores = torch.where(
+            prev_logits < 0.0,
+            prev_logits * repetition_penalty,
+            prev_logits * inv_penalty,
         )
+        scores = torch.scatter(logits, 1, previous_ids, prev_scores)
+        scores = scores * torch.reciprocal(temperature)
+
+        sorted_scores, sorted_indices = torch.topk(
+            scores, k=top_k, dim=-1, largest=True, sorted=True
+        )
+        sorted_probs = torch.softmax(sorted_scores, dim=-1)
+        sorted_cumsum = torch.cumsum(sorted_probs, dim=-1)
+        keep_topp = (sorted_cumsum - sorted_probs) <= top_p
+        sorted_scores = torch.where(keep_topp, sorted_scores, self.neg_inf)
+
+        noise = torch.clamp(torch.rand_like(sorted_scores), self.gumbel_min, self.gumbel_max)
+        gumbel = -torch.log(-torch.log(noise))
+        winner = torch.argmax(sorted_scores + gumbel, dim=-1, keepdim=True)
+        sampled_id = torch.gather(sorted_indices, 1, winner).int()
+        save_id = torch.cat([previous_ids, sampled_id], dim=-1)
+        return sampled_id, save_id
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -366,10 +354,8 @@ class APPLY_PENALTY(torch.nn.Module):
         super().__init__()
 
     def forward(self, logits, save_id, penalty_value, penalty_range):
-        target_indices = save_id[:, -penalty_range:].long()
-        penalized = logits.gather(1, target_indices) * penalty_value
-        logits = logits.scatter(1, target_indices, penalized)
-        return logits
+        target_indices = save_id[:, -penalty_range:]
+        return PENALIZE_LOGITS.apply(logits, target_indices, penalty_value)
 
 
 class ARGMAX(torch.nn.Module):
@@ -390,6 +376,83 @@ class METADATA_CARRIER(torch.nn.Module):
         return marker
 
 
+class INTEGER_DIVIDE(torch.autograd.Function):
+    """Emit non-negative integer division directly as standard ONNX ``Div``."""
+
+    @staticmethod
+    def forward(ctx, numerator, denominator):
+        return torch.div(numerator, denominator, rounding_mode="trunc")
+
+    @staticmethod
+    def symbolic(g, numerator, denominator):
+        output = g.op("Div", numerator, denominator)
+        output.setType(numerator.type())
+        return output
+
+
+class ONNX_SHAPE_DIM(torch.autograd.Function):
+    """Return one dynamic dimension as a one-element int64 tensor."""
+
+    @staticmethod
+    def forward(ctx, x, axis):
+        return torch._shape_as_tensor(x)[axis:axis + 1]
+
+    @staticmethod
+    def symbolic(g, x, axis):
+        return g.op("Shape", x, start_i=axis, end_i=axis + 1)
+
+
+class ONNX_STATIC_RESHAPE(torch.autograd.Function):
+    """Emit ``Reshape`` with one reusable initializer; zero copies that input dimension."""
+
+    @staticmethod
+    def forward(ctx, x, shape):
+        target = tuple(
+            x.shape[index] if int(dim) == 0 else int(dim)
+            for index, dim in enumerate(shape)
+        )
+        return x.reshape(target)
+
+    @staticmethod
+    def symbolic(g, x, shape):
+        return g.op("Reshape", x, shape)
+
+
+class ONNX_COMPRESS(torch.autograd.Function):
+    """Compact a one-dimensional tensor with standard ONNX ``Compress``."""
+
+    @staticmethod
+    def forward(ctx, values, condition):
+        return torch.masked_select(values, condition)
+
+    @staticmethod
+    def symbolic(g, values, condition):
+        return g.op("Compress", values, condition, axis_i=0)
+
+
+class PENALIZE_LOGITS(torch.autograd.Function):
+    """Keep int32 history indices in exported GatherElements/ScatterElements."""
+
+    @staticmethod
+    def forward(ctx, logits, target_indices, penalty_value):
+        indices = target_indices.long()
+        penalized = logits.gather(1, indices) * penalty_value
+        return logits.scatter(1, indices, penalized)
+
+    @staticmethod
+    def symbolic(g, logits, target_indices, penalty_value):
+        selected = g.op("GatherElements", logits, target_indices, axis_i=1)
+        penalized = g.op("Mul", selected, penalty_value)
+        return g.op(
+            "ScatterElements",
+            logits,
+            target_indices,
+            penalized,
+            axis_i=1,
+            reduction_s="none",
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Rotary Positional Embedding & Attention Mask
 # ══════════════════════════════════════════════════════════════════════════════
@@ -405,13 +468,17 @@ class ROTARY_MASK_PREFILL(torch.nn.Module):
         # It is added to the attention scores in FUNASR_NANO_DECODER_MAIN.
         self.mask_dtype = torch.float16 if USE_FP16_KV else torch.float32
 
-        # Causal attention mask: upper triangle → -128
-        self.attention_mask = (1 - torch.tril(torch.ones(1, 1, 1, max_seq_len, max_seq_len, dtype=torch.int8))) * -128
+        # Store immutable tables in their final graph dtype. The rotary values remain
+        # half-rounded exactly as before, but no per-run Cast is needed after slicing.
+        attention_mask = (
+            (1 - torch.tril(torch.ones(1, 1, 1, max_seq_len, max_seq_len, dtype=torch.int8))) * -128
+        ).to(self.mask_dtype)
+        self.register_buffer("attention_mask", attention_mask)
 
         # Precompute rotary embeddings
         cos, sin = self._build_rotary_table(llm, max_seq_len)
-        self.register_buffer("cos_rotary_pos_emb", torch.cat([cos, cos], dim=-1).half(), persistent=False)
-        self.register_buffer("sin_rotary_pos_emb", torch.cat([-sin, sin], dim=-1).half(), persistent=False)
+        self.register_buffer("cos_rotary_pos_emb", torch.cat([cos, cos], dim=-1).half().float())
+        self.register_buffer("sin_rotary_pos_emb", torch.cat([-sin, sin], dim=-1).half().float())
 
     @staticmethod
     def _build_rotary_table(llm, max_seq_len):
@@ -422,9 +489,9 @@ class ROTARY_MASK_PREFILL(torch.nn.Module):
 
     def forward(self, ids_len, history_len):
         kv_seq_len = ids_len + history_len
-        rotary_cos = self.cos_rotary_pos_emb[:, history_len:kv_seq_len].float()
-        rotary_sin = self.sin_rotary_pos_emb[:, history_len:kv_seq_len].float()
-        attention_mask = self.attention_mask[..., :ids_len, :kv_seq_len].to(self.mask_dtype)
+        rotary_cos = self.cos_rotary_pos_emb[:, history_len:kv_seq_len]
+        rotary_sin = self.sin_rotary_pos_emb[:, history_len:kv_seq_len]
+        attention_mask = self.attention_mask[..., :ids_len, :kv_seq_len]
         return rotary_cos, rotary_sin, attention_mask, kv_seq_len
 
 
@@ -434,50 +501,66 @@ class ROTARY_MASK_DECODE(torch.nn.Module):
     def __init__(self, llm, max_seq_len):
         super().__init__()
         cos, sin = ROTARY_MASK_PREFILL._build_rotary_table(llm, max_seq_len)
-        self.register_buffer("cos_rotary_pos_emb", torch.cat([cos, cos], dim=-1).half(), persistent=False)
-        self.register_buffer("sin_rotary_pos_emb", torch.cat([-sin, sin], dim=-1).half(), persistent=False)
+        self.register_buffer("cos_rotary_pos_emb", torch.cat([cos, cos], dim=-1).half().float())
+        self.register_buffer("sin_rotary_pos_emb", torch.cat([-sin, sin], dim=-1).half().float())
 
     def forward(self, kv_seq_len):
         kv_seq_len_next = kv_seq_len + 1
-        rotary_cos = self.cos_rotary_pos_emb[:, kv_seq_len].float()
-        rotary_sin = self.sin_rotary_pos_emb[:, kv_seq_len].float()
+        rotary_cos = self.cos_rotary_pos_emb[:, kv_seq_len]
+        rotary_sin = self.sin_rotary_pos_emb[:, kv_seq_len]
         return rotary_cos, rotary_sin, kv_seq_len_next
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Encoder Module (unchanged)
+# Encoder Module
 # ══════════════════════════════════════════════════════════════════════════════
 class FUNASR_NANO_ENCODER(torch.nn.Module):
     def __init__(self, funasr_nano, stft_model, nfft_stft, max_stft_len, n_mels, sample_rate, pre_emphasis, lfr_m, lfr_n, lfr_len, _tokenizer, use_ctc_decoder=False):
         super(FUNASR_NANO_ENCODER, self).__init__()
-        self.funasr_nano = funasr_nano.float()
+        # Register only modules reached by this graph. Keeping the full FunASR object here
+        # needlessly makes the exporter traverse the 0.6B LLM even though only its precomputed
+        # prompt embeddings are used by the audio encoder.
+        self.audio_encoder = funasr_nano.audio_encoder.float()
+        self.audio_adaptor = funasr_nano.audio_adaptor.float()
         self.use_ctc_decoder = use_ctc_decoder
-        self._replace_gelu_with_tanh_approximation(self.funasr_nano)
+        self._replace_gelu_with_tanh_approximation(self.audio_encoder)
+        self._replace_gelu_with_tanh_approximation(self.audio_adaptor)
         self.stft_model = stft_model
         self.T_lfr = lfr_len
         self.lfr_n = lfr_n
+        self.feature_size = n_mels * lfr_m
         # Mel filterbank matching Kaldi's get_mel_banks (exactly what WavFrontend uses
-        # through kaldi.fbank); falls back to torchaudio.melscale_fbanks if unavailable.
-        try:
-            from torchaudio.compliance.kaldi import get_mel_banks
-            mel_banks = get_mel_banks(n_mels, nfft_stft, sample_rate, 20.0, 0.0, 100.0, -500.0, 1.0)[0]  # (n_mels, nfft_stft // 2)
-            mel_banks = torch.nn.functional.pad(mel_banks, (0, 1))                                        # zero Nyquist -> (n_mels, nfft_stft // 2 + 1)
-            self.fbank = mel_banks.unsqueeze(0).to(torch.float32)
-        except Exception:
-            self.fbank = (torchaudio.functional.melscale_fbanks(nfft_stft // 2 + 1, 20, sample_rate // 2, n_mels, sample_rate, None, 'htk')).transpose(0, 1).unsqueeze(0)
-        self.nfft_stft = nfft_stft
+        # through kaldi.fbank).
+        from torchaudio.compliance.kaldi import get_mel_banks
+        mel_banks = get_mel_banks(n_mels, nfft_stft, sample_rate, 20.0, 0.0, 100.0, -500.0, 1.0)[0]  # (n_mels, nfft_stft // 2)
+        mel_banks = torch.nn.functional.pad(mel_banks, (0, 1))                                        # zero Nyquist -> (n_mels, nfft_stft // 2 + 1)
+        mel_filters = mel_banks.transpose(0, 1).contiguous().to(torch.float32)
+        self.register_buffer("mel_filters", mel_filters)
+        self.fbank_freq = nfft_stft // 2 + 1
         self.lfr_m_factor = (lfr_m - 1) // 2
-        indices = torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int32).unsqueeze(1) + torch.arange(lfr_m, dtype=torch.int32)
-        self.indices_mel = indices.clamp(max=max_stft_len + self.lfr_m_factor - 1).to(torch.int16)
-        self.output_size_factor = self.funasr_nano.audio_encoder.output_size() ** 0.5
-        self.variance_epsilon = torch.tensor([1.1920928955078125e-07], dtype=torch.float32)  # torch.finfo(float32).eps == Kaldi's fbank log floor
-        self.position_encoding = self.funasr_nano.audio_encoder.embed(torch.zeros([1, max_stft_len, 560], dtype=torch.float32))
-        num_head = self.funasr_nano.audio_encoder.encoders._modules["0"].self_attn.h
-        head_dim = self.funasr_nano.audio_encoder.encoders._modules["0"].self_attn.d_k
-        self.pad_zeros = torch.zeros((1, num_head * head_dim, 5), dtype=torch.float32)
+        indices = (
+            torch.arange(0, self.T_lfr * lfr_n, lfr_n, dtype=torch.int64).unsqueeze(1)
+            + torch.arange(lfr_m, dtype=torch.int64)
+            - self.lfr_m_factor
+        )
+        self.register_buffer("indices_mel", indices.clamp(min=0).contiguous())
+        self.register_buffer("lfr_divisor", torch.tensor([lfr_n], dtype=torch.int64))
+        self.register_buffer("speech_token_divisor", torch.tensor([lfr_n * 8], dtype=torch.int64))
+        self.output_size_factor = self.audio_encoder.output_size() ** 0.5
+        self.log_epsilon = float(torch.finfo(torch.float32).eps)
+        # The encoder consumes at most LFR_LENGTH positions, not max_stft_len positions.
+        position_encoding = self.audio_encoder.embed(
+            torch.zeros([1, lfr_len, self.feature_size], dtype=torch.float32)
+        ).squeeze(0)
+        self.register_buffer("position_encoding", position_encoding.detach().contiguous())
+        head_dim = self.audio_encoder.encoders._modules["0"].self_attn.d_k
         scale_factor = head_dim ** (-0.25)
-        self.total_encoders = list(self.funasr_nano.audio_encoder.encoders0) + list(self.funasr_nano.audio_encoder.encoders) + list(self.funasr_nano.audio_encoder.tp_encoders)
-        in_size = self.funasr_nano.audio_encoder.encoders._modules["0"].in_size
+        self.total_encoders = (
+            list(self.audio_encoder.encoders0)
+            + list(self.audio_encoder.encoders)
+            + list(self.audio_encoder.tp_encoders)
+        )
+        in_size = self.audio_encoder.encoders._modules["0"].in_size
         for encoder_layer in self.total_encoders:
             encoder_layer.self_attn.linear_q_k_v.weight.data[:-in_size] *= scale_factor
             encoder_layer.self_attn.linear_q_k_v.bias.data[:-in_size] *= scale_factor
@@ -512,14 +595,25 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             norm.weight = None
             norm.bias = None
 
-        self._fuse_adaptor_blocks(self.funasr_nano.audio_adaptor.blocks)
+            # Fold symmetric zero padding, fsmn(v)+v, and linear_out's bias into
+            # the depthwise Conv. F.linear then consumes the per-position FSMN
+            # matrix as Gemm.C, removing two full-sequence Adds per SANM block.
+            attn = encoder_layer.self_attn
+            fsmn = attn.fsmn_block
+            fsmn_pad = (fsmn.kernel_size[0] - 1) // 2
+            fsmn.weight.data[:, 0, fsmn_pad].add_(1.0)
+            fsmn.bias = torch.nn.Parameter(attn.linear_out.bias.detach().clone(), requires_grad=False)
+            fsmn.padding = (fsmn_pad,)
+            attn.linear_out.bias = None
+
+        self._fuse_adaptor_blocks(self.audio_adaptor.blocks)
 
         # Fold audio_encoder.tp_norm's affine into audio_adaptor.linear1 so tp_norm only performs
         # (x - mu) / sigma at runtime (its output `enc_normed` is therefore affine-free). When the
         # CTC head is enabled, FUNASR_NANO_CTC_DECODER folds the SAME affine into its own
         # ctc_decoder.linear1; it is built BEFORE this encoder so the affine is still present there.
-        norm = self.funasr_nano.audio_encoder.tp_norm
-        linear = self.funasr_nano.audio_adaptor.linear1
+        norm = self.audio_encoder.tp_norm
+        linear = self.audio_adaptor.linear1
         # 1. Update Bias: b_new = b_lin + W_lin @ b_norm
         linear.bias.data.add_(torch.matmul(linear.weight.data, norm.bias.data))
         # 2. Update Weight: W_new = W_lin * w_norm (broadcasting w_norm over rows of W_lin)
@@ -529,13 +623,39 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
         norm.weight = None
         norm.bias = None
 
+        # Reuse one persistent identity affine per normalized width instead of
+        # asking the exporter to create private ones/zeros for every affine-free LN.
+        norm_widths = {
+            int(layer.norm1.normalized_shape[0])
+            for layer in self.total_encoders
+        }
+        norm_widths.update(
+            int(layer.norm2.normalized_shape[0])
+            for layer in self.total_encoders
+        )
+        norm_widths.update(
+            int(block.norm1.normalized_shape[0])
+            for block in self.audio_adaptor.blocks
+        )
+        norm_widths.update(
+            int(block.norm2.normalized_shape[0])
+            for block in self.audio_adaptor.blocks
+        )
+        norm_widths.add(int(self.audio_encoder.tp_norm.normalized_shape[0]))
+        for width in norm_widths:
+            self.register_buffer(f"norm_scale_{width}", torch.ones(width, dtype=torch.float32))
+            self.register_buffer(f"norm_bias_{width}", torch.zeros(width, dtype=torch.float32))
+
         head_ids = _tokenizer.encode("<|im_start|>user\n", return_tensors="pt")
         tail_ids = _tokenizer.encode("<|im_end|>\n<|im_start|>assistant\n", return_tensors="pt")
-        self.head_embed = self.funasr_nano.llm.model.embed_tokens(head_ids)
-        self.tail_embed = self.funasr_nano.llm.model.embed_tokens(tail_ids)
-        self.fake_token = torch.zeros(max_stft_len + 1, dtype=torch.int16)
-        for i in range(self.fake_token.shape[0]):
-            self.fake_token[i] = (((i - 1) // 2 + 1 - 1) // 2 + 1 - 1) // 2 + 1
+        self.register_buffer(
+            "head_embed",
+            funasr_nano.llm.model.embed_tokens(head_ids).squeeze(0).detach().contiguous(),
+        )
+        self.register_buffer(
+            "tail_embed",
+            funasr_nano.llm.model.embed_tokens(tail_ids).squeeze(0).detach().contiguous(),
+        )
 
     def _replace_gelu_with_tanh_approximation(self, module):
         for name, child in module.named_children():
@@ -599,79 +719,100 @@ class FUNASR_NANO_ENCODER(torch.nn.Module):
             norm.weight = None
             norm.bias = None
 
+    def _layer_norm(self, x, norm):
+        width = int(norm.normalized_shape[0])
+        return F.layer_norm(
+            x,
+            norm.normalized_shape,
+            getattr(self, f"norm_scale_{width}"),
+            getattr(self, f"norm_bias_{width}"),
+            norm.eps,
+        )
+
+    def _sanm_block(self, x, layer):
+        """Run one SANM block in canonical ``[time, hidden]`` layout."""
+        qkv = layer.self_attn.linear_q_k_v(self._layer_norm(x, layer.norm1))
+        qkv = qkv.reshape(-1, 3, layer.self_attn.h, layer.self_attn.d_k).permute(1, 2, 0, 3)
+        q, k, v = torch.split(qkv, 1, dim=0)
+
+        context = torch.matmul(torch.softmax(torch.matmul(q, k.transpose(-1, -2)), dim=-1), v)
+        context = context.permute(0, 2, 1, 3).reshape(-1, layer.self_attn.linear_out.in_features)
+
+        fsmn_input = v.permute(0, 1, 3, 2).reshape(1, layer.size, -1)
+        fsmn_memory = layer.self_attn.fsmn_block(fsmn_input).transpose(1, 2).reshape(-1, layer.size)
+        attention = F.linear(context, layer.self_attn.linear_out.weight, fsmn_memory)
+        if layer.in_size == layer.size:
+            attention = attention + x
+        return attention + layer.feed_forward.w_2(
+            layer.feed_forward.activation(
+                layer.feed_forward.w_1(self._layer_norm(attention, layer.norm2))
+            )
+        )
+
+    def _adaptor_block(self, x, block):
+        qkv = block.self_attn.linear_q_k_v(self._layer_norm(x, block.norm1))
+        qkv = qkv.reshape(-1, 3, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0, 3)
+        q, k, v = torch.split(qkv, 1, dim=0)
+        context = torch.matmul(torch.softmax(torch.matmul(q, k.transpose(-1, -2)), dim=-1), v)
+        context = context.permute(0, 2, 1, 3).reshape(-1, block.self_attn.linear_out.in_features)
+        x = x + block.self_attn.linear_out(context)
+        return x + block.feed_forward.w_2(
+            block.feed_forward.activation(
+                block.feed_forward.w_1(self._layer_norm(x, block.norm2))
+            )
+        )
+
     def forward(self, audio, query_embed):
-        audio = audio.float()
-        # Per-frame DC removal + pre-emphasis + symmetric Hamming window + zero-pad to
-        # NFFT_STFT are all baked into the Kaldi-compatible STFT kernel (see STFT_Process).
-        real_part, imag_part = self.stft_model(audio)
-        mel_features = torch.maximum(torch.matmul(self.fbank, real_part * real_part + imag_part * imag_part).transpose(1, 2), self.variance_epsilon).log() * self.output_size_factor
-        features_len = mel_features.shape[1].unsqueeze(0)
-        left_padding = mel_features[:, [0]]
-        padded_inputs = torch.cat([left_padding] * self.lfr_m_factor + [mel_features], dim=1)
-        _len = features_len // self.lfr_n - 1
-        # Number of speech tokens given to the LLM must equal FunASR's fake_token_len,
-        # which is computed from the LFR frame count T_lfr = ceil(mel_frames / lfr_n)
-        # (WavFrontend.apply_lfr), NOT the raw mel-frame count. Indexing fake_token by
-        # features_len (mel frames) over-feeds ~lfr_n x too many speech tokens.
-        lfr_len = (features_len + self.lfr_n - 1) // self.lfr_n
-        mel_features = padded_inputs[:, self.indices_mel[:_len].int()].reshape(1, _len, -1)
-        x = mel_features + self.position_encoding[:, :_len].float()
-        for encoder_layer in self.funasr_nano.audio_encoder.encoders0 + self.funasr_nano.audio_encoder.encoders:
-            x1 = encoder_layer.norm1(x)
-            qkv = encoder_layer.self_attn.linear_q_k_v(x1)
-            qkv = qkv.view(-1, 3, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0, 3)
-            q_h, k_h, v_h = qkv.split([1, 1, 1], dim=0)
-            v_fsmn = v_h.transpose(-1, -2).reshape(1, encoder_layer.size, -1)
-            fsmn_in = torch.cat([self.pad_zeros, v_fsmn, self.pad_zeros], dim=-1)
-            fsmn_out = encoder_layer.self_attn.fsmn_block(fsmn_in)
-            fsmn_memory = (fsmn_out + v_fsmn).transpose(1, 2).reshape(1, -1, encoder_layer.size)
-            attn = torch.matmul(q_h, k_h.transpose(-1, -2))
-            attn = torch.softmax(attn, dim=-1)
-            attn = torch.matmul(attn, v_h).transpose(1, 2).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
-            attn_out = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
-            if encoder_layer.in_size == encoder_layer.size:
-                x = x + attn_out
-            else:
-                x = attn_out
-            x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(encoder_layer.norm2(x))))
-        x = self.funasr_nano.audio_encoder.after_norm(x)
-        for encoder_layer in self.funasr_nano.audio_encoder.tp_encoders:
-            x1 = encoder_layer.norm1(x)
-            qkv = encoder_layer.self_attn.linear_q_k_v(x1)
-            qkv = qkv.view(-1, 3, encoder_layer.self_attn.h, encoder_layer.self_attn.d_k).permute(1, 2, 0, 3)
-            q_h, k_h, v_h = qkv.split([1, 1, 1], dim=0)
-            v_fsmn = v_h.transpose(-1, -2).reshape(1, encoder_layer.size, -1)
-            fsmn_in = torch.cat([self.pad_zeros, v_fsmn, self.pad_zeros], dim=-1)
-            fsmn_out = encoder_layer.self_attn.fsmn_block(fsmn_in)
-            fsmn_memory = (fsmn_out + v_fsmn).transpose(1, 2).reshape(1, -1, encoder_layer.size)
-            attn = torch.matmul(q_h, k_h.transpose(-1, -2))
-            attn = torch.softmax(attn, dim=-1)
-            attn = torch.matmul(attn, v_h).transpose(1, 2).reshape(1, -1, encoder_layer.self_attn.linear_out.in_features)
-            attn_out = encoder_layer.self_attn.linear_out(attn) + fsmn_memory
-            x = x + attn_out
-            x = x + encoder_layer.feed_forward.w_2(encoder_layer.feed_forward.activation(encoder_layer.feed_forward.w_1(encoder_layer.norm2(x))))
-        enc_normed = self.funasr_nano.audio_encoder.tp_norm(x)
-        x = self.funasr_nano.audio_adaptor.linear1(enc_normed)
-        x = self.funasr_nano.audio_adaptor.relu(x)
-        x = self.funasr_nano.audio_adaptor.linear2(x)
-        for block in self.funasr_nano.audio_adaptor.blocks:
-            x1 = block.norm1(x)
-            qkv = block.self_attn.linear_q_k_v(x1)
-            qkv = qkv.view(-1, 3, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0, 3)
-            q, k, v = qkv.split([1, 1, 1], dim=0)
-            attn = torch.matmul(q, k.transpose(-1, -2))
-            attn = torch.softmax(attn, dim=-1)
-            attn = torch.matmul(attn, v).transpose(1, 2).reshape(1, -1, block.self_attn.linear_out.in_features)
-            attn_out = block.self_attn.linear_out(attn)
-            x = x + attn_out
-            x = x + block.feed_forward.w_2(block.feed_forward.activation(block.feed_forward.w_1(block.norm2(x))))
-        x = x[:, :self.fake_token[lfr_len].to(torch.int64)]
-        concat_embed = torch.cat([self.head_embed, query_embed, x, self.tail_embed], dim=1)
+        # Kaldi framing/DC/pre-emphasis/window/DFT are baked into this one Conv.
+        spectrum = F.conv1d(audio.float(), self.stft_model.stft_kernel, stride=self.stft_model.hop_len)
+        real_power, imag_power = torch.split(spectrum.square(), self.fbank_freq, dim=1)
+        power = (real_power + imag_power).squeeze(0).transpose(0, 1)
+        mel_features = torch.matmul(power, self.mel_filters).clamp(min=self.log_epsilon).log()
+        mel_features = mel_features * self.output_size_factor
+
+        features_len = ONNX_SHAPE_DIM.apply(mel_features, 0)
+        encoded_len = INTEGER_DIVIDE.apply(features_len, self.lfr_divisor) - 1
+        lfr_indices = torch.minimum(self.indices_mel[:encoded_len], features_len - 1)
+        mel_features = mel_features[lfr_indices].reshape(-1, self.feature_size)
+        x = mel_features + self.position_encoding[:encoded_len]
+
+        for encoder_layer in self.audio_encoder.encoders0:
+            x = self._sanm_block(x, encoder_layer)
+        for encoder_layer in self.audio_encoder.encoders:
+            x = self._sanm_block(x, encoder_layer)
+        x = self.audio_encoder.after_norm(x)
+        for encoder_layer in self.audio_encoder.tp_encoders:
+            x = self._sanm_block(x, encoder_layer)
+
+        enc_normed = self._layer_norm(x, self.audio_encoder.tp_norm)
+        # Keep the small audio adaptor in its checkpoint's original rank-3 layout.
+        # ORT's Gemm reduction on rank-2 inputs is algebraically equivalent but its
+        # accumulated rounding was amplified by the downstream LLM at maximum audio
+        # length. The 70-layer encoder remains rank-2; only these two adaptor blocks
+        # retain MatMul+Add lowering for the stricter numerical contract.
+        x = self.audio_adaptor.linear2(
+            self.audio_adaptor.relu(self.audio_adaptor.linear1(enc_normed.unsqueeze(0)))
+        )
+        for block in self.audio_adaptor.blocks:
+            x = self._adaptor_block(x, block)
+
+        # fake_token_len applies three ceil-divides by two after LFR ceil-divide by
+        # lfr_n; for positive lengths that is exactly ceil(mel_frames / (8*lfr_n)).
+        speech_token_len = INTEGER_DIVIDE.apply(
+            features_len + self.lfr_n * 8 - 1,
+            self.speech_token_divisor,
+        )
+        x = x[:, :speech_token_len].squeeze(0)
+        concat_embed = torch.cat(
+            [self.head_embed, query_embed.squeeze(0), x, self.tail_embed],
+            dim=0,
+        ).unsqueeze(0)
+        ids_len = ONNX_SHAPE_DIM.apply(concat_embed, 1)
         if self.use_ctc_decoder:
             # Emit enc_normed (the affine-free tp_norm output) so the separate
             # FUNASR_NANO_CTC_DECODER graph can consume it for the fast CTC transcription.
-            return concat_embed, concat_embed.shape[1].unsqueeze(0), enc_normed
-        return concat_embed, concat_embed.shape[1].unsqueeze(0)
+            return concat_embed, ids_len, enc_normed.unsqueeze(0)
+        return concat_embed, ids_len
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -707,26 +848,48 @@ class FUNASR_NANO_CTC_DECODER(torch.nn.Module):
         linear.bias.data.add_(torch.matmul(linear.weight.data, norm.bias.data))
         linear.weight.data.mul_(norm.weight.data.unsqueeze(0))
 
+        norm_widths = {
+            int(norm.normalized_shape[0])
+            for block in self.ctc_decoder.blocks
+            for norm in (block.norm1, block.norm2)
+        }
+        for width in norm_widths:
+            self.register_buffer(f"norm_scale_{width}", torch.ones(width, dtype=torch.float32))
+            self.register_buffer(f"norm_bias_{width}", torch.zeros(width, dtype=torch.float32))
+
+    def _layer_norm(self, x, norm):
+        width = int(norm.normalized_shape[0])
+        return F.layer_norm(
+            x,
+            norm.normalized_shape,
+            getattr(self, f"norm_scale_{width}"),
+            getattr(self, f"norm_bias_{width}"),
+            norm.eps,
+        )
+
     def forward(self, enc_normed):
-        c = self.ctc_decoder.linear1(enc_normed)
+        c = self.ctc_decoder.linear1(enc_normed.squeeze(0))
         c = self.ctc_decoder.relu(c)
         c = self.ctc_decoder.linear2(c)
         for block in self.ctc_decoder.blocks:
-            c1 = block.norm1(c)
+            c1 = self._layer_norm(c, block.norm1)
             qkv = block.self_attn.linear_q_k_v(c1)
-            qkv = qkv.view(-1, 3, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0, 3)
+            qkv = qkv.reshape(-1, 3, block.self_attn.h, block.self_attn.d_k).permute(1, 2, 0, 3)
             q, k, v = qkv.split([1, 1, 1], dim=0)
             attn = torch.matmul(q, k.transpose(-1, -2))
             attn = torch.softmax(attn, dim=-1)
-            attn = torch.matmul(attn, v).transpose(1, 2).reshape(1, -1, block.self_attn.linear_out.in_features)
+            attn = torch.matmul(attn, v).permute(0, 2, 1, 3).reshape(-1, block.self_attn.linear_out.in_features)
             c = c + block.self_attn.linear_out(attn)
-            c = c + block.feed_forward.w_2(block.feed_forward.activation(block.feed_forward.w_1(block.norm2(c))))
-        token_ids = self.ctc_lo(c).argmax(dim=-1).view(-1).int()                    # int32 token id per frame
+            c = c + block.feed_forward.w_2(
+                block.feed_forward.activation(
+                    block.feed_forward.w_1(self._layer_norm(c, block.norm2))
+                )
+            )
+        token_ids = self.ctc_lo(c).argmax(dim=-1)                                  # int64 through collapse
         shifted_tensor = torch.cat([token_ids[1:], token_ids[[0]]], dim=0)
         token_keep_mask = (token_ids != shifted_tensor) & (token_ids != self.blank_id)
-        keep_indices = torch.nonzero(token_keep_mask, as_tuple=True)[0]
-        token_ids = torch.index_select(token_ids, 0, keep_indices)                  # 1-D compacted token ids
-        num_id = torch._shape_as_tensor(token_ids)[0].to(torch.int32).unsqueeze(0)
+        token_ids = ONNX_COMPRESS.apply(token_ids, token_keep_mask).to(torch.int32)
+        num_id = torch.sum(token_keep_mask, dim=0, keepdim=True, dtype=torch.int32)
         return token_ids, num_id
 
 
@@ -760,9 +923,11 @@ class SIMPLIFIED_LAYER_NORM(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, scale, epsilon, axis):
-        variance   = x.float().pow(2).mean(dim=axis, keepdim=True)
-        normalized = x.float() * torch.rsqrt(variance + epsilon)
-        return (normalized * scale).to(scale.dtype)
+        # Decoder norm inputs and scales are already float32. Avoid explicit no-op
+        # casts here: the legacy tracer otherwise leaks them onto residual paths even
+        # though ``symbolic`` replaces the norm itself with one fused node.
+        variance = x.square().mean(dim=axis, keepdim=True)
+        return x * torch.rsqrt(variance + epsilon) * scale
 
     @staticmethod
     def symbolic(g, x, scale, epsilon, axis):
@@ -818,13 +983,34 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         # RMS norm is emitted as ORT's fused SimplifiedLayerNormalization (default ONNX domain): it computes
         # y = x * rsqrt(mean(x^2) + eps) * scale and reduces in float32 (stash_type=1). Feeding scale = 1/sqrt(N)
         # (N = normalized size) and the model's per-element eps reproduces this file's sum-based
-        # r = x * rsqrt(sum(x^2) + N*eps) EXACTLY, and the float32 reduction makes the PREVENT_F16_OVERFLOW
-        # activation pre-scale unnecessary. The g*sqrt(N) norm weight stays absorbed into the following linear.
+        # r = x * rsqrt(sum(x^2) + N*eps) EXACTLY, while the float32 reduction avoids f16 reduction
+        # overflow. The g*sqrt(N) norm weight stays absorbed into the following linear.
         rms_norm_eps = funasr_nano.llm.config.rms_norm_eps
         self.hidden_rms_norm_eps = float(rms_norm_eps)
         self.qk_rms_norm_eps     = float(rms_norm_eps)
         self.register_buffer("hidden_norm_scale", torch.full((hidden_size,), hidden_size ** -0.5, dtype=torch.float32))
         self.register_buffer("qk_norm_scale",     torch.full((head_dim,),    head_dim ** -0.5,    dtype=torch.float32))
+        self.register_buffer(
+            "qkv_shape",
+            torch.tensor([0, -1, 1, self.qk_heads + self.num_key_value_heads, head_dim], dtype=torch.int64),
+        )
+        self.register_buffer(
+            "query_shape",
+            torch.tensor([0, -1, self.num_key_value_heads, self.num_key_value_groups, head_dim], dtype=torch.int64),
+        )
+        self.register_buffer(
+            "context_shape",
+            torch.tensor([0, -1, num_heads * head_dim], dtype=torch.int64),
+        )
+        self.register_buffer(
+            "rotate_half_indices",
+            torch.cat(
+                [
+                    torch.arange(self.head_dim_half, head_dim, dtype=torch.int32),
+                    torch.arange(self.head_dim_half, dtype=torch.int32),
+                ]
+            ),
+        )
 
         # ── Per-layer output buffers ─────────────────────────────────────
         self.save_key = [None] * num_layers
@@ -857,9 +1043,12 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 self._fuse_qkv_projection(layer, scale_factor, norm_factor, norm_factor_qk)
                 self._fuse_gate_up_projection(layer, norm_factor)
 
-            # Absorb final RMSNorm into lm_head
-            final_norm_weight = self.funasr_nano.model.norm.weight.unsqueeze(0) * norm_factor
-            self.funasr_nano.lm_head.weight.mul_(final_norm_weight)
+            # Keep lm_head pristine so the tied token table remains byte-identical
+            # to embed_tokens.T and can be stored once in the shared bundle.
+            self.register_buffer(
+                "final_norm_scale",
+                self.funasr_nano.model.norm.weight.detach().clone().float(),
+            )
             del self.funasr_nano.model.norm
 
     def _fuse_qkv_projection(self, layer, scale_factor, norm_factor, norm_factor_qk):
@@ -999,20 +1188,15 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         """RMS norm via ORT's fused SimplifiedLayerNormalization (reduces in float32, stash_type=1)."""
         return simplified_layer_norm(x, scale, eps)
 
-    def _rotate_half(self, x, batch_size):
-        """Rotate the last dimension by swapping and negating halves (for RoPE).
-           Using flip() is more efficient than split() + concat() in ONNX Runtime.
-        """
-        x = x.view(batch_size, -1, 1, self.qk_heads, 2, self.head_dim_half)
-        x = x.flip(-2)
-        return x.view(batch_size, -1, 1, self.qk_heads, self.head_dim)
+    def _rotate_half(self, x):
+        """Apply the half-swap with one int32 Gather; signs live in the sin table."""
+        return torch.index_select(x, -1, self.rotate_half_indices)
 
     def forward(self, *all_inputs):
         hidden_states      = all_inputs[-4]
         rotary_pos_emb_cos = all_inputs[-3]
         rotary_pos_emb_sin = all_inputs[-2]
         attention_mask     = all_inputs[-1]
-        batch_size         = hidden_states.shape[0]
 
         # f16-storage / f32-compute (COMPUTE_IN_F32): keep the causal mask f16 at the graph boundary (I/O
         # dtype unchanged) but upcast it to f32 ONCE here, shared by every layer (cast loop-invariant
@@ -1027,12 +1211,12 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
 
             # Fused QKV projection & reshape
             qkv = layer.self_attn.qkv(hidden_states)
-            qkv = qkv.reshape(batch_size, -1, 1, self.qk_heads + self.num_key_value_heads, self.head_dim)
+            qkv = ONNX_STATIC_RESHAPE.apply(qkv, self.qkv_shape)
             qk, v = torch.split(qkv, [self.qk_heads, self.num_key_value_heads], dim=-2)
 
             # QK normalization & rotary embedding
             qk = self._rms_norm(qk, self.qk_norm_scale, self.qk_rms_norm_eps) * layer.self_attn.qk_norm_weight
-            qk_rot = qk * rotary_pos_emb_cos + self._rotate_half(qk, batch_size) * rotary_pos_emb_sin
+            qk_rot = qk * rotary_pos_emb_cos + self._rotate_half(qk) * rotary_pos_emb_sin
 
             # Split into query and key
             # Minimum-cast float16 KV attention (OFF): cast qk_rot + V DOWN to f16 before the split so
@@ -1045,9 +1229,10 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
 
             q, k = torch.split(qk_rot, [self.num_heads, self.num_key_value_heads], dim=-2)
             if self.use_fp16_kv:
-                k = k.half()   # f16 KV storage (no-op in the minimum-cast path: qk_rot is already f16)
+                if self.compute_in_f32:
+                    k = k.half()
                 v = v.half()
-            q = q.reshape(batch_size, -1, self.num_key_value_heads, self.num_key_value_groups, self.head_dim).permute(0, 2, 3, 1, 4)
+            q = ONNX_STATIC_RESHAPE.apply(q, self.query_shape).permute(0, 2, 3, 1, 4)
             k = k.permute(0, 3, 2, 4, 1)
             v = v.transpose(1, 3)
 
@@ -1067,7 +1252,10 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
                 attn = torch.matmul(attn, v)
 
             # Output projection & residual
-            attn = attn.permute(0, 3, 1, 2, 4).reshape(batch_size, -1, layer.self_attn.o_proj.in_features)
+            attn = ONNX_STATIC_RESHAPE.apply(
+                attn.permute(0, 3, 1, 2, 4),
+                self.context_shape,
+            )
             if self.use_fp16_kv and not self.compute_in_f32:
                 attn = attn.float()
             hidden_states = residual + layer.self_attn.o_proj(attn)
@@ -1081,13 +1269,18 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             hidden_states = residual + layer.mlp.down_proj(layer.mlp.act_fn(gate) * up)
 
         # ── Final Projection ─────────────────────────────────────────
-        hidden_states = self._rms_norm(hidden_states[:, -1], self.hidden_norm_scale, self.hidden_rms_norm_eps)
+        hidden_states = self._rms_norm(hidden_states[:, -1], self.final_norm_scale, self.hidden_rms_norm_eps)
         logits = self.funasr_nano.lm_head(hidden_states)
 
         return *self.save_key, *self.save_value, logits
 
 
 print('\nExport start ...\n')
+if onnx_folder.exists():
+    shutil.rmtree(onnx_folder)
+onnx_folder.mkdir(parents=True)
+split_export_folder.mkdir(parents=True, exist_ok=True)
+
 with torch.inference_mode():
 
     # ══════════════════════════════════════════════════════════════════
@@ -1109,8 +1302,13 @@ with torch.inference_mode():
         disable_update=True
     )  # FunASRNano is registered above via @tables.register, so no remote_code is needed.
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    ctc_tokenizer = model.model.ctc_tokenizer if USE_CTC_DECODER else None   # tiktoken tokenizer for the CTC branch; kept before `del model`.
-
+    ctc_tokenizer = model.model.ctc_tokenizer
+    ctc_vocab_size = int(model.model.ctc.ctc_lo.out_features)
+    ctc_special_token_ids = {
+        "blank": int(model.model.blank_id),
+        "no_speech": int(ctc_tokenizer.no_speech),
+        "timestamp_begin": int(ctc_tokenizer.timestamp_begin),
+    }
     llm_config   = model.model.llm.config
     llm_model    = model.model.llm.model
     num_layers   = llm_config.num_hidden_layers
@@ -1119,16 +1317,63 @@ with torch.inference_mode():
     head_dim     = llm_config.head_dim
     vocab_size   = llm_model.vocab_size
     hidden_size  = llm_model.embed_tokens.embedding_dim
+    stop_token_ids = []
+    for _configured_token_ids in (llm_config.bos_token_id, llm_config.eos_token_id):
+        if _configured_token_ids is None:
+            continue
+        if not isinstance(_configured_token_ids, (list, tuple)):
+            _configured_token_ids = (_configured_token_ids,)
+        stop_token_ids.extend(int(token_id) for token_id in _configured_token_ids)
+    stop_token_ids = tuple(dict.fromkeys(stop_token_ids))
+    prompt_definitions = {
+        "zh": ("Chinese", ["chinese", "mandarin", "cn", "中文"], "将语音转写成中文："),
+        "en": ("English", ["english", "eng"], "将语音转写成英文："),
+        "yue": ("Cantonese", ["cantonese", "粤语", "廣東話", "广东话"], "将语音转写成粤语："),
+        "ja": ("Japanese", ["japanese", "jp", "日本語"], "将语音转写成日文："),
+    }
+    if "MLT" in Path(model_path).name.upper():
+        prompt_definitions["ko"] = (
+            "Korean", ["korean", "kr", "한국어"], "将语音转写成韩文："
+        )
+    supported_languages = {
+        code: {
+            "name": name,
+            "aliases": aliases,
+            "prompt": prompt,
+            "prompt_token_ids": [
+                int(token_id)
+                for token_id in tokenizer.encode(prompt, add_special_tokens=False)
+            ],
+        }
+        for code, (name, aliases, prompt) in prompt_definitions.items()
+    }
+    special_token_ids = {
+        "bos": int(llm_config.bos_token_id),
+        "ctc": ctc_special_token_ids,
+        "eos": (
+            [int(token_id) for token_id in llm_config.eos_token_id]
+            if isinstance(llm_config.eos_token_id, (list, tuple))
+            else int(llm_config.eos_token_id)
+        ),
+        "stop": list(stop_token_ids),
+    }
 
     # ══════════════════════════════════════════════════════════════════
-    # Build Dummy Tensors for Tracing
+    # Build representative tensors used only by the export trace. Every
+    # corresponding runtime dimension/value is an ONNX input or dynamic axis.
     # ══════════════════════════════════════════════════════════════════
-    batch_size  = BEAM_SIZE
-    ids_len     = torch.tensor([10], dtype=torch.int64)
-    history_len = torch.tensor([0], dtype=torch.int64)
+    _dummy_batch_size       = 3
+    _dummy_ids_len          = 10
+    _dummy_history_len      = 0
+    _dummy_save_history_len = 10
+    _dummy_penalty_range    = 10
+    _dummy_penalty_value    = 1.0
+
+    batch_size  = _dummy_batch_size
+    ids_len     = torch.tensor([_dummy_ids_len], dtype=torch.int64)
+    history_len = torch.tensor([_dummy_history_len], dtype=torch.int64)
     kv_seq_len  = ids_len + history_len
-    beam_size   = torch.tensor([BEAM_SIZE], dtype=torch.int64)
-    logits      = torch.ones((BEAM_SIZE, vocab_size), dtype=torch.float32)
+    logits      = torch.ones((_dummy_batch_size, vocab_size), dtype=torch.float32)
 
     # KV cache spec: list of (name, concat_dim). F16 KV cache when USE_FP16_KV (minimum-cast attention).
     kv_specs = [('key', 4), ('value', 3)]
@@ -1175,7 +1420,10 @@ with torch.inference_mode():
     encoder_dynamic_axes = {
         'audio':        {2: 'audio_len'},
         'query_embed':  {1: 'num_token'},
-        'concat_embed': {1: 'num_token'}
+        # Includes fixed prompt tokens plus dynamic encoded-audio frames; it is
+        # not equal to query_embed's token count. Sharing the same dim_param lets
+        # ORT incorrectly reuse a query-sized buffer after Encoder+prefill merge.
+        'concat_embed': {1: 'total_tokens'}
     }
     if USE_CTC_DECODER:
         encoder_output_names += ['enc_normed']
@@ -1308,7 +1556,10 @@ with torch.inference_mode():
     # ══════════════════════════════════════════════════════════════════
     # Export: Greedy Search
     # ══════════════════════════════════════════════════════════════════
-    save_id_in = torch.zeros((BEAM_SIZE, 10), dtype=torch.int32)  # 10 is a dummy value.
+    save_id_in = torch.zeros(
+        (_dummy_batch_size, _dummy_save_history_len),
+        dtype=torch.int32,
+    )
 
     torch.onnx.export(
         GREEDY_SEARCH(),
@@ -1327,69 +1578,10 @@ with torch.inference_mode():
     )
 
     # ══════════════════════════════════════════════════════════════════
-    # Export: First Beam Search
-    # ══════════════════════════════════════════════════════════════════
-    num_layers_beam = num_layers * len(kv_specs)
-    # First beam uses single-batch KV (batch dim = 1)
-    kv_tensors_Greedy = {k: v[[0]] for k, v in kv_tensors.items()}
-    kv_ins, kv_in_names, kv_out_names, kv_axes = get_kv_io(kv_tensors_Greedy)
-    # Remove output axes — first beam outputs have variable batch, not tracked here
-    kv_input_only_axes = {k: v for k, v in kv_axes.items() if k not in kv_out_names}
-
-    torch.onnx.export(
-        FIRST_BEAM_SEARCH(num_layers_beam),
-        tuple(kv_ins + [logits[[0]], save_id_in, beam_size]),
-        onnx_model_First_Beam,
-        input_names=kv_in_names + ['logits', 'save_id_in', 'beam_size'],
-        output_names=(
-            ['out_' + n[3:] for n in kv_in_names] + ['save_id_out', 'top_beam_prob', 'top_beam_indices', 'max_logits_idx']
-        ),
-        dynamic_axes={
-            **kv_input_only_axes,
-            'logits':           {0: 'batch'},
-            'save_id_in':       {0: 'batch', 1: 'history_len'},
-            'top_beam_prob':    {0: 'batch'},
-            'top_beam_indices': {0: 'batch'},
-            'max_logits_idx':   {0: 'batch'},
-            'save_id_out':      {0: 'batch', 1: 'history_len'}
-        },
-        opset_version=OPSET,
-        dynamo=False
-    )
-
-    # ══════════════════════════════════════════════════════════════════
-    # Export: Second Beam Search
-    # ══════════════════════════════════════════════════════════════════
-    kv_ins, kv_in_names, kv_out_names, kv_axes = get_kv_io(kv_tensors)
-    previous_prob = torch.zeros((BEAM_SIZE, 1), dtype=torch.float32)
-    topK = torch.tensor([TOP_K], dtype=torch.int64)
-
-    torch.onnx.export(
-        SECOND_BEAM_SEARCH(num_layers_beam),
-        tuple(kv_ins + [logits, save_id_in, previous_prob, beam_size, topK]),
-        onnx_model_Second_Beam,
-        input_names=kv_in_names + ['logits', 'save_id_in', 'previous_prob', 'beam_size', 'topK'],
-        output_names=kv_out_names + ['save_id_out', 'top_beam_prob', 'top_beam_indices', 'max_logits_idx'],
-        dynamic_axes={
-            **kv_axes,
-            'logits':           {0: 'batch'},
-            'save_id_in':       {0: 'batch', 1: 'history_len'},
-            'previous_prob':    {0: 'batch'},
-            'save_id_out':      {0: 'batch', 1: 'history_len'},
-            'top_beam_prob':    {0: 'batch'},
-            'top_beam_indices': {0: 'batch'},
-            'max_logits_idx':   {0: 'batch'}
-        },
-        opset_version=OPSET,
-        dynamo=False
-    )
-    del kv_tensors_Greedy, previous_prob, topK
-
-    # ══════════════════════════════════════════════════════════════════
     # Export: Apply Penalty
     # ══════════════════════════════════════════════════════════════════
-    penalty_value = torch.tensor([REPEAT_PENALTY], dtype=torch.float32)
-    penalty_range = torch.tensor([PENALTY_RANGE], dtype=torch.int64)
+    penalty_value = torch.tensor([_dummy_penalty_value], dtype=torch.float32)
+    penalty_range = torch.tensor([_dummy_penalty_range], dtype=torch.int64)
 
     torch.onnx.export(
         APPLY_PENALTY(),
@@ -1423,38 +1615,49 @@ with torch.inference_mode():
         opset_version=OPSET,
         dynamo=False
     )
+
+    # ══════════════════════════════════════════════════════════════════
+    # Export: Top-K / Top-P Sampling
+    # ══════════════════════════════════════════════════════════════════
+    sampling_temperature = torch.tensor([0.8], dtype=torch.float32)
+    sampling_top_k = torch.tensor([50], dtype=torch.int32)
+    sampling_top_p = torch.tensor([0.95], dtype=torch.float32)
+    sampling_repetition_penalty = torch.tensor([1.0], dtype=torch.float32)
+    sampling_previous_ids = torch.zeros((1, _dummy_save_history_len), dtype=torch.int32)
+    torch.onnx.export(
+        TOPK_TOPP_SAMPLING(),
+        (
+            logits[[0]],
+            sampling_temperature,
+            sampling_top_k,
+            sampling_top_p,
+            sampling_repetition_penalty,
+            sampling_previous_ids,
+        ),
+        onnx_model_TopKTopP_Sampling,
+        input_names=[
+            'logits', 'temperature', 'top_k', 'top_p', 'repetition_penalty', 'previous_ids'
+        ],
+        output_names=['sampled_id', 'save_id_out'],
+        dynamic_axes={
+            'previous_ids': {1: 'history_len'},
+            'save_id_out': {1: 'history_len'},
+        },
+        opset_version=OPSET,
+        dynamo=False,
+    )
+    del sampling_temperature, sampling_top_k, sampling_top_p
+    del sampling_repetition_penalty, sampling_previous_ids
     del logits
     gc.collect()
 
     onnx_metadata = build_model_metadata(
         {
-            "fun_asr_nano_metadata_version": 1,
-            "producer": "Export_Fun_ASR_Nano.py",
-        },
-        {
-            "num_layers": num_layers,
-            "num_attention_heads": num_heads,
-            "num_key_value_heads": num_kv_heads,
-            "head_dim": head_dim,
-            "hidden_size": hidden_size,
-            "vocab_size": vocab_size,
+            "audio_pcm_scale": 1,
             "max_seq_len": MAX_SEQ_LEN,
             "sample_rate": SAMPLE_RATE,
-            "input_audio_length": MAX_INPUT_AUDIO_LENGTH,
-            "max_input_audio_length": MAX_INPUT_AUDIO_LENGTH,
-            "use_fp16_kv": USE_FP16_KV,
-            "compute_in_f32": COMPUTE_IN_F32,
-            "use_ctc_decoder": USE_CTC_DECODER,
-            "is_mlt": "MLT" in tokenizer_path,
-            "num_mels": N_MELS,
-            "nfft_stft": NFFT_STFT,
-            "window_length": WINDOW_LENGTH,
-            "hop_length": HOP_LENGTH,
-            "lfr_m": LFR_M,
-            "lfr_n": LFR_N,
-        },
-        {
-            "stop_token_ids": ",".join(str(t) for t in STOP_TOKEN),
+            "special_token_ids": special_token_ids,
+            "supported_languages": supported_languages,
         },
     )
 
@@ -1471,48 +1674,55 @@ with torch.inference_mode():
     )
     del metadata_marker
 
-    _metadata_targets = [onnx_model_Metadata]
-    _written, _skipped = [], []
-    for _target in _metadata_targets:
-        if not Path(_target).exists():
-            continue
-        try:
-            write_onnx_metadata(_target, onnx_metadata)
-            _written.append(Path(_target).name)
-        except Exception as _exc:  # noqa: BLE001 - one bad graph must not abort export
-            _skipped.append(f"{Path(_target).name} ({_exc})")
+    write_metadata_carrier(onnx_model_Metadata, onnx_metadata)
 
-    print(f"\n[Metadata] Stamped {len(onnx_metadata)} keys into {len(_written)} ONNX graph(s):")
-    for _key in sorted(onnx_metadata):
-        print(f"    {_key} = {onnx_metadata[_key]}")
-    if _skipped:
-        print("[Metadata] Skipped (kept usable, metadata not written):")
-        for _entry in _skipped:
-            print(f"    {_entry}")
     gc.collect()
+
+print("\n[SharedMerged] Building merged strategy graphs + shared Main/Embed initializers ...")
+_bundle = Shared_Merged.build_shared_merged_bundle(
+    split_export_folder,
+    out_folder=onnx_folder,
+    model_file_names_override=MODEL_FILE_NAMES,
+    copy_standalones=True,
+    delete_constituents=False,
+)
+write_metadata_carrier(onnx_folder / MODEL_FILE_NAMES["metadata"], onnx_metadata)
+for _name, _path in _bundle["graphs"].items():
+    print(f"    {_name} ({Path(_path).stat().st_size} bytes)")
+print(
+    "    Embed sharing: "
+    f"{_bundle['embed_sharing']['mode']} -> {_bundle['embed_sharing']['initializer_name']}"
+)
+print(
+    f"    {MODEL_FILE_NAMES['shared_initializers_data']} "
+    f"({Path(_bundle['shared_data']).stat().st_size} bytes)"
+)
 
 # ── Bundle the tokenizer into the export folder so the ONNX model set is self-contained ──
 # The inference script loads its tokenizer(s) from this folder when the local copy is present
 # (falling back to the configured source paths), so the exported folder runs stand-alone.
 _tokenizer_dst = onnx_folder / Path(tokenizer_path).name
-try:
-    shutil.copytree(tokenizer_path, _tokenizer_dst, dirs_exist_ok=True)
-    print(f"[Tokenizer] Copied tokenizer -> {_tokenizer_dst}")
-except Exception as _exc:  # noqa: BLE001 - a failed copy must not abort the demo run
-    print(f"[Tokenizer] Skipped tokenizer copy ({_exc}); inference will use tokenizer_path.")
+shutil.copytree(tokenizer_path, _tokenizer_dst, dirs_exist_ok=True)
+print(f"[Tokenizer] Copied tokenizer -> {_tokenizer_dst}")
 
 if USE_CTC_DECODER:
     _ctc_vocab_src = Path(model_path) / "multilingual.tiktoken"
     _ctc_vocab_dst = onnx_folder / _ctc_vocab_src.name
-    try:
-        shutil.copyfile(_ctc_vocab_src, _ctc_vocab_dst)
-        print(f"[Tokenizer] Copied CTC vocab -> {_ctc_vocab_dst}")
-    except Exception as _exc:  # noqa: BLE001 - a failed copy must not abort the demo run
-        print(f"[Tokenizer] Skipped CTC vocab copy ({_exc}); inference will use ctc_tokenizer_path.")
+    shutil.copyfile(_ctc_vocab_src, _ctc_vocab_dst)
+    print(f"[Tokenizer] Copied CTC vocab -> {_ctc_vocab_dst}")
+
+_split_export_temp.cleanup()
+print(f"[Cleanup] Removed raw ONNX staging folder: {split_export_folder}")
 
 print('\nExport done!\n')
-print('Running ONNX Runtime demo via Inference_Fun_ASR_Nano_ONNX.py ...')
-subprocess.run(
-    [sys.executable, str(Path(__file__).resolve().parent / "Inference_Fun_ASR_Nano_ONNX.py"), "--onnx-folder", str(onnx_folder)],
-    check=True,
-)
+print(f'Final ONNX models retained in: {onnx_folder}')
+if subprocess.call(
+    [
+        sys.executable,
+        str(_SCRIPT_DIR / "Inference_Fun_ASR_Nano_ONNX.py"),
+        "--onnx-folder",
+        str(onnx_folder),
+    ],
+    cwd=str(_SCRIPT_DIR),
+) != 0:
+    raise RuntimeError("Fun-ASR-Nano inference failed after export.")

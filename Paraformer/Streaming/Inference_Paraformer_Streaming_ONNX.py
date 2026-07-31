@@ -13,6 +13,16 @@ _REPO_ROOT = _SCRIPT_DIR.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from Example_Audio import model_audio_paths
+from ORT_IO import (
+    array_for,
+    filled_for,
+    load_special_token_ids,
+    load_supported_languages,
+    metadata_by_name,
+    numpy_dtype,
+    resolve_supported_language,
+    scalar_for,
+)
 
 
 def _parse_args():
@@ -24,18 +34,33 @@ def _parse_args():
         default=_SCRIPT_DIR / "Paraformer_Optimized",
         help="Folder containing ONNX graphs, for example Paraformer_Optimized or Paraformer_ONNX.",
     )
+    parser.add_argument(
+        "--vocab-path", "--tokenizer-path",
+        dest="vocab_path",
+        type=Path,
+        default=None,
+        help="Optional vocabulary file; defaults to Vocab_Paraformer.txt in the model folder.",
+    )
     return parser.parse_args()
 
 
 _ARGS = _parse_args()
 onnx_folder        = _ARGS.onnx_folder.expanduser().resolve()
-onnx_model_Metadata = str(onnx_folder / "ASR_Matadata.onnx")
+onnx_model_Metadata = str(onnx_folder / "ASR_Metadata.onnx")
 onnx_model_Encoder = str(onnx_folder / "Paraformer_Streaming_Encoder.onnx")      # The exported onnx model path.
 onnx_model_Decoder = str(onnx_folder / "Paraformer_Streaming_Decoder.onnx")      # The exported onnx model path.
-test_audio         = model_audio_paths("paraformer")[0]                                  # The test audio path.
+VOCAB_PATH = (
+    _ARGS.vocab_path.expanduser().resolve()
+    if _ARGS.vocab_path is not None
+    else onnx_folder / "Vocab_Paraformer.txt"
+)
 
-# Only support CPU and f32, q8f32, currently.
-ORT_Accelerate_Providers = []       # If you have accelerate devices for: ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
+# IMPORTANT: CLI options are intentionally limited to model/vocabulary paths.
+# Edit this section for demo, audio, and ONNX Runtime behavior.
+test_audio = model_audio_paths("paraformer")[0]  # The test audio path.
+# The optimized default uses an F32 recurrent encoder and an F16 decoder with
+# F32 state-interface Casts; both CPU and CUDA paths are validated.
+ORT_Accelerate_Providers = ["CUDAExecutionProvider"]       # If you have accelerate devices for: ['CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider', 'OpenVINOExecutionProvider', 'ROCMExecutionProvider', 'MIGraphXExecutionProvider', 'AzureExecutionProvider']
                                     # else keep empty.
 MAX_THREADS = 0                     # Max CPU parallel threads.
 DEVICE_ID = 0                       # The GPU id, default to 0.
@@ -47,26 +72,36 @@ ORT_FP16 = False                    # Set to True for FP16 ONNX Runtime settings
 USE_NORMALISE_AUDIO = False         # Apply RMS loudness normalisation before feeding the model. Default keeps the raw int16 waveform amplitude.
 
 
-def prepare_audio_input(audio_int16: np.ndarray, input_audio_dtype: str, target_rms: float = 8192.0) -> np.ndarray:
+def prepare_audio_input(
+    audio_int16: np.ndarray,
+    input_audio_dtype: np.dtype,
+    *,
+    audio_pcm_scale: int,
+    target_rms: float = 4096.0,
+) -> np.ndarray:
     # Fold the optional RMS loudness normalisation and the model-dtype conversion into a
     # single pass over the raw int16 PCM that pydub returns, casting to the model's audio input
-    # dtype exactly once. `input_audio_dtype` is derived from the ONNX model's audio input tensor.
-    # The Kaldi fbank front-end consumes the int16 numeric range directly, so the float variants
-    # carry int16-range values (there is NO ÷32768 here). For streaming the whole clip is converted
-    # once (RMS computed over the full clip) before windows are sliced.
-    if not USE_NORMALISE_AUDIO and input_audio_dtype == "INT16":
-        return np.ascontiguousarray(audio_int16, dtype=np.int16)
+    # dtype exactly once. `input_audio_dtype` is derived from the ONNX model's audio input NodeArg.
+    # The metadata divisor defines the float graph's immutable PCM convention. For streaming the
+    # whole clip is converted once (RMS computed over the full clip) before windows are sliced.
+    input_audio_dtype = np.dtype(input_audio_dtype)
+    if not USE_NORMALISE_AUDIO and input_audio_dtype == np.dtype(np.int16):
+        return np.ascontiguousarray(audio_int16, dtype=input_audio_dtype)
     audio = audio_int16.astype(np.float32)
     if USE_NORMALISE_AUDIO:
         rms = np.sqrt(np.mean(audio * audio, dtype=np.float32), dtype=np.float32)
         if rms > 0:
             audio *= (target_rms / (rms + 1e-7))
             np.clip(audio, -32768.0, 32767.0, out=audio)
-    if input_audio_dtype == "INT16":
-        return audio.astype(np.int16)
-    if input_audio_dtype == "F16":
-        return audio.astype(np.float16)   # NOTE: int16-range in f16 is lossy (~±16 ULP near 32768)
-    return audio                          # F32: int16-range values as float32 (kaldi keeps this range)
+    if input_audio_dtype != np.dtype(np.int16):
+        audio *= np.float32(1.0 / audio_pcm_scale)
+    return audio.astype(input_audio_dtype)
+
+
+def decode_tokens(tokens, mode):
+    if mode == "en":
+        return " ".join(tokens).replace("@@ ", "").strip()
+    return "".join(tokens).strip()
 
 
 # ============================================================================
@@ -188,13 +223,10 @@ def _make_session(path):
     return onnxruntime.InferenceSession(path, **_packed)
 
 
-def _ort_zeros(shape, dtype):
-    return onnxruntime.OrtValue.ortvalue_from_numpy(np.zeros(shape, dtype=dtype), device_type, DEVICE_ID)
-
-
-def _bind_inputs(binding, names, values):
-    for name, value in zip(names, values):
-        binding.bind_ortvalue_input(name, value)
+def _ort_from_numpy(value):
+    return onnxruntime.OrtValue.ortvalue_from_numpy(
+        np.ascontiguousarray(value), device_type, DEVICE_ID
+    )
 
 
 def _bind_device_outputs(binding, names):
@@ -206,68 +238,116 @@ def _run(session, binding):
     session.run_with_iobinding(binding, run_options=run_options)
 
 
-def _in_names(session):
-    return [x.name for x in session.get_inputs()]
+def _cache_array(value_meta, history_axis, history_length):
+    return filled_for(value_meta, axes={history_axis: history_length})
 
 
-def _out_names(session):
-    return [x.name for x in session.get_outputs()]
-
-
-def _np_dtype(meta):
-    return np.float16 if "float16" in meta.type else np.float32
+def _bind_transfers(binding, transfers, produced):
+    for consumer_meta, producer_meta in transfers:
+        binding.bind_ortvalue_input(
+            consumer_meta.name,
+            produced[producer_meta.name],
+        )
 
 
 # The vocab list is bundled inside the ONNX folder by the export / optimize step, so inference is stand-alone.
-with open(onnx_folder / "Vocab_Paraformer.txt", 'r', encoding='UTF-8') as vocab_file:
+with open(VOCAB_PATH, 'r', encoding='UTF-8') as vocab_file:
     tokenizer = np.array([_line.rstrip('\n') for _line in vocab_file], dtype=np.str_)
 
 
 ort_session_Metadata = _make_session(onnx_model_Metadata)
 ort_session_Encoder = _make_session(onnx_model_Encoder)
 ort_session_Decoder = _make_session(onnx_model_Decoder)
-shape_value_in = ort_session_Encoder._inputs_meta[-1].shape[-1]
-in_name_Encoder = _in_names(ort_session_Encoder)
-out_name_Encoder = _out_names(ort_session_Encoder)
-in_name_Decoder = _in_names(ort_session_Decoder)
-out_name_Decoder = _out_names(ort_session_Decoder)
+enc_input_meta = ort_session_Encoder.get_inputs()
+enc_output_meta = ort_session_Encoder.get_outputs()
+dec_input_meta = ort_session_Decoder.get_inputs()
+dec_output_meta = ort_session_Decoder.get_outputs()
+enc_inputs = metadata_by_name(enc_input_meta)
+enc_outputs = metadata_by_name(enc_output_meta)
+dec_inputs = metadata_by_name(dec_input_meta)
+dec_outputs = metadata_by_name(dec_output_meta)
+in_name_Encoder = [value.name for value in enc_input_meta]
+out_name_Encoder = [value.name for value in enc_output_meta]
+in_name_Decoder = [value.name for value in dec_input_meta]
+out_name_Decoder = [value.name for value in dec_output_meta]
 binding_Encoder = ort_session_Encoder.io_binding()
 binding_Decoder = ort_session_Decoder.io_binding()
 
-# The audio input dtype is taken straight from the encoder's audio input tensor in the ONNX model
-# (here the audio is the LAST encoder input), so it always matches how the model was exported (kaldi
-# fbank keeps the int16 numeric range; "float16"/"float" carry int16-range values with no ÷32768).
-_audio_input_type = ort_session_Encoder._inputs_meta[-1].type
-input_audio_dtype = "INT16" if "int16" in _audio_input_type else ("F16" if "float16" in _audio_input_type else "F32")
-
 _model_meta = ort_session_Metadata.get_modelmeta().custom_metadata_map or {}
+SAMPLE_RATE = int(_model_meta["sample_rate"])
+AUDIO_PCM_SCALE = int(_model_meta["audio_pcm_scale"])
 
-def _meta_int(key):
-    value = _model_meta.get(key)
-    if value is None:
-        raise KeyError(
-            f"Required metadata key '{key}' is missing from {onnx_model_Metadata}. "
-            f"Re-export with Export_Paraformer_Streaming.py to stamp the model metadata."
-        )
-    return int(value)
+SPECIAL_TOKEN_IDS = load_special_token_ids(_model_meta)
+stop_value = SPECIAL_TOKEN_IDS["stop"]
+STOP_TOKEN_IDS = stop_value if isinstance(stop_value, list) else [stop_value]
 
+SUPPORTED_LANGUAGES = load_supported_languages(_model_meta)
+_artifact_language = next(iter(SUPPORTED_LANGUAGES))
+LANGUAGE, LANGUAGE_ENTRY = resolve_supported_language(
+    SUPPORTED_LANGUAGES,
+    _artifact_language,
+)
+DECODE_MODE = LANGUAGE_ENTRY.get("decode_mode")
 
-SAMPLE_RATE = _meta_int("sample_rate")
-METADATA_INPUT_AUDIO_LENGTH = _meta_int("input_audio_length")
-FSMN_DE_PAD = _meta_int("fsmn_de_pad")
-print(f"\nModel metadata: {len(_model_meta)} keys "
-    f"(sample_rate={SAMPLE_RATE}, input_audio_length={METADATA_INPUT_AUDIO_LENGTH}, "
-    f"fsmn_de_pad={FSMN_DE_PAD}).")
+NUM_LAYER_EN = len([name for name in in_name_Encoder if name.startswith("in_en_key_")])
+NUM_LAYER_DE = len([name for name in in_name_Decoder if name.startswith("in_de_fsmn_")])
+print(f"\nModel metadata: sample_rate={SAMPLE_RATE}, "
+    f"language={LANGUAGE}, decode={DECODE_MODE}.")
+
+encoder_key_inputs = [f"in_en_key_{i}" for i in range(NUM_LAYER_EN)]
+encoder_value_inputs = [f"in_en_value_{i}" for i in range(NUM_LAYER_EN)]
+encoder_key_outputs = [f"out_en_key_{i}" for i in range(NUM_LAYER_EN)]
+encoder_value_outputs = [f"out_en_value_{i}" for i in range(NUM_LAYER_EN)]
+decoder_fsmn_inputs = [f"in_de_fsmn_{i}" for i in range(NUM_LAYER_DE)]
+decoder_key_inputs = [f"in_de_key_{i}" for i in range(NUM_LAYER_DE)]
+decoder_value_inputs = [f"in_de_value_{i}" for i in range(NUM_LAYER_DE)]
+decoder_fsmn_outputs = [f"out_de_fsmn_{i}" for i in range(NUM_LAYER_DE)]
+decoder_key_outputs = [f"out_de_key_{i}" for i in range(NUM_LAYER_DE)]
+decoder_value_outputs = [f"out_de_value_{i}" for i in range(NUM_LAYER_DE)]
+
+encoder_feedback = []
+for input_names, output_names in (
+    (encoder_key_inputs, encoder_key_outputs),
+    (encoder_value_inputs, encoder_value_outputs),
+    (["in_previous_mel_features"], ["out_previous_mel_features"]),
+    (["in_cif_hidden"], ["out_cif_hidden"]),
+    (["in_cif_alphas"], ["out_cif_alphas"]),
+    (["start_idx"], ["end_idx"]),
+):
+    for index in range(len(input_names)):
+        input_meta = enc_inputs[input_names[index]]
+        output_meta = enc_outputs[output_names[index]]
+        encoder_feedback.append((input_meta, output_meta))
+
+decoder_feedback = []
+for input_names, output_names in (
+    (decoder_fsmn_inputs, decoder_fsmn_outputs),
+    (decoder_key_inputs, decoder_key_outputs),
+    (decoder_value_inputs, decoder_value_outputs),
+):
+    for index in range(len(input_names)):
+        input_meta = dec_inputs[input_names[index]]
+        output_meta = dec_outputs[output_names[index]]
+        decoder_feedback.append((input_meta, output_meta))
+
+encoder_decoder_bridge = []
+for name in ("encoder_out", "list_frame", "list_frame_len"):
+    encoder_decoder_bridge.append((dec_inputs[name], enc_outputs[name]))
+
+audio_meta = enc_inputs["audio"]
+input_audio_dtype = numpy_dtype(audio_meta)
+INPUT_AUDIO_LENGTH = int(audio_meta.shape[2])
+FSMN_DE_PAD = int(dec_inputs[decoder_fsmn_inputs[0]].shape[2])
 
 
 # Load the input audio
 audio = np.array(AudioSegment.from_file(test_audio).set_channels(1).set_frame_rate(SAMPLE_RATE).get_array_of_samples(), dtype=np.int16)  # Raw int16 PCM == FunASR waveform * (1 << 15); prepare_audio_input owns the optional RMS + dtype conversion.
 audio_len = len(audio)
-audio = prepare_audio_input(audio.reshape(1, 1, -1), input_audio_dtype)         # full clip -> target dtype, RMS once
-if isinstance(shape_value_in, str):
-    INPUT_AUDIO_LENGTH = min(METADATA_INPUT_AUDIO_LENGTH, audio_len)
-else:
-    INPUT_AUDIO_LENGTH = shape_value_in
+audio = prepare_audio_input(
+    audio.reshape(1, 1, -1),
+    input_audio_dtype,
+    audio_pcm_scale=AUDIO_PCM_SCALE,
+)  # full clip -> target dtype, RMS once
 stride_step = INPUT_AUDIO_LENGTH
 if audio_len > INPUT_AUDIO_LENGTH:
     num_windows = int(np.ceil((audio_len - INPUT_AUDIO_LENGTH) / stride_step)) + 1
@@ -286,88 +366,88 @@ aligned_len = audio.shape[-1]
 print(f"\nUsable Providers: {ort_session_Encoder.get_providers()[0]}\n")
 
 
-# Initialize
-amount_of_outputs_Encoder = len(out_name_Encoder)
-amount_of_outputs_Decoder = len(out_name_Decoder)
-amount_of_outputs_Decoder -= 2   # The last 2 are max_logit_ids and num_id; pass them to the tokenizer.
-num_layer_de = amount_of_outputs_Decoder // 3
-num_layer_en = (amount_of_outputs_Encoder - 7) // 2
-amount_of_outputs_Encoder -= 3   # The last 3 are for the Decoder.
-
-in_en_value_start = num_layer_en
-in_previous_mel_features_start = in_en_value_start + num_layer_en
-in_cif_hidden_start = in_previous_mel_features_start + 1
-in_de_key_start = num_layer_de
-in_de_value_start = in_de_key_start + num_layer_de
-in_de_value_end = in_de_value_start + num_layer_de
-
 # Shared ORT buffers: allocated once, reused across every streaming window.
-enc_in_meta = ort_session_Encoder._inputs_meta
-dec_in_meta = ort_session_Decoder._inputs_meta
-in_en_key_Encoder = _ort_zeros((enc_in_meta[0].shape[0], enc_in_meta[0].shape[1], 0), _np_dtype(enc_in_meta[0]))
-in_en_value_Encoder = _ort_zeros((enc_in_meta[in_en_value_start].shape[0], 0, enc_in_meta[in_en_value_start].shape[2]), _np_dtype(enc_in_meta[in_en_value_start]))
-in_previous_mel_features = _ort_zeros((enc_in_meta[in_previous_mel_features_start].shape[0], enc_in_meta[in_previous_mel_features_start].shape[1], enc_in_meta[in_previous_mel_features_start].shape[2]), _np_dtype(enc_in_meta[in_previous_mel_features_start]))
-in_cif_hidden = _ort_zeros((enc_in_meta[in_cif_hidden_start].shape[0], enc_in_meta[in_cif_hidden_start].shape[1], enc_in_meta[in_cif_hidden_start].shape[2]), _np_dtype(enc_in_meta[in_cif_hidden_start]))
-in_cif_alpha = _ort_zeros((1,), _np_dtype(enc_in_meta[-3]))
-start_idx = _ort_zeros((1,), np.int64)
-in_de_fsmn_Decoder = _ort_zeros((dec_in_meta[0].shape[0], dec_in_meta[0].shape[1], FSMN_DE_PAD), _np_dtype(dec_in_meta[0]))
-in_de_key_Decoder = _ort_zeros((dec_in_meta[in_de_key_start].shape[0], dec_in_meta[in_de_key_start].shape[1], 0), _np_dtype(dec_in_meta[in_de_key_start]))
-in_de_value_Decoder = _ort_zeros((dec_in_meta[in_de_value_start].shape[0], 0, dec_in_meta[in_de_value_start].shape[2]), _np_dtype(dec_in_meta[in_de_value_start]))
-audio_buffer = _ort_zeros((1, 1, INPUT_AUDIO_LENGTH), audio.dtype)
+encoder_input_buffers = {}
+for name in encoder_key_inputs:
+    encoder_input_buffers[name] = _ort_from_numpy(_cache_array(enc_inputs[name], 2, 0))
+for name in encoder_value_inputs:
+    encoder_input_buffers[name] = _ort_from_numpy(_cache_array(enc_inputs[name], 1, 0))
+for name in ("in_previous_mel_features", "in_cif_hidden", "in_cif_alphas"):
+    encoder_input_buffers[name] = _ort_from_numpy(filled_for(enc_inputs[name]))
+encoder_input_buffers["start_idx"] = _ort_from_numpy(scalar_for(enc_inputs["start_idx"], 0))
+encoder_input_buffers["audio"] = _ort_from_numpy(
+    filled_for(audio_meta, axes={2: INPUT_AUDIO_LENGTH})
+)
+
+decoder_input_buffers = {}
+for name in decoder_fsmn_inputs:
+    decoder_input_buffers[name] = _ort_from_numpy(
+        _cache_array(dec_inputs[name], 2, FSMN_DE_PAD)
+    )
+for name in decoder_key_inputs:
+    decoder_input_buffers[name] = _ort_from_numpy(_cache_array(dec_inputs[name], 2, 0))
+for name in decoder_value_inputs:
+    decoder_input_buffers[name] = _ort_from_numpy(_cache_array(dec_inputs[name], 1, 0))
 
 # Bind the persistent encoder / decoder inputs once; cache outputs ping-pong on device.
-for i in range(num_layer_en):
-    binding_Encoder.bind_ortvalue_input(in_name_Encoder[i], in_en_key_Encoder)
-for i in range(in_en_value_start, in_previous_mel_features_start):
-    binding_Encoder.bind_ortvalue_input(in_name_Encoder[i], in_en_value_Encoder)
-binding_Encoder.bind_ortvalue_input(in_name_Encoder[in_previous_mel_features_start], in_previous_mel_features)
-binding_Encoder.bind_ortvalue_input(in_name_Encoder[in_cif_hidden_start], in_cif_hidden)
-binding_Encoder.bind_ortvalue_input(in_name_Encoder[-3], in_cif_alpha)
-binding_Encoder.bind_ortvalue_input(in_name_Encoder[-2], start_idx)
-binding_Encoder.bind_ortvalue_input(in_name_Encoder[-1], audio_buffer)
+for name in in_name_Encoder:
+    binding_Encoder.bind_ortvalue_input(name, encoder_input_buffers[name])
 _bind_device_outputs(binding_Encoder, out_name_Encoder)
 
-for i in range(num_layer_de):
-    binding_Decoder.bind_ortvalue_input(in_name_Decoder[i], in_de_fsmn_Decoder)
-for i in range(in_de_key_start, in_de_value_start):
-    binding_Decoder.bind_ortvalue_input(in_name_Decoder[i], in_de_key_Decoder)
-for i in range(in_de_value_start, in_de_value_end):
-    binding_Decoder.bind_ortvalue_input(in_name_Decoder[i], in_de_value_Decoder)
+for name in decoder_fsmn_inputs + decoder_key_inputs + decoder_value_inputs:
+    binding_Decoder.bind_ortvalue_input(name, decoder_input_buffers[name])
 
 
 # Start to run Paraformer-Streaming
 slice_start = 0
 slice_end = INPUT_AUDIO_LENGTH
+transcript_parts = []
 while True:
-    audio_buffer.update_inplace(np.ascontiguousarray(audio[:, :, slice_start:slice_end]))
+    audio_window = array_for(
+        audio_meta,
+        audio[:, :, slice_start:slice_end],
+        axes={2: INPUT_AUDIO_LENGTH},
+    )
+    encoder_input_buffers["audio"].update_inplace(audio_window)
     slice_start += stride_step
     slice_end = slice_start + INPUT_AUDIO_LENGTH
     start_time = time.time()
     _run(ort_session_Encoder, binding_Encoder)
-    all_outputs_Encoder = binding_Encoder.get_outputs()
+    outputs_Encoder = dict(zip(out_name_Encoder, binding_Encoder.get_outputs()))
     # Read the CIF fire count and hand the 3 tail outputs to the Decoder BEFORE the
     # encoder output slots get re-bound below (re-binding invalidates these OrtValues).
-    cif_fired = all_outputs_Encoder[-1].numpy() != 0
+    cif_count = outputs_Encoder["list_frame_len"].numpy()
+    cif_fired = bool(cif_count.reshape(-1)[0] != 0)
     if cif_fired:
-        binding_Decoder.bind_ortvalue_input(in_name_Decoder[-1], all_outputs_Encoder[-1])
-        binding_Decoder.bind_ortvalue_input(in_name_Decoder[-2], all_outputs_Encoder[-2])
-        binding_Decoder.bind_ortvalue_input(in_name_Decoder[-3], all_outputs_Encoder[-3])
+        _bind_transfers(
+            binding_Decoder, encoder_decoder_bridge, outputs_Encoder
+        )
         _bind_device_outputs(binding_Decoder, out_name_Decoder)
         _run(ort_session_Decoder, binding_Decoder)
-        all_outputs_Decoder = binding_Decoder.get_outputs()
+        outputs_Decoder = dict(zip(out_name_Decoder, binding_Decoder.get_outputs()))
         end_time = time.time()
-        max_logit_ids = all_outputs_Decoder[-2].numpy()[0]
-        text = tokenizer[max_logit_ids].tolist()
-        text = ''.join(text).replace("</s>", "")
+        max_logit_ids = outputs_Decoder["max_logit_ids"].numpy().reshape(-1)
+        max_logit_ids = max_logit_ids[
+            ~np.isin(max_logit_ids, STOP_TOKEN_IDS)
+        ]
+        text = decode_tokens(tokenizer[max_logit_ids].tolist(), DECODE_MODE)
+        transcript_parts.append(text)
         real_time_factor = (end_time - start_time) / (INPUT_AUDIO_LENGTH / SAMPLE_RATE)
         print(f"ASR: {text} / RTF: {real_time_factor:.4f}")
     if slice_end <= aligned_len:
-        _bind_inputs(binding_Encoder, in_name_Encoder[:amount_of_outputs_Encoder], all_outputs_Encoder[:amount_of_outputs_Encoder])
+        _bind_transfers(
+            binding_Encoder, encoder_feedback, outputs_Encoder
+        )
         _bind_device_outputs(binding_Encoder, out_name_Encoder)
     if cif_fired:
         if slice_end > aligned_len:
             break
-        _bind_inputs(binding_Decoder, in_name_Decoder[:amount_of_outputs_Decoder], all_outputs_Decoder[:amount_of_outputs_Decoder])
+        _bind_transfers(
+            binding_Decoder, decoder_feedback, outputs_Decoder
+        )
     elif slice_end > aligned_len:
         break
+
+text = "".join(transcript_parts)
+print(f"\nFinal ASR Result: {text}")
 
