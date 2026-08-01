@@ -148,9 +148,9 @@ class OptimizerConfig:
     model_plans: dict[str, Plan]
     # weight-only defaults
     weight_only_algorithm: str = "k_quant"
-    block_size: int = 32
+    block_size: int = 64
     accuracy_level: int = 4
-    quant_symmetric: bool = False
+    quant_symmetric: bool = True
     quant_format: str = "QOperator"
     affine_v2_seed_iterations: int = 4
     affine_v2_seed_zp_radius: int = 2
@@ -1745,15 +1745,16 @@ def rewrite_tied_embed_from_matmul_nbits(
     quantized_main: onnx.ModelProto,
     *,
     alias_prefix: str = "tied_embed_quantized_",
+    allow_row_gather: bool = False,
 ) -> dict[str, object]:
-    """Make a verified column-Gather Embed reuse Main's packed lm-head tuple.
+    """Make a verified tied Embed reuse Main's packed lm-head tuple.
 
-    Exporters first byte-verify the source tie and represent Embed as
-    ``Gather(axis=1) -> Transpose[1,2,0]`` over ``[hidden, vocab]``. A block
-    quantizer changes Main to ``MatMulNBits`` but cannot quantize that column
-    Gather. Replace the two Embed nodes with one row ``GatherBlockQuantized``
-    whose three aliases expose Main's exact packed weight, scales, and zero-point
-    bytes under Gather-compatible shapes. No second quantization is performed.
+    Exporters first byte-verify the source tie and represent Embed either as a
+    row ``Gather(axis=0)`` over ``[vocab, hidden]`` or as
+    ``Gather(axis=1) -> Transpose[1,2,0]`` over ``[hidden, vocab]``. Replace that
+    lookup with one row ``GatherBlockQuantized`` whose three aliases expose
+    Main's exact packed weight, scales, and zero-point bytes under
+    Gather-compatible shapes. No second quantization is performed.
     """
     embed_initializers = {
         initializer.name: initializer
@@ -1772,43 +1773,47 @@ def rewrite_tied_embed_from_matmul_nbits(
         if table is None or len(table.dims) != 2:
             continue
         axis = _node_int_attribute(gather, "axis")
-        if axis not in (None, 1):
+        axis = 0 if axis is None else axis
+        if axis == 0 and allow_row_gather:
+            vocab, hidden = (int(dim) for dim in table.dims)
+            gather_matches.append((gather, None, table, hidden, vocab))
             continue
-        consumers = [
-            node
-            for node in embed_model.graph.node
-            if gather.output[0] in node.input
-        ]
-        if len(consumers) != 1:
-            continue
-        transpose = consumers[0]
-        permutation = tuple(
-            int(value)
-            for value in next(
-                (
-                    attribute.ints
-                    for attribute in transpose.attribute
-                    if attribute.name == "perm"
-                ),
-                (),
+        if axis == 1:
+            consumers = [
+                node
+                for node in embed_model.graph.node
+                if gather.output[0] in node.input
+            ]
+            if len(consumers) != 1:
+                continue
+            transpose = consumers[0]
+            permutation = tuple(
+                int(value)
+                for value in next(
+                    (
+                        attribute.ints
+                        for attribute in transpose.attribute
+                        if attribute.name == "perm"
+                    ),
+                    (),
+                )
             )
-        )
-        if (
-            transpose.domain not in ("", "ai.onnx")
-            or transpose.op_type != "Transpose"
-            or list(transpose.input) != [gather.output[0]]
-            or len(transpose.output) != 1
-            or permutation != (1, 2, 0)
-        ):
-            continue
-        gather_matches.append((gather, transpose, table))
+            if (
+                transpose.domain not in ("", "ai.onnx")
+                or transpose.op_type != "Transpose"
+                or list(transpose.input) != [gather.output[0]]
+                or len(transpose.output) != 1
+                or permutation != (1, 2, 0)
+            ):
+                continue
+            hidden, vocab = (int(dim) for dim in table.dims)
+            gather_matches.append((gather, transpose, table, hidden, vocab))
     if len(gather_matches) != 1:
         raise RuntimeError(
-            "Expected exactly one tied Embed Gather(axis=1)->Transpose[1,2,0] "
+            "Expected exactly one tied row Gather or column Gather->Transpose "
             f"pattern; found {len(gather_matches)}."
         )
-    gather, transpose, table = gather_matches[0]
-    hidden, vocab = (int(dim) for dim in table.dims)
+    gather, transpose, table, hidden, vocab = gather_matches[0]
 
     main_initializers = {
         initializer.name: initializer
@@ -1899,7 +1904,7 @@ def rewrite_tied_embed_from_matmul_nbits(
     replacement = onnx.helper.make_node(
         "GatherBlockQuantized",
         [aliases[0].name, gather.input[1], aliases[1].name, aliases[2].name],
-        [transpose.output[0]],
+        [transpose.output[0] if transpose is not None else gather.output[0]],
         name=unique_name(f"{alias_prefix}gather"),
         domain="com.microsoft",
         gather_axis=0,
@@ -1911,7 +1916,7 @@ def rewrite_tied_embed_from_matmul_nbits(
     for node in embed_model.graph.node:
         if node is gather:
             rewritten_nodes.append(replacement)
-        elif node is not transpose:
+        elif transpose is None or node is not transpose:
             rewritten_nodes.append(node)
     del embed_model.graph.node[:]
     embed_model.graph.node.extend(rewritten_nodes)
@@ -1933,7 +1938,7 @@ def rewrite_tied_embed_from_matmul_nbits(
     retained_info = [
         value
         for value in embed_model.graph.value_info
-        if value.name != gather.output[0]
+        if transpose is None or value.name != gather.output[0]
     ]
     del embed_model.graph.value_info[:]
     embed_model.graph.value_info.extend(retained_info)
