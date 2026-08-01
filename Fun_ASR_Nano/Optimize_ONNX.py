@@ -119,14 +119,14 @@ MODEL_PLANS = {
         nodes_to_exclude=_main_nodes_to_exclude,
         f16_force_initializers=F16_FORCE_INITIALIZERS,
     ),
-    "FunASR_Nano_TextPrefillGreedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FunASR_Nano_TextPrefillPenaltyGreedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FunASR_Nano_TextPrefillSampling": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FunASR_Nano_DecodeGreedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FunASR_Nano_DecodePenaltyGreedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FunASR_Nano_DecodeSampling": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FunASR_Nano_SharedInitializers": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "ASR_Metadata": Plan(method="F32", process=False, optimize=False, transformer=False),
+    "FunASR_Nano_TextPrefillGreedy":        Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FunASR_Nano_TextPrefillPenaltyGreedy": Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FunASR_Nano_TextPrefillSampling":      Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FunASR_Nano_DecodeGreedy":             Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FunASR_Nano_DecodePenaltyGreedy":      Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FunASR_Nano_DecodeSampling":           Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FunASR_Nano_SharedInitializers":       Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "ASR_Metadata":                         Plan(method="F32", process=False, optimize=True, transformer=True),
 }
 
 CONFIG = OptimizerConfig(
