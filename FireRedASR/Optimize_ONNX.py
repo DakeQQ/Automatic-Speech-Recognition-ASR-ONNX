@@ -30,6 +30,8 @@ from Optimize_ONNX_Common import (
     Plan,
     producer_ancestry_node_names,
     remove_redundant_casts,
+    resolve_plan,
+    rewrite_tied_embed_from_matmul_nbits,
     run_optimizer,
     share_external_initializers_if_identical,
 )
@@ -216,6 +218,54 @@ def _persist(model, path: Path) -> None:
 
 def _copy_file(source: Path, target: Path) -> None:
     copy_artifact(source, target)
+
+
+def _verify_raw_tied_embed_and_head(
+    source_folder: Path,
+    model_file_names: dict[str, str],
+) -> None:
+    """Require one exact canonical table before packed Embed/head sharing."""
+    source = Shared_Merged.load_model(
+        source_folder / model_file_names["prefill_greedy"]
+    )
+    initializers = {
+        initializer.name: initializer for initializer in source.graph.initializer
+    }
+    embed_matches = [
+        initializers[node.input[0]]
+        for node in source.graph.node
+        if node.op_type == "Gather"
+        and len(node.input) >= 2
+        and node.input[0] in initializers
+        and len(initializers[node.input[0]].dims) == 2
+        and node.name.startswith("embed_")
+    ]
+    head_matches = [
+        initializers[node.input[1]]
+        for node in source.graph.node
+        if node.op_type in ("Gemm", "MatMul")
+        and "/tgt_word_prj/" in node.name
+        and len(node.input) >= 2
+        and node.input[1] in initializers
+    ]
+    if len(embed_matches) != 1 or len(head_matches) != 1:
+        raise RuntimeError(
+            "Expected one FireRedASR Embed table and one vocabulary-head table; "
+            f"found {len(embed_matches)} and {len(head_matches)}."
+        )
+    embed_array = numpy_helper.to_array(embed_matches[0])
+    head_array = numpy_helper.to_array(head_matches[0])
+    if head_array.shape == embed_array.T.shape:
+        head_array = head_array.T
+    if (
+        embed_array.dtype != head_array.dtype
+        or embed_array.shape != head_array.shape
+        or embed_array.tobytes() != head_array.tobytes()
+    ):
+        raise RuntimeError(
+            "FireRedASR Embed and vocabulary head are not byte-identical. "
+            "Rerun Export_FireRedASR_AED.py with the pristine tied-table export."
+        )
 
 
 def _constant_tensor_for_value(
@@ -642,12 +692,17 @@ def build_quantized_merged_bundle(
             "  Preserving target-only shared shell initializers: "
             + ", ".join(sorted(additional_shared))
         )
+    main_plan = resolve_plan(MODEL_PLANS[MAIN_STEM], CONFIG, model_name=MAIN_STEM)
+    packed_tied_embed = main_plan.method in {"Q2", "Q4", "Q8"}
+    if packed_tied_embed:
+        _verify_raw_tied_embed_and_head(source_folder, model_file_names)
     print(
         f"\n{'=' * 60}\n"
         "Transplanting optimized Encoder/Main into all FireRedASR strategy shells\n"
         f"{'=' * 60}"
     )
     external_by_name = None
+    tied_report = None
     for file_name, _, _ in available:
         source_path = source_folder / file_name
         # Target-only shell tensors were materialized above. Keep raw Encoder/Main
@@ -659,6 +714,24 @@ def build_quantized_merged_bundle(
             merged,
             optimized_encoder,
         )
+        if packed_tied_embed:
+            report = rewrite_tied_embed_from_matmul_nbits(
+                merged,
+                optimized_main,
+                alias_prefix="firered_tied_embed_",
+                allow_row_gather=True,
+            )
+            if tied_report is None:
+                tied_report = report
+                removed_table = report["removed_table"]
+                if removed_table is not None:
+                    additional_shared.pop(removed_table, None)
+                print(
+                    f"  Rebuilt tied Embed from Main's Q{report['bits']} tuple; "
+                    f"reused {report['shared_data_bytes']} packed bytes."
+                )
+            elif report != tied_report:
+                raise RuntimeError("FireRedASR tied Embed rewrite changed across shells.")
         if external_by_name is None:
             if file_name != model_file_names["prefill_greedy"]:
                 raise RuntimeError("Shared extraction did not start from PrefillGreedy.")

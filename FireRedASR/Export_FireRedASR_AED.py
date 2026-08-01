@@ -890,15 +890,15 @@ class FIRE_RED_ENCODER(torch.nn.Module):
 class FIRE_RED_DECODER_EMBED(torch.nn.Module):
     # Token-embedding graph kept separate from the decoder (mirrors Whisper/Qwen Decoder_Embed) so the int
     # token ids never enter the float-only decode graph. The d_model**0.5 scale is folded into the embedding
-    # weight here (the absolute position embedding itself is added inside the decoder main graph). The MAIN
-    # decoder decouples tgt_word_prj before this runs, so scaling the embedding leaves the logits unscaled.
+    # output here (the absolute position embedding itself is added inside the decoder main graph). Keeping
+    # the table pristine preserves its exact tie to tgt_word_prj for one-source block quantization.
     def __init__(self, fire_red):
         super(FIRE_RED_DECODER_EMBED, self).__init__()
         self.embed = fire_red.decoder.tgt_word_emb
-        self.embed.weight.data *= fire_red.decoder.scale
+        self.scale = float(fire_red.decoder.scale)
 
     def forward(self, input_ids):
-        return self.embed(input_ids)
+        return self.embed(input_ids) * self.scale
 
 
 class FIRE_RED_PREFILL(torch.nn.Module):
@@ -979,8 +979,8 @@ class FIRE_RED_DECODER(torch.nn.Module):
         self.register_buffer('gelu_one', torch.tensor(1.0, dtype=torch.float32))
         self.register_buffer('gelu_half', torch.tensor(0.5, dtype=torch.float32))
         self.register_buffer('last_token_index', torch.tensor(-1, dtype=torch.int64))
-        # tgt_word_prj.weight is tied to tgt_word_emb.weight; decouple (clone) so the logits projection stays
-        # unscaled while the Embed graph folds the d_model**0.5 scale into the embedding.
+        # Keep the tied vocabulary projection pristine. Embed applies d_model**0.5 after lookup, while the
+        # final LayerNorm keeps its affine parameters live before this projection.
         self.model.decoder.tgt_word_prj.weight = torch.nn.Parameter(self.model.decoder.tgt_word_prj.weight.detach().clone())
         self._fuse_weights()
         if REORDER_DOWNPROJ_FOR_QUANT:
@@ -1009,8 +1009,6 @@ class FIRE_RED_DECODER(torch.nn.Module):
                 cross_attn.w_qs.bias.data.mul_(cross_scale)
                 absorb_layer_norm_affine(decoder_layer.cross_attn_norm, cross_attn.w_qs)
                 absorb_layer_norm_affine(decoder_layer.mlp_norm, decoder_layer.mlp.w_1)
-            # Fold the final decoder LayerNorm affine into the (decoupled) logits projection.
-            absorb_layer_norm_affine(self.model.decoder.layer_norm_out, self.model.decoder.tgt_word_prj)
             _share_affine_less_layer_norm(self.model.decoder, self.hidden_size)
 
     @staticmethod

@@ -1495,6 +1495,97 @@ def make_merged_build_plan(
 MERGED_BUILD_PLAN = make_merged_build_plan()
 
 
+def dedup_tied_embed_into_head(
+    main: onnx.ModelProto,
+    embed: onnx.ModelProto,
+) -> dict[str, object]:
+    """Rewrite a byte-verified row Embed over Main's transposed tied table."""
+    embed_initializers = {
+        initializer.name: initializer for initializer in embed.graph.initializer
+    }
+    main_initializers = {
+        initializer.name: initializer for initializer in main.graph.initializer
+    }
+    gather_matches = [
+        (index, node, embed_initializers[node.input[0]])
+        for index, node in enumerate(embed.graph.node)
+        if node.op_type == "Gather"
+        and len(node.input) >= 2
+        and node.input[0] in embed_initializers
+        and len(embed_initializers[node.input[0]].dims) == 2
+        and int(_node_attribute(node, "axis") or 0) == 0
+    ]
+    head_matches = [
+        main_initializers[node.input[1]]
+        for node in main.graph.node
+        if node.op_type == "MatMul"
+        and "/tgt_word_prj/" in node.name
+        and len(node.input) >= 2
+        and node.input[1] in main_initializers
+    ]
+    if len(gather_matches) != 1 or len(head_matches) != 1:
+        raise RuntimeError(
+            "Expected one FireRedASR Embed Gather and one vocabulary-head "
+            f"MatMul; found {len(gather_matches)} and {len(head_matches)}."
+        )
+    gather_index, gather, embed_table = gather_matches[0]
+    head_table = head_matches[0]
+    embed_array = numpy_helper.to_array(embed_table)
+    head_array = numpy_helper.to_array(head_table)
+    if (
+        embed_array.dtype != head_array.dtype
+        or embed_array.shape != head_array.T.shape
+        or embed_array.tobytes() != np.ascontiguousarray(head_array.T).tobytes()
+    ):
+        raise RuntimeError("FireRedASR Embed is not the exact transpose of its head.")
+
+    occupied = {
+        name
+        for node in embed.graph.node
+        for name in (*node.input, *node.output)
+        if name
+    }
+    temporary = gather.output[0] + "__from_tied_head"
+    suffix = 1
+    while temporary in occupied:
+        temporary = gather.output[0] + f"__from_tied_head_{suffix}"
+        suffix += 1
+    public_output = gather.output[0]
+    gather.input[0] = head_table.name
+    gather.output[0] = temporary
+    retained_attributes = [
+        attribute for attribute in gather.attribute if attribute.name != "axis"
+    ]
+    del gather.attribute[:]
+    gather.attribute.extend(retained_attributes)
+    gather.attribute.append(onnx.helper.make_attribute("axis", 1))
+    transpose = onnx.helper.make_node(
+        "Transpose",
+        [temporary],
+        [public_output],
+        name="embed_TiedHeadTranspose",
+        perm=[1, 2, 0],
+    )
+    nodes = list(embed.graph.node)
+    del embed.graph.node[:]
+    embed.graph.node.extend(
+        nodes[:gather_index + 1] + [transpose] + nodes[gather_index + 1:]
+    )
+    retained = [
+        initializer
+        for initializer in embed.graph.initializer
+        if initializer.name != embed_table.name
+    ]
+    retained.append(copy.deepcopy(head_table))
+    del embed.graph.initializer[:]
+    embed.graph.initializer.extend(retained)
+    return {
+        "embed_initializer": embed_table.name,
+        "head_initializer": head_table.name,
+        "bytes_eliminated": int(embed_array.nbytes),
+    }
+
+
 def build_shared_merged_bundle(
     source_folder: Path,
     out_folder: Path | None = None,
@@ -1541,6 +1632,11 @@ def build_shared_merged_bundle(
             )
         shared[initializer.name] = initializer
     embed = prefixed(load_model(source_folder / embed_name), "embed_")
+    embed_dedup = dedup_tied_embed_into_head(main, embed)
+    print(
+        "  Reused the tied vocabulary-head table for Embed; eliminated "
+        f"{embed_dedup['bytes_eliminated']} bytes."
+    )
     for initializer in embed.graph.initializer:
         if not _is_shareable_initializer(initializer, min_shared_elements):
             continue
