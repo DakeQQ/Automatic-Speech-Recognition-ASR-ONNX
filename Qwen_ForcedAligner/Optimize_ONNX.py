@@ -3,6 +3,8 @@
 from pathlib import Path
 import sys
 
+import onnx
+
 _SCRIPT_DIR = Path(__file__).resolve().parent
 for _candidate in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
     if (_candidate / "Optimize_ONNX_Common.py").exists():
@@ -13,6 +15,7 @@ else:
 
 from Optimize_ONNX_Common import (
     QUANTIZATION_F16_OP_BLOCK_LIST,
+    assert_no_large_unquantized_linear_weights,
     consolidate_optimized_model_weights,
     copy_artifact,
     OptimizerConfig,
@@ -35,7 +38,7 @@ OPTIMIZER_LEVEL            = 2
 USE_FLOAT16                = False
 
 WEIGHT_ONLY_ALGORITHM      = "AFFINE_REFINE_V2"
-WEIGHT_ONLY_BLOCK_SIZE     = 32
+WEIGHT_ONLY_BLOCK_SIZE     = 64
 WEIGHT_ONLY_ACCURACY_LEVEL = 4
 WEIGHT_ONLY_SYMMETRIC      = False
 
@@ -51,6 +54,8 @@ MODEL_PLANS = {
     "ForcedAligner_Merged": Plan(
         method="F16" if USE_FLOAT16 else "Q8",
         algo=None if USE_FLOAT16 else WEIGHT_ONLY_ALGORITHM,
+        op_types=None if USE_FLOAT16 else ("MatMul", "Gather"),
+        axes=None if USE_FLOAT16 else (0, 1),
         opt_level=2,
         num_heads=0,
         hidden_size=0,
@@ -99,12 +104,46 @@ CONFIG = OptimizerConfig(
 # ============================ END USER CONFIG ============================
 
 
+def _assert_q8_coverage(model_path: Path) -> None:
+    if USE_FLOAT16:
+        return
+    model = onnx.load(str(model_path), load_external_data=False)
+    assert_no_large_unquantized_linear_weights(
+        model,
+        graph_label="ForcedAligner Q8",
+    )
+    initializers = {initializer.name: initializer for initializer in model.graph.initializer}
+    offenders = []
+    for node in model.graph.node:
+        if node.op_type != "Gather" or not node.input:
+            continue
+        weight = initializers.get(node.input[0])
+        if weight is None:
+            continue
+        elements = 1
+        for dim in weight.dims:
+            elements *= int(dim)
+        if weight.data_type in (onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16) and elements >= 500_000:
+            offenders.append(f"{node.name or '<unnamed>'} ({weight.name}, {list(weight.dims)})")
+    if offenders:
+        raise RuntimeError(
+            "ForcedAligner Q8 retains large unquantized Gather weight(s): "
+            + "; ".join(offenders)
+        )
+    quantized_gathers = sum(node.op_type == "GatherBlockQuantized" for node in model.graph.node)
+    if quantized_gathers != 1:
+        raise RuntimeError(
+            f"ForcedAligner Q8 expected one GatherBlockQuantized embedding; found {quantized_gathers}."
+        )
+
+
 def main() -> None:
     run_optimizer(
         CONFIG,
         model_names=("ForcedAligner_Merged",),
         reset_output_folder=True,
     )
+    _assert_q8_coverage(Path(OPTIMIZED_FOLDER_PATH) / "ForcedAligner_Merged.onnx")
     copy_artifact(
         Path(ORIGINAL_FOLDER_PATH) / "tokenizer",
         Path(OPTIMIZED_FOLDER_PATH) / "tokenizer",
