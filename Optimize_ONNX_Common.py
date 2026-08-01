@@ -1955,6 +1955,45 @@ def rewrite_tied_embed_from_matmul_nbits(
     }
 
 
+def assert_no_large_unquantized_linear_weights(
+    model: onnx.ModelProto,
+    *,
+    graph_label: str,
+    min_elements: int = 500_000,
+) -> None:
+    """Reject block-quantized donors that retain large MatMul/Gemm weights."""
+    initializers = {
+        initializer.name: initializer
+        for initializer in model.graph.initializer
+    }
+    offenders = []
+    for node in model.graph.node:
+        if (
+            node.domain not in ("", "ai.onnx")
+            or node.op_type not in ("MatMul", "Gemm")
+            or len(node.input) < 2
+        ):
+            continue
+        weight = initializers.get(node.input[1])
+        if weight is None:
+            continue
+        elements = 1
+        for dim in weight.dims:
+            elements *= int(dim)
+        if elements >= min_elements:
+            offenders.append(
+                f"{node.name or '<unnamed>'} ({weight.name}, {list(weight.dims)})"
+            )
+    if offenders:
+        displayed = offenders[:10]
+        if len(offenders) > len(displayed):
+            displayed.append(f"... and {len(offenders) - len(displayed)} more")
+        raise RuntimeError(
+            f"{graph_label} retains large unquantized linear weight(s): "
+            + "; ".join(displayed)
+        )
+
+
 def collect_target_only_shared_shell_initializers(
     source_folder: str | Path,
     model_paths: Iterable[str | Path],
