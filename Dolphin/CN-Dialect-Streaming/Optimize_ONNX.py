@@ -126,17 +126,17 @@ MODEL_PLANS = {
     ),
     "Dolphin_PrefillGreedy": Plan(
         method=DECODER_MAIN_METHOD,
-        optimize=False,
-        transformer=False,
+        optimize=True,
+        transformer=True,
         num_heads=0,
         hidden_size=0,
         external=True,
         nodes_to_exclude=exclude_merged_shell_and_gather_nodes,
         f16_force_initializers=F16_FORCE_INITIALIZERS,
     ),
-    "Dolphin_DecodeGreedy": Plan(method=DECODER_MAIN_METHOD, process=False, optimize=False, transformer=False),
-    "Dolphin_SharedInitializers": Plan(method=DECODER_MAIN_METHOD, process=False, optimize=False, transformer=False),
-    "ASR_Metadata": Plan(method="F32", process=False, optimize=False, transformer=False),
+    "Dolphin_DecodeGreedy":         Plan(method=DECODER_MAIN_METHOD, process=False, optimize=True, transformer=True),
+    "Dolphin_SharedInitializers":   Plan(method=DECODER_MAIN_METHOD, process=False, optimize=True, transformer=True),
+    "ASR_Metadata":                 Plan(method="F32", process=False, optimize=True, transformer=True),
 }
 
 CONFIG = OptimizerConfig(
