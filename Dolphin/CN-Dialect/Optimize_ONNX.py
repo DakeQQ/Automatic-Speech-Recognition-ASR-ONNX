@@ -24,6 +24,7 @@ else:
 
 import Shared_Merged
 from Optimize_ONNX_Common import (
+    assert_no_large_unquantized_linear_weights,
     collect_target_only_shared_shell_initializers,
     consolidate_optimized_model_weights,
     DEFAULT_F16_OP_BLOCK_LIST,
@@ -57,7 +58,7 @@ FORCE_EXTERNAL_DATA        = False
 UPGRADE_OPSET              = 0
 OPTIMIZER_LEVEL            = 1
 
-DYNAMIC_WEIGHT_TYPE  = "QInt8"
+DYNAMIC_WEIGHT_TYPE  = "QUInt8"
 DYNAMIC_PER_CHANNEL  = True
 DYNAMIC_REDUCE_RANGE = False
 
@@ -104,7 +105,11 @@ MODEL_PLANS = {
         num_heads=0,
         hidden_size=0,
         external=FORCE_EXTERNAL_DATA,
-        nodes_to_exclude=exclude_encoder_frontend_nodes,
+        nodes_to_exclude=(
+            exclude_encoder_frontend_nodes
+            if DEFAULT_METHOD.upper() == "F16"
+            else None
+        ),
         f16_force_initializers=F16_FORCE_INITIALIZERS,
     ),
     "Dolphin_Decoder": Plan(
@@ -223,6 +228,16 @@ def build_quantized_merged_bundle() -> dict[str, object]:
         float16=main_is_float16,
     )
     Shared_Merged.restore_precision_free_graph_outputs(optimized_encoder)
+    if main_plan.method in {"Q2", "Q4", "Q8"}:
+        assert_no_large_unquantized_linear_weights(
+            optimized_main,
+            graph_label="optimized Dolphin Main",
+        )
+    if encoder_plan.method in {"Q2", "Q4", "Q8"}:
+        assert_no_large_unquantized_linear_weights(
+            optimized_encoder,
+            graph_label="optimized Dolphin Encoder",
+        )
 
     shared_name = model_file_names["shared_initializers"]
     shared_data_name = model_file_names["shared_initializers_data"]
