@@ -19,6 +19,7 @@ else:
 
 import Shared_Merged
 from Optimize_ONNX_Common import (
+    assert_no_large_unquantized_linear_weights,
     collect_target_only_shared_shell_initializers,
     consolidate_optimized_model_weights,
     copy_artifact,
@@ -212,6 +213,22 @@ def build_quantized_merged_bundle(
     Shared_Merged.namespace_internal_tensors(optimized_main, marker="_inlfunc_", namespace="main_")
     Shared_Merged.restore_precision_free_graph_outputs(optimized_main)
     Shared_Merged.restore_precision_free_graph_outputs(optimized_encoder)
+    main_plan = resolve_plan(MODEL_PLANS[MAIN_STEM], CONFIG, model_name=MAIN_STEM)
+    encoder_plan = resolve_plan(
+        MODEL_PLANS["Whisper_Encoder"],
+        CONFIG,
+        model_name="Whisper_Encoder",
+    )
+    if main_plan.method in {"Q2", "Q4", "Q8"}:
+        assert_no_large_unquantized_linear_weights(
+            optimized_main,
+            graph_label="optimized Whisper Main",
+        )
+    if encoder_plan.method in {"Q2", "Q4", "Q8"}:
+        assert_no_large_unquantized_linear_weights(
+            optimized_encoder,
+            graph_label="optimized Whisper Encoder",
+        )
 
     shared_name = model_file_names["shared_initializers"]
     shared_data_name = model_file_names["shared_initializers_data"]
@@ -231,7 +248,6 @@ def build_quantized_merged_bundle(
             "  Preserving target-only shared shell initializers: "
             + ", ".join(sorted(additional_shared))
         )
-    main_plan = resolve_plan(MODEL_PLANS[MAIN_STEM], CONFIG, model_name=MAIN_STEM)
     packed_tied_embed = main_plan.method in {"Q2", "Q4", "Q8"}
     tied_report = None
     external_by_name = None

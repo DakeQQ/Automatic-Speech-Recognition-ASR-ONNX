@@ -1092,6 +1092,11 @@ def build_shared_merged_bundle(
         shared[initializer.name] = initializer
     embed = prefixed(load_model(source_folder / embed_name), "embed_")
     embed_dedup = dedup_tied_embed_into_lm_head(main, embed)
+    if not embed_dedup["applied"]:
+        raise RuntimeError(
+            "Whisper Embed/proj_out tie verification failed: "
+            f"{embed_dedup['reason']}."
+        )
     for initializer in embed.graph.initializer:
         if _is_shareable_initializer(initializer, min_shared_elements):
             existing = shared.get(initializer.name)
