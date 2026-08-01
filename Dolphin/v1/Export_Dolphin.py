@@ -699,7 +699,7 @@ class DOLPHIN_ENCODER(torch.nn.Module):
             x_concat = torch.cat([x1, x2], dim=-1)
             x_concat = encoder_layer.depthwise_conv_fusion(
                 x_concat.transpose(0, 1)
-            ).transpose(0, 1)
+            ).transpose(0, 1).reshape(-1, encoder_layer.merge_proj.in_features)
             x = x + encoder_layer.merge_proj(x_concat)
             x = x + encoder_layer.feed_forward(self._folded_norm(x))  # ff_scale(0.5) already folded into ff w_2
             x = encoder_layer.norm_final(x)

@@ -65,7 +65,11 @@ MODEL_PLANS = {
         num_heads=0,
         hidden_size=0,
         external=True,
-        nodes_to_exclude=exclude_v1_encoder_frontend_nodes,
+        nodes_to_exclude=(
+            exclude_v1_encoder_frontend_nodes
+            if DEFAULT_METHOD.upper() == "F16"
+            else None
+        ),
         f16_force_initializers=F16_FORCE_INITIALIZERS,
     ),
     "Dolphin_Decoder": Plan(
