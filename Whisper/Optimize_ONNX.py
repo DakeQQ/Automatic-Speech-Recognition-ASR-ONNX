@@ -79,20 +79,20 @@ def _main_nodes_to_exclude(model_path: str) -> list[str] | None:
 
 
 MODEL_PLANS = {
-    "Whisper_Encoder":                   Plan(method="DYNAMIC", transformer=True, external=True),
-    "Whisper_Decoder":                   Plan(method="DYNAMIC", optimize=False, transformer=False, external=True, nodes_to_exclude=_main_nodes_to_exclude),
+    "Whisper_Encoder":                   Plan(method="Q8", transformer=True, external=True),
+    "Whisper_Decoder":                   Plan(method="Q8", optimize=True, transformer=True, external=True, nodes_to_exclude=_main_nodes_to_exclude),
     "Whisper_No_Speech_Detection":       Plan(method="F32", transformer=False),
-    "Whisper_ProbePrefillGreedy":        Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "Whisper_ProbePrefillPenaltyGreedy": Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "Whisper_ProbePrefillSampling":      Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "Whisper_PrefillGreedy":             Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "Whisper_PrefillPenaltyGreedy":      Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "Whisper_PrefillSampling":           Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "Whisper_DecodeGreedy":              Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "Whisper_DecodePenaltyGreedy":       Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "Whisper_DecodeSampling":            Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "Whisper_SharedInitializers":        Plan(method="DYNAMIC", process=False, optimize=False, transformer=False),
-    "ASR_Metadata":                      Plan(method="F32", process=False, optimize=False, transformer=False),
+    "Whisper_ProbePrefillGreedy":        Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Whisper_ProbePrefillPenaltyGreedy": Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Whisper_ProbePrefillSampling":      Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Whisper_PrefillGreedy":             Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Whisper_PrefillPenaltyGreedy":      Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Whisper_PrefillSampling":           Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Whisper_DecodeGreedy":              Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Whisper_DecodePenaltyGreedy":       Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Whisper_DecodeSampling":            Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Whisper_SharedInitializers":        Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "ASR_Metadata":                      Plan(method="F32", process=False, optimize=True, transformer=True),
 }
 
 CONFIG = OptimizerConfig(
