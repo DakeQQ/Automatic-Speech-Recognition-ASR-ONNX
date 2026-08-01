@@ -57,9 +57,9 @@ ENCODER_STEM = Path(MODEL_FILE_NAMES["encoder"]).stem
 CTC_STEM = Path(MODEL_FILE_NAMES["ctc_decoder"]).stem
 
 WEIGHT_ONLY_ALGORITHM      = "AFFINE_REFINE_V2"
-WEIGHT_ONLY_BLOCK_SIZE     = 32
+WEIGHT_ONLY_BLOCK_SIZE     = 64
 WEIGHT_ONLY_ACCURACY_LEVEL = 4
-WEIGHT_ONLY_SYMMETRIC      = False
+WEIGHT_ONLY_SYMMETRIC      = True
 
 OPTIMIZER_ONLY_ONNXRUNTIME = False
 FORCE_EXTERNAL_DATA        = False
@@ -72,9 +72,11 @@ F16_OP_BLOCK_LIST = QUANTIZATION_F16_OP_BLOCK_LIST
 
 
 def _main_nodes_to_exclude(model_path: str) -> list[str]:
-    excluded = list(fun_asr_main_fp32_residual_nodes(model_path))
-    if MODEL_PLANS[MAIN_STEM].method.upper() != "DYNAMIC":
-        return excluded
+    method = MODEL_PLANS[MAIN_STEM].method.upper()
+    if method == "F16":
+        return list(fun_asr_main_fp32_residual_nodes(model_path))
+    if method != "DYNAMIC":
+        return []
     model = onnx.load(model_path, load_external_data=False)
     matches = [
         node.name
@@ -85,7 +87,7 @@ def _main_nodes_to_exclude(model_path: str) -> list[str]:
         raise RuntimeError(
             f"Expected one named Fun-ASR-Nano lm-head projection; found {matches}."
         )
-    return list(dict.fromkeys((*excluded, matches[0])))
+    return [matches[0]]
 
 MODEL_PLANS = {
     "FunASR_Nano_Encoder": Plan(
