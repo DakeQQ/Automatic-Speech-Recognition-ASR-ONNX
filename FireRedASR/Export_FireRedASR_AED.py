@@ -378,18 +378,16 @@ class ConformerConvolution(nn.Module):
     def forward(self, x, mask, mask_zero):
         residual = x
         out = self.pre_layer_norm(x)
-        out = out.transpose(1, 2)
         invalid_mask = mask.ne(1)
-        out = _OnnxMaskedFill.apply(out, invalid_mask, mask_zero)
-        out = self.pointwise_conv1(out)
-        out = F.glu(out, dim=1)
-        out = self.depthwise_conv(out)
+        invalid_mask_last = invalid_mask.transpose(1, 2)
+        out = _OnnxMaskedFill.apply(out, invalid_mask_last, mask_zero)
+        out = self.pointwise_linear1(out)
+        out = F.glu(out, dim=-1)
+        out = self.depthwise_conv(out.transpose(1, 2))
         out = out.transpose(1, 2)
         out = self.swish(self.batch_norm(out))
-        out = out.transpose(1, 2)
-        out = self.pointwise_conv2(out)
-        out = _OnnxMaskedFill.apply(out, invalid_mask, mask_zero)
-        out = out.transpose(1, 2)
+        out = self.pointwise_linear2(out)
+        out = _OnnxMaskedFill.apply(out, invalid_mask_last, mask_zero)
         return out + residual
 
 
@@ -423,7 +421,9 @@ class EncoderMultiHeadAttention(nn.Module):
         return q, k, v
 
     def forward_output(self, output, residual):
-        output = torch.matmul(output, self.fc.weight).sum(dim=0, keepdim=True)
+        output = self.fc(
+            output.transpose(0, 1).reshape(1, -1, self.fc.in_features)
+        )
         return output + residual
 
 
@@ -834,7 +834,6 @@ class FIRE_RED_ENCODER(torch.nn.Module):
 
                 pos_weights.append(mhsa.linear_pos.weight.data.clone())
                 del mhsa.linear_pos
-                mhsa.fc.weight.data = mhsa.fc.weight.data.view(self.hidden_size, self.num_heads, self.head_dim).permute(1, 2, 0).contiguous()
 
                 # Collapse the three identical self-attention LayerNorms into one affine-less normalization:
                 # qkv now carries beta in its bias and gamma in its weight; the norm itself stays affine-less.
@@ -843,6 +842,25 @@ class FIRE_RED_ENCODER(torch.nn.Module):
                     ln.bias = None
                     ln.elementwise_affine = False
                 del mhsa.layer_norm_k, mhsa.layer_norm_v
+
+                convolution = encoder_layer.conv
+                convolution.pointwise_linear1 = torch.nn.Linear(
+                    convolution.pointwise_conv1.in_channels,
+                    convolution.pointwise_conv1.out_channels,
+                    bias=False,
+                )
+                convolution.pointwise_linear1.weight.copy_(
+                    convolution.pointwise_conv1.weight.squeeze(-1)
+                )
+                convolution.pointwise_linear2 = torch.nn.Linear(
+                    convolution.pointwise_conv2.in_channels,
+                    convolution.pointwise_conv2.out_channels,
+                    bias=False,
+                )
+                convolution.pointwise_linear2.weight.copy_(
+                    convolution.pointwise_conv2.weight.squeeze(-1)
+                )
+                del convolution.pointwise_conv1, convolution.pointwise_conv2
 
                 # Absorb each Conformer feed-forward pre-LayerNorm into its expand Linear (net[0] -> net[1]).
                 absorb_layer_norm_affine(encoder_layer.ffn1.net[0], encoder_layer.ffn1.net[1])
