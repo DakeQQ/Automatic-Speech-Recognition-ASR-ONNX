@@ -25,6 +25,7 @@ else:
 
 import Shared_Merged
 from Optimize_ONNX_Common import (
+    assert_no_large_unquantized_linear_weights,
     collect_target_only_shared_shell_initializers,
     consolidate_optimized_model_weights,
     DEFAULT_F16_OP_BLOCK_LIST,
@@ -374,6 +375,16 @@ def main() -> None:
     output_folder = Path(OPTIMIZED_FOLDER_PATH)
     run_optimizer(CONFIG, reset_output_folder=True)
     repair_float16_standalone_outputs()
+    for stem in ("Dolphin_Encoder", PRIMARY_MERGED_STEM):
+        plan = resolve_plan(MODEL_PLANS[stem], CONFIG, model_name=stem)
+        if plan.method not in {"Q2", "Q4", "Q8"}:
+            continue
+        model = onnx.load(str(output_folder / f"{stem}.onnx"), load_external_data=False)
+        assert_no_large_unquantized_linear_weights(
+            model,
+            graph_label=f"optimized streaming {stem}",
+        )
+        del model
     bundle = build_optimized_merged_bundle()
     for standalone_path in sorted(output_folder.glob("*.onnx")):
         if standalone_path != bundle["shared_model"]:
