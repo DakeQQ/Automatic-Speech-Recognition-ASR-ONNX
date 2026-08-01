@@ -82,14 +82,14 @@ MODEL_PLANS = {
         external=False,
         f16_force_initializers=F16_FORCE_INITIALIZERS,
     ),
-    "FireRedASR_PrefillGreedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FireRedASR_PrefillPenaltyGreedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FireRedASR_PrefillSampling": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FireRedASR_DecodeGreedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FireRedASR_DecodePenaltyGreedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FireRedASR_DecodeSampling": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "FireRedASR_SharedInitializers": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "ASR_Metadata": Plan(method="F32", process=False, optimize=False, transformer=False),
+    "FireRedASR_PrefillGreedy":         Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FireRedASR_PrefillPenaltyGreedy":  Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FireRedASR_PrefillSampling":       Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FireRedASR_DecodeGreedy":          Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FireRedASR_DecodePenaltyGreedy":   Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FireRedASR_DecodeSampling":        Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "FireRedASR_SharedInitializers":    Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "ASR_Metadata":                     Plan(method="F32", process=False, optimize=True, transformer=True),
 }
 
 CONFIG = OptimizerConfig(
