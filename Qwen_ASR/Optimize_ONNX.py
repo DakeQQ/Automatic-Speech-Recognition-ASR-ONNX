@@ -73,9 +73,9 @@ ENABLE_Q4_CUDA_COMPATIBILITY = False
 
 # Global defaults inherited by any Plan field left as None.
 WEIGHT_ONLY_ALGORITHM      = "AFFINE_REFINE_V2"  # DEFAULT | RTN | HQQ | k_quant | AFFINE_REFINE_V2
-WEIGHT_ONLY_BLOCK_SIZE     = 32
+WEIGHT_ONLY_BLOCK_SIZE     = 64
 WEIGHT_ONLY_ACCURACY_LEVEL = 4
-WEIGHT_ONLY_SYMMETRIC      = False
+WEIGHT_ONLY_SYMMETRIC      = True
 WEIGHT_ONLY_QUANT_FORMAT   = "QOperator"  # QOperator | QDQ
 
 DYNAMIC_WEIGHT_TYPE         = "QInt8"  # QInt8 | QUInt8
@@ -137,14 +137,14 @@ def _main_nodes_to_exclude(model_path: str) -> list[str] | None:
 # strategy graph; Embed is used only when EMBED_WEIGHT_SOURCE == "INDEPENDENT".
 MODEL_PLANS: dict[str, Plan] = {
     "Qwen3_ASR_Encoder": Plan(
-        method="Q4",
+        method="Q8",
         algo=WEIGHT_ONLY_ALGORITHM,
         external=FORCE_EXTERNAL_DATA,
         num_heads=0,
         hidden_size=0,
     ),
     "Qwen3_ASR_Decoder_Main": Plan(
-        method="Q4",
+        method="Q8",
         algo=WEIGHT_ONLY_ALGORITHM,
         external=FORCE_EXTERNAL_DATA,
         optimize=True,
@@ -153,21 +153,21 @@ MODEL_PLANS: dict[str, Plan] = {
         hidden_size=0,
     ),
     "Qwen3_ASR_Decoder_Embed": Plan(
-        method="Q4",
+        method="Q8",
         op_types=("Gather",),
         axes=(0,),
         transformer=False,
         external=FORCE_EXTERNAL_DATA,
         run_second_slim=False,
     ),
-    "Qwen3_ASR_Prefill_Greedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "Qwen3_ASR_Prefill_Penalty_Greedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "Qwen3_ASR_PrefillSampling": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "Qwen3_ASR_Decode_Greedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "Qwen3_ASR_Decode_Penalty_Greedy": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "Qwen3_ASR_DecodeSampling": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "Qwen3_ASR_SharedInitializers": Plan(method="Q8", process=False, optimize=False, transformer=False),
-    "ASR_Metadata": Plan(method="F32", process=False, optimize=False, transformer=False),
+    "Qwen3_ASR_Prefill_Greedy":         Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Qwen3_ASR_Prefill_Penalty_Greedy": Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Qwen3_ASR_PrefillSampling":        Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Qwen3_ASR_Decode_Greedy":          Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Qwen3_ASR_Decode_Penalty_Greedy":  Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Qwen3_ASR_DecodeSampling":         Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "Qwen3_ASR_SharedInitializers":     Plan(method="Q8", process=False, optimize=True, transformer=True),
+    "ASR_Metadata":                     Plan(method="F32", process=False, optimize=True, transformer=True),
 }
 
 # Full-F16 starts with no guards. If validation finds a reproducible NaN/Inf,
