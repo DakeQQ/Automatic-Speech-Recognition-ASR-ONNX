@@ -33,7 +33,7 @@
 | **Dolphin** | [repo](https://github.com/DataoceanAI/Dolphin/tree/main) | - V1 · CN-Dialect 方言 · Streaming 流式 |
 | **Fun-ASR-Nano-2512** | [model](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512) | - CTC fast head + AR decoder <br> - CTC 快速头 + 自回归解码 |
 | **Qwen3-ASR** | [model](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B) | - Hot-words + language prompt, greedy / beam search <br> - 热词 + 语言提示，贪心/束搜索 |
-| **Audio8-ASR** | [ONNX pipeline](Audio8_ASR) | - Automatic recognition: Chinese, English, French, German, Japanese, Korean & Cantonese <br> - 自动识别中文、英语、法语、德语、日语、韩语和粤语 |
+| **Audio8-ASR** | [model](https://huggingface.co/Audio8/Audio8-ASR-0.1B) · [ONNX pipeline](Audio8_ASR) | - Automatic recognition: Chinese, English, French, German, Japanese, Korean & Cantonese <br> - 自动识别中文、英语、法语、德语、日语、韩语和粤语 |
 | **Mega-ASR** | [repo](https://github.com/xzf-thu/Mega-ASR) · [ONNX pipeline](Mega_ASR) | - Routes between Qwen3-ASR Base and Mega paths for degraded audio <br> - 根据音频质量在 Qwen3-ASR Base 和 Mega 路径间路由 |
 | **Qwen3 ForcedAligner** | [model](https://www.modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B) | - Non-autoregressive word-level timestamps <br> - 非自回归词级时间戳 |
 | **X-ASR** | [repo](https://github.com/Gilgamesh-J/X-ASR) | - Streaming Zipformer transducer (ZH-EN) <br> - 流式 Zipformer 转录器（中英） |
