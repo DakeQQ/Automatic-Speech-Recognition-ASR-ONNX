@@ -933,11 +933,10 @@ class QWEN3_ASR_ENCODER(torch.nn.Module):
 class QWEN3_ASR_ROTARY_MASK_PREFILL(torch.nn.Module):
     def __init__(self, llm: torch.nn.Module, max_seq_len: int) -> None:
         super().__init__()
-        # Mask dtype = the KV-cache dtype, so the exported mask I/O dtype is stable: float16 with the f16 KV
-        # cache, float32 with a float32 KV cache. It is deliberately NOT gated on COMPUTE_IN_F32 -- in the
-        # f16-storage / f32-compute path the decoder upcasts this f16 mask to f32 INTERNALLY (the mask I/O
-        # dtype, and the inference runtime, stay unchanged). Added to the attention scores in QWEN3_ASR_DECODER_MAIN.
+        # Keep the table in the KV-cache dtype. The f16-storage/f32-compute
+        # path casts the sliced result once before it enters the shared Main graph.
         self.mask_dtype = torch.float16 if USE_FP16_KV else torch.float32
+        self.emit_fp32_mask = USE_FP16_KV and COMPUTE_IN_F32
         self.register_buffer(
             "mask_row_pos",
             torch.arange(max_seq_len, dtype=torch.int32).view(
@@ -995,6 +994,8 @@ class QWEN3_ASR_ROTARY_MASK_PREFILL(torch.nn.Module):
         attention_mask = torch.where(
             col_pos <= row_pos, self.mask_zero, self.mask_neg
         )
+        if self.emit_fp32_mask:
+            attention_mask = attention_mask.float()
         return rotary_cos, rotary_sin, attention_mask, kv_seq_len
 
 
@@ -1266,10 +1267,9 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
         rotary_cos     = all_inputs[-3]
         rotary_sin     = all_inputs[-2]
         attention_mask = all_inputs[-1]
-        # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
-        # dtype unchanged) and upcast to f32 ONCE here, shared by every layer (principle: cast loop-invariant
-        # constants once). In every other mode it is used as-is (f16 minimum-cast, or f32 for a float32 cache).
-        attn_mask = attention_mask.float() if (self.use_fp16_kv and self.compute_in_f32) else attention_mask
+        # Prefill emits the causal mask in attention-compute dtype, so every layer
+        # shares it directly without an additional precision-boundary Cast.
+        attn_mask = attention_mask
         for i, layer in enumerate(self.llm.layers):
             residual = hidden_states
             hidden_states = self._rms_norm(hidden_states, self.hidden_norm_scale, self.hidden_rms_norm_eps)
@@ -1671,8 +1671,9 @@ with torch.inference_mode():
     hidden_states  = torch.ones((_dummy_batch_size, _dummy_seq_len, hidden_size), dtype=torch.float32)
     rotary_cos     = torch.ones((1, _dummy_seq_len, 1, 1, head_dim),             dtype=torch.float32)
     rotary_sin     = torch.zeros((1, _dummy_seq_len, 1, 1, head_dim),            dtype=torch.float32)
-    # The mask is added to the (minimum-cast) f16 / f32 attention scores, so it must match the KV dtype.
-    attention_mask = torch.zeros((1, 1, 1, _dummy_seq_len, _dummy_seq_len),      dtype=kv_dtype)
+    attention_mask_dtype = torch.float32 if (USE_FP16_KV and COMPUTE_IN_F32) else kv_dtype
+    # Main receives the mask in its attention-compute dtype; f16 KV storage is unchanged.
+    attention_mask = torch.zeros((1, 1, 1, _dummy_seq_len, _dummy_seq_len),      dtype=attention_mask_dtype)
 
     all_inputs   = kv_inputs + [hidden_states, rotary_cos, rotary_sin, attention_mask]
     input_names  = kv_input_names + ["hidden_states", "rotary_cos", "rotary_sin", "attention_mask"]

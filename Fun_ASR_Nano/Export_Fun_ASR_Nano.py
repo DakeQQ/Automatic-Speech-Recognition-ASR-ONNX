@@ -462,11 +462,10 @@ class ROTARY_MASK_PREFILL(torch.nn.Module):
     def __init__(self, llm, max_seq_len):
         super().__init__()
 
-        # Mask dtype = the KV-cache dtype, so the exported mask I/O dtype is stable: float16 with the f16 KV
-        # cache, float32 with a float32 KV cache. Deliberately NOT gated on COMPUTE_IN_F32 -- the f16-storage
-        # f32-compute path upcasts this f16 mask to f32 INTERNALLY (mask I/O + inference runtime unchanged).
-        # It is added to the attention scores in FUNASR_NANO_DECODER_MAIN.
+        # Keep the table in the KV-cache dtype. The f16-storage/f32-compute path
+        # casts the sliced result once below, before it enters the shared Main graph.
         self.mask_dtype = torch.float16 if USE_FP16_KV else torch.float32
+        self.emit_fp32_mask = USE_FP16_KV and COMPUTE_IN_F32
 
         # Store immutable tables in their final graph dtype. The rotary values remain
         # half-rounded exactly as before, but no per-run Cast is needed after slicing.
@@ -492,6 +491,8 @@ class ROTARY_MASK_PREFILL(torch.nn.Module):
         rotary_cos = self.cos_rotary_pos_emb[:, history_len:kv_seq_len]
         rotary_sin = self.sin_rotary_pos_emb[:, history_len:kv_seq_len]
         attention_mask = self.attention_mask[..., :ids_len, :kv_seq_len]
+        if self.emit_fp32_mask:
+            attention_mask = attention_mask.float()
         return rotary_cos, rotary_sin, attention_mask, kv_seq_len
 
 
@@ -1202,11 +1203,6 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         rotary_pos_emb_sin = all_inputs[-2]
         attention_mask     = all_inputs[-1]
 
-        # f16-storage / f32-compute (COMPUTE_IN_F32): keep the causal mask f16 at the graph boundary (I/O
-        # dtype unchanged) but upcast it to f32 ONCE here, shared by every layer (cast loop-invariant
-        # constants once). In every other mode it is used as-is (f16 minimum-cast, or f32 for a float32 cache).
-        attn_mask = attention_mask.float() if (self.use_fp16_kv and self.compute_in_f32) else attention_mask
-
         for i, layer in enumerate(self.funasr_nano.model.layers):
 
             # ── Self-Attention ───────────────────────────────────────
@@ -1247,11 +1243,11 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             self.save_value[i] = v
 
             if self.use_fp16_kv and self.compute_in_f32:
-                attn = torch.matmul(q, k.float()) + attn_mask
+                attn = torch.matmul(q, k.float()) + attention_mask
                 attn = torch.softmax(attn, dim=-1)
                 attn = torch.matmul(attn, v.float())
             else:
-                attn = torch.matmul(q, k) + attn_mask
+                attn = torch.matmul(q, k) + attention_mask
                 attn = torch.softmax(attn, dim=-1)
                 attn = torch.matmul(attn, v)
 
@@ -1382,6 +1378,7 @@ with torch.inference_mode():
     # KV cache spec: list of (name, concat_dim). F16 KV cache when USE_FP16_KV (minimum-cast attention).
     kv_specs = [('key', 4), ('value', 3)]
     kv_dtype = torch.float16 if USE_FP16_KV else torch.float32
+    attention_mask_dtype = torch.float32 if (USE_FP16_KV and COMPUTE_IN_F32) else kv_dtype
 
     kv_tensors = {
         'key':   torch.zeros((batch_size, num_kv_heads, 1, head_dim, history_len), dtype=kv_dtype),
@@ -1526,8 +1523,8 @@ with torch.inference_mode():
     hidden_states  = torch.ones((batch_size, ids_len, hidden_size), dtype=torch.float32)
     rotary_cos     = torch.zeros((1, ids_len, 1, 1, head_dim), dtype=torch.float32)
     rotary_sin     = rotary_cos
-    # The mask is added to the (minimum-cast) f16 / f32 attention scores, so it must match the KV dtype.
-    attention_mask = torch.zeros((1, 1, 1, ids_len, kv_seq_len), dtype=kv_dtype)
+    # Main receives the mask in its attention-compute dtype. Its f16 KV cache remains unchanged.
+    attention_mask = torch.zeros((1, 1, 1, ids_len, kv_seq_len), dtype=attention_mask_dtype)
 
     all_inputs   = kv_ins + [hidden_states, rotary_cos, rotary_sin, attention_mask]
     input_names  = kv_in_names + ['hidden_states', 'rotary_cos', 'rotary_sin', 'attention_mask']

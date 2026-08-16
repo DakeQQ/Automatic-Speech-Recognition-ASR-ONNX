@@ -463,6 +463,7 @@ class DOLPHIN_PREFILL(torch.nn.Module):
     # main graph stays integer-free.
     def __init__(self, dolphin, max_seq_len):
         super(DOLPHIN_PREFILL, self).__init__()
+        self.emit_fp32_mask = USE_FP16_KV and COMPUTE_IN_F32
         self.register_buffer(
             "position_weight",
             dolphin.decoder.embed[1].pe[:, :max_seq_len].detach().to(KV_DTYPE).clone(),
@@ -476,6 +477,8 @@ class DOLPHIN_PREFILL(torch.nn.Module):
         kv_seq_len = history_len + ids_len
         position_embed = self.position_weight[:, history_len: kv_seq_len].float()
         attention_mask = self.attention_mask[:, :ids_len, :kv_seq_len].to(KV_DTYPE)
+        if self.emit_fp32_mask:
+            attention_mask = attention_mask.float()
         return position_embed, attention_mask, kv_seq_len
 
 
@@ -631,9 +634,9 @@ class DOLPHIN_DECODER(torch.nn.Module):
         hidden_states = all_inputs[self.idx_hidden] + all_inputs[self.idx_position]
         attention_mask = all_inputs[-1]
         batch_size = hidden_states.shape[0].unsqueeze(0)
-        # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
-        # dtype unchanged) and upcast to f32 ONCE here, shared by every layer. Minimum-cast path uses it as-is (f16).
-        attn_mask = attention_mask.float() if self.compute_in_f32 else attention_mask
+        # Prefill emits the causal mask in attention-compute dtype, so every layer
+        # shares it directly without an additional precision-boundary Cast.
+        attn_mask = attention_mask
         save_de_keys = []
         save_de_values = []
         for idx, decoder_layer in enumerate(self.decoders):
@@ -930,7 +933,8 @@ with torch.inference_mode():
     past_value_de = torch.zeros((batch_size, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=KV_DTYPE)
     hidden_states_de = torch.ones((batch_size, 1, HIDDEN_SIZE), dtype=torch.float32)
     position_embed_de = torch.ones((1, 1, HIDDEN_SIZE), dtype=torch.float32)
-    attention_mask = torch.zeros((1, 1, 1), dtype=KV_DTYPE)
+    attention_mask_dtype = torch.float32 if (USE_FP16_KV and COMPUTE_IN_F32) else KV_DTYPE
+    attention_mask = torch.zeros((1, 1, 1), dtype=attention_mask_dtype)
 
     input_names = []
     all_inputs = []

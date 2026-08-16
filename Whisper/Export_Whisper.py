@@ -464,6 +464,7 @@ class WHISPER_PREFILL(torch.nn.Module):
     # main graph stays integer-free.
     def __init__(self, decoder, max_seq_len, attention_dtype):
         super(WHISPER_PREFILL, self).__init__()
+        self.emit_fp32_mask = USE_FP16_KV and COMPUTE_IN_F32
         self.register_buffer('position_weight', decoder.embed_positions.weight.unsqueeze(0).to(KV_DTYPE))
         self.register_buffer(
             'attention_mask',
@@ -477,6 +478,8 @@ class WHISPER_PREFILL(torch.nn.Module):
         kv_seq_len = history_len + ids_len
         position_embed = self.position_weight[:, history_len: kv_seq_len].float()
         attention_mask = self.attention_mask[:, :ids_len, :kv_seq_len]
+        if self.emit_fp32_mask:
+            attention_mask = attention_mask.float()
         return position_embed, attention_mask, kv_seq_len
 
 
@@ -614,9 +617,9 @@ class WHISPER_DECODER(torch.nn.Module):
         hidden_states = all_inputs[self.idx_hidden] + all_inputs[self.idx_position]
         attention_mask = all_inputs[-1]
         batch_size = hidden_states.shape[0].unsqueeze(0)
-        # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
-        # dtype unchanged) and upcast to f32 ONCE here, shared by every layer. Minimum-cast path uses it as-is (f16).
-        attn_mask = attention_mask.float() if self.compute_in_f32 else attention_mask
+        # Prefill emits the causal mask in attention-compute dtype, so every layer
+        # shares it directly without an additional precision-boundary Cast.
+        attn_mask = attention_mask
         save_de_keys = []
         save_de_values = []
         for idx, decoder_layer in enumerate(self.decoder.layers):
@@ -793,8 +796,8 @@ with torch.inference_mode():
     del embed_input_ids
 
     # ── Prefill position-embedding + causal-mask graph (mirrors Qwen Rotary_Mask_Prefill) ────────────
-    attention_mask_dtype = KV_DTYPE
-    whisper_prefill = WHISPER_PREFILL(model.model.decoder, MAX_SEQ_LEN, attention_mask_dtype)
+    attention_mask_dtype = torch.float32 if (USE_FP16_KV and COMPUTE_IN_F32) else KV_DTYPE
+    whisper_prefill = WHISPER_PREFILL(model.model.decoder, MAX_SEQ_LEN, KV_DTYPE)
     prefill_ids_len = torch.tensor([4], dtype=torch.int64)
     prefill_history_len = torch.tensor([0], dtype=torch.int64)
     torch.onnx.export(

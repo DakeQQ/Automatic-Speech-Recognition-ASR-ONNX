@@ -920,6 +920,7 @@ class FIRE_RED_PREFILL(torch.nn.Module):
     # main graph stays integer-free.
     def __init__(self, fire_red, max_seq_len):
         super(FIRE_RED_PREFILL, self).__init__()
+        self.emit_fp32_mask = USE_FP16_KV and COMPUTE_IN_F32
         self.register_buffer('position_weight', fire_red.decoder.positional_encoding.pe[:, :max_seq_len].to(KV_DTYPE))
         attention_mask = (1 - torch.tril(torch.ones([1, max_seq_len, max_seq_len], dtype=torch.int8))) * -128
         self.register_buffer('attention_mask', attention_mask.to(KV_DTYPE))
@@ -937,6 +938,8 @@ class FIRE_RED_PREFILL(torch.nn.Module):
         attention_mask = _OnnxSlice.apply(
             self.attention_mask, self.mask_starts, mask_ends,
             self.mask_axes, self.mask_steps)
+        if self.emit_fp32_mask:
+            attention_mask = attention_mask.float()
         return position_embed, attention_mask, kv_seq_len
 
 
@@ -1104,9 +1107,9 @@ class FIRE_RED_DECODER(torch.nn.Module):
         # Decode graphs and arrive here as float tensors, so the decode path has no integer I/O.
         hidden_states = all_inputs[self.idx_hidden] + all_inputs[self.idx_position]
         attention_mask = all_inputs[-1]
-        # f16-storage / f32-compute (COMPUTE_IN_F32): the causal mask is kept f16 at the graph boundary (I/O
-        # dtype unchanged) and upcast to f32 ONCE here, shared by every layer. Minimum-cast path uses it as-is (f16).
-        attn_mask = attention_mask.float() if self.compute_in_f32 else attention_mask
+        # Prefill emits the causal mask in attention-compute dtype, so every layer
+        # shares it directly without an additional precision-boundary Cast.
+        attn_mask = attention_mask
         for idx, decoder_layer in enumerate(self.model.decoder.layer_stack):
             hidden_states_norm = decoder_layer.self_attn_norm(hidden_states)
             # Self-attention. OFF (minimum-cast): cast the fused QKV DOWN to f16 before the split so
@@ -1298,7 +1301,8 @@ with torch.inference_mode():
         past_value_de = torch.zeros((batch_size, NUM_HEAD_DE, 0, HEAD_DIM_DE), dtype=KV_DTYPE)
         hidden_states_de = torch.ones((batch_size, 1, HIDDEN_SIZE), dtype=torch.float32)
         position_embed_de = torch.ones((1, 1, HIDDEN_SIZE), dtype=torch.float32)
-        attention_mask = torch.zeros((1, 1, 1), dtype=KV_DTYPE)
+        attention_mask_dtype = torch.float32 if (USE_FP16_KV and COMPUTE_IN_F32) else KV_DTYPE
+        attention_mask = torch.zeros((1, 1, 1), dtype=attention_mask_dtype)
 
         input_names = []
         all_inputs = []
