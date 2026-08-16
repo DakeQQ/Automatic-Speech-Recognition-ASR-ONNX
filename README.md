@@ -26,19 +26,19 @@
 
 | **Model · 模型** | **Variants & Links · 变体与链接** | **Highlights · 亮点** |
 |:---|:---|:---|
-| **SenseVoice** | [repo](https://github.com/FunAudioLLM/SenseVoice) | - Multilingual, punctuation & emotion <br> - 多语种、标点与情感 |
-| **Whisper** | [V3](https://huggingface.co/openai/whisper-large-v3) · [V2](https://huggingface.co/openai/whisper-large-v2) · - Turbo / fine-tunes | Set a target language <br> - 需指定目标语言 |
-| **Paraformer** | [Small-ZH](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1) · [Large-ZH](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch) · [Large-EN](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch) · [Streaming-ZH 流式](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online) | - Chinese & English, streaming option <br> - 中英文，支持流式 |
-| **FireRedASR** | [repo](https://github.com/FireRedTeam/FireRedASR) · [repo-2S](https://github.com/FireRedTeam/FireRedASR2S) | - Attention encoder–decoder <br> - 注意力编码器-解码器 |
-| **Dolphin** | [repo](https://github.com/DataoceanAI/Dolphin/tree/main) | - V1 · CN-Dialect 方言 · Streaming 流式 |
-| **Fun-ASR-Nano-2512** | [model](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512) | - CTC fast head + AR decoder <br> - CTC 快速头 + 自回归解码 |
-| **Qwen3-ASR** | [model](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B) | - Hot-words + language prompt, greedy / beam search <br> - 热词 + 语言提示，贪心/束搜索 |
-| **Audio8-ASR** | [model](https://huggingface.co/Audio8/Audio8-ASR-0.1B) · [ONNX pipeline](Audio8_ASR) | - Automatic recognition: Chinese, English, French, German, Japanese, Korean & Cantonese <br> - 自动识别中文、英语、法语、德语、日语、韩语和粤语 |
-| **Mega-ASR** | [repo](https://github.com/xzf-thu/Mega-ASR) · [ONNX pipeline](Mega_ASR) | - Routes between Qwen3-ASR Base and Mega paths for degraded audio <br> - 根据音频质量在 Qwen3-ASR Base 和 Mega 路径间路由 |
-| **Qwen3 ForcedAligner** | [model](https://www.modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B) | - Non-autoregressive word-level timestamps <br> - 非自回归词级时间戳 |
-| **X-ASR** | [repo](https://github.com/Gilgamesh-J/X-ASR) | - Streaming Zipformer transducer (ZH-EN) <br> - 流式 Zipformer 转录器（中英） |
-| **Nemotron** | [model](https://modelscope.cn/models/nv-community/nemotron-3.5-asr-streaming-0.6b) | - Streaming Multilingual <br> - 流式多语种 |
-| **Parakeet** | [model](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) | - Multilingual FastConformer + TDT decoder <br> - 多语种 FastConformer + TDT 解码器 |
+| **SenseVoice** | [GitHub](https://github.com/FunAudioLLM/SenseVoice) | - Multilingual, punctuation & emotion <br> - 多语种、标点与情感 |
+| **Whisper** | [Hugging Face V3](https://huggingface.co/openai/whisper-large-v3) · [Hugging Face V2](https://huggingface.co/openai/whisper-large-v2) · - Turbo / fine-tunes | Set a target language <br> - 需指定目标语言 |
+| **Paraformer** | [ModelScope Small-ZH](https://modelscope.cn/models/iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1) · [ModelScope Large-ZH](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch) · [ModelScope Large-EN](https://modelscope.cn/models/iic/speech_paraformer_asr-en-16k-vocab4199-pytorch) · [ModelScope Streaming-ZH 流式](https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online) | - Chinese & English, streaming option <br> - 中英文，支持流式 |
+| **FireRedASR** | [GitHub](https://github.com/FireRedTeam/FireRedASR) · [GitHub 2S](https://github.com/FireRedTeam/FireRedASR2S) | - Attention encoder–decoder <br> - 注意力编码器-解码器 |
+| **Dolphin** | [GitHub](https://github.com/DataoceanAI/Dolphin/tree/main) | - V1 · CN-Dialect 方言 · Streaming 流式 |
+| **Fun-ASR-Nano-2512** | [ModelScope](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512) | - CTC fast head + AR decoder <br> - CTC 快速头 + 自回归解码 |
+| **Qwen3-ASR** | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B) | - Hot-words + language prompt, greedy / beam search <br> - 热词 + 语言提示，贪心/束搜索 |
+| **Audio8-ASR** | [Hugging Face](https://huggingface.co/Audio8/Audio8-ASR-0.1B) | - Automatic recognition: Chinese, English, French, German, Japanese, Korean & Cantonese <br> - 自动识别中文、英语、法语、德语、日语、韩语和粤语 |
+| **Mega-ASR** | [GitHub](https://github.com/xzf-thu/Mega-ASR) | - Routes between Qwen3-ASR Base and Mega paths for degraded audio <br> - 根据音频质量在 Qwen3-ASR Base 和 Mega 路径间路由 |
+| **Qwen3 ForcedAligner** | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B) | - Non-autoregressive word-level timestamps <br> - 非自回归词级时间戳 |
+| **X-ASR** | [GitHub](https://github.com/Gilgamesh-J/X-ASR) | - Streaming Zipformer transducer (ZH-EN) <br> - 流式 Zipformer 转录器（中英） |
+| **Nemotron** | [ModelScope](https://modelscope.cn/models/nv-community/nemotron-3.5-asr-streaming-0.6b) | - Streaming Multilingual <br> - 流式多语种 |
+| **Parakeet** | [Hugging Face](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) | - Multilingual FastConformer + TDT decoder <br> - 多语种 FastConformer + TDT 解码器 |
 
 
 ---
