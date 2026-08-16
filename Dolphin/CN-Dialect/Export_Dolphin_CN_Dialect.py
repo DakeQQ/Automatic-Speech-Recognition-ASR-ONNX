@@ -1184,7 +1184,7 @@ _raw_onnx_temp.cleanup()
 print(f'\n[Cleanup] Removed raw ONNX staging folder: {_raw_onnx_dir}')
 print('\nExport done!\n')
 print(f'Final ONNX models retained in: {ONNX_DIR}')
-if subprocess.call(
+subprocess.run(
     [
         sys.executable,
         str(Path(_SCRIPT_DIR) / "Inference_Dolphin_CN_Dialect_ONNX.py"),
@@ -1192,5 +1192,5 @@ if subprocess.call(
         str(ONNX_DIR),
     ],
     cwd=_SCRIPT_DIR,
-) != 0:
-    raise RuntimeError("Dolphin CN-Dialect inference failed after export.")
+    check=True,
+)

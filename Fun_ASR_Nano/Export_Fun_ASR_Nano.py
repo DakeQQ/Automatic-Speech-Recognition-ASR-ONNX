@@ -1003,13 +1003,15 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
             torch.tensor([0, -1, num_heads * head_dim], dtype=torch.int64),
         )
         self.register_buffer(
-            "rotate_half_indices",
-            torch.cat(
-                [
-                    torch.arange(self.head_dim_half, head_dim, dtype=torch.int32),
-                    torch.arange(self.head_dim_half, dtype=torch.int32),
-                ]
+            "rotate_half_in_shape",
+            torch.tensor(
+                [0, -1, 1, self.qk_heads, 2, self.head_dim_half],
+                dtype=torch.int64,
             ),
+        )
+        self.register_buffer(
+            "rotate_half_out_shape",
+            torch.tensor([0, -1, 1, self.qk_heads, head_dim], dtype=torch.int64),
         )
 
         # ── Per-layer output buffers ─────────────────────────────────────
@@ -1189,8 +1191,10 @@ class FUNASR_NANO_DECODER_MAIN(torch.nn.Module):
         return simplified_layer_norm(x, scale, eps)
 
     def _rotate_half(self, x):
-        """Apply the half-swap with one int32 Gather; signs live in the sin table."""
-        return torch.index_select(x, -1, self.rotate_half_indices)
+        """Swap contiguous RoPE halves with static Reshape -> Slice -> Reshape."""
+        x = ONNX_STATIC_RESHAPE.apply(x, self.rotate_half_in_shape)
+        x = x.flip(-2)
+        return ONNX_STATIC_RESHAPE.apply(x, self.rotate_half_out_shape)
 
     def forward(self, *all_inputs):
         hidden_states      = all_inputs[-4]
@@ -1716,7 +1720,7 @@ print(f"[Cleanup] Removed raw ONNX staging folder: {split_export_folder}")
 
 print('\nExport done!\n')
 print(f'Final ONNX models retained in: {onnx_folder}')
-if subprocess.call(
+subprocess.run(
     [
         sys.executable,
         str(_SCRIPT_DIR / "Inference_Fun_ASR_Nano_ONNX.py"),
@@ -1724,5 +1728,5 @@ if subprocess.call(
         str(onnx_folder),
     ],
     cwd=str(_SCRIPT_DIR),
-) != 0:
-    raise RuntimeError("Fun-ASR-Nano inference failed after export.")
+    check=True,
+)

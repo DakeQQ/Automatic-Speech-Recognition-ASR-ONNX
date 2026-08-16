@@ -67,12 +67,25 @@ def array_for(
 ) -> np.ndarray:
     """Materialize a contiguous array with the model-declared dtype and shape."""
     array = np.asarray(value, dtype=numpy_dtype(value_meta))
+    explicit_axes = axes or {}
     runtime_axes = {
         axis: int(array.shape[axis])
         for axis, dim in enumerate(value_meta.shape)
-        if is_dynamic_dim(dim)
+        if is_dynamic_dim(dim) and axis < array.ndim
     }
-    runtime_axes.update(axes or {})
+    missing_axes = [
+        axis
+        for axis, dim in enumerate(value_meta.shape)
+        if is_dynamic_dim(dim)
+        and axis >= array.ndim
+        and axis not in explicit_axes
+    ]
+    if missing_axes:
+        raise ValueError(
+            f"Value for {value_meta.name!r} has rank {array.ndim}; provide "
+            f"axes for dynamic dimensions {missing_axes!r}."
+        )
+    runtime_axes.update(explicit_axes)
     shape = resolve_shape(value_meta, symbols=symbols, axes=runtime_axes)
     return np.ascontiguousarray(
         array.reshape(shape)

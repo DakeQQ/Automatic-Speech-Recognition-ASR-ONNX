@@ -770,7 +770,7 @@ with torch.inference_mode():
     print("[Targeted rewrite] Removed automatic raw-export staging directory.")
     gc.collect()
 print('\nExport done!\n')
-if subprocess.call(
+subprocess.run(
     [
         sys.executable,
         str(script_folder / "Inference_Paraformer_Streaming_ONNX.py"),
@@ -778,5 +778,5 @@ if subprocess.call(
         str(onnx_folder),
     ],
     cwd=str(script_folder),
-) != 0:
-    raise RuntimeError("Paraformer Streaming inference failed after export.")
+    check=True,
+)

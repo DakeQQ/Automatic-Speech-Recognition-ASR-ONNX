@@ -1128,7 +1128,7 @@ generation_config.save_pretrained(_tokenizer_dir)
 print(f"[Tokenizer] Saved tokenizer + generation config -> {_tokenizer_dir}")
 
 print('\nExport done!\n')
-if subprocess.call(
+subprocess.run(
     [
         sys.executable,
         str(SCRIPT_DIR / "Inference_Whisper_ONNX.py"),
@@ -1136,5 +1136,5 @@ if subprocess.call(
         str(ONNX_DIR),
     ],
     cwd=str(SCRIPT_DIR),
-) != 0:
-    raise RuntimeError("Whisper inference failed after export.")
+    check=True,
+)

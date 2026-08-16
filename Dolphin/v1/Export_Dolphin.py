@@ -1081,7 +1081,7 @@ with torch.inference_mode():
         model_size = 'small'
     else:
         model_size = 'base'
-    model = dolphin.load_model(model_size, model_path, "cpu")
+    model = dolphin.load_model(model_size, model_path, "cpu").eval()
     # The current dolphin package exposes encoder/decoder/ctc directly on the
     # ASRModel instance; the former `s2t_model` wrapper attribute was removed.
     # Alias it back to the model itself so the export logic below stays intact.
@@ -1477,7 +1477,7 @@ print("    Standalone graphs: Encoder + Metadata; no Qwen KV helpers.")
 _raw_onnx_temp.cleanup()
 print(f"[Raw] Deleted temporary split export at {_raw_onnx_dir}")
 print('\nExport done!\n')
-if subprocess.call(
+subprocess.run(
     [
         sys.executable,
         str(Path(_SCRIPT_DIR) / "Inference_Dolphin_ONNX.py"),
@@ -1485,5 +1485,5 @@ if subprocess.call(
         str(ONNX_DIR),
     ],
     cwd=_SCRIPT_DIR,
-) != 0:
-    raise RuntimeError("Dolphin v1 inference failed after export.")
+    check=True,
+)

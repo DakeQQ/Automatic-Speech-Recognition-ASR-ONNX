@@ -211,7 +211,7 @@ class ConformerEncoder(nn.Module):
         self.layer_stack = nn.ModuleList()
         for l in range(n_layers):
             block = RelPosEmbConformerBlock(
-                d_model, n_head, residual_dropout, dropout_rate, kernel_size,
+                d_model, n_head, kernel_size,
                 self.qkv_split_sizes, self.qkv_shape,
                 self.slice_zero, self.slice_one,
                 self.slice_end_max, self.slice_one,
@@ -250,24 +250,21 @@ class ConformerEncoder(nn.Module):
 
 
 class RelPosEmbConformerBlock(nn.Module):
-    def __init__(self, d_model, n_head,
-                 residual_dropout=0.1,
-                 dropout_rate=0.1, kernel_size=33,
+    def __init__(self, d_model, n_head, kernel_size=33,
                  qkv_split_sizes=None, qkv_shape=None,
                  slice_start_zero=None, slice_start_one=None,
                  slice_end_max=None, slice_axis_one=None,
                  slice_axis_two=None, slice_step_one=None):
         super().__init__()
-        self.ffn1 = ConformerFeedForward(d_model, dropout_rate)
+        self.ffn1 = ConformerFeedForward(d_model)
         self.mhsa = RelPosMultiHeadAttention(
-            n_head, d_model, residual_dropout,
+            n_head, d_model,
             qkv_split_sizes, qkv_shape,
             slice_start_zero, slice_start_one,
             slice_end_max, slice_axis_one,
             slice_axis_two, slice_step_one)
-        self.conv = ConformerConvolution(d_model, kernel_size,
-                                         dropout_rate)
-        self.ffn2 = ConformerFeedForward(d_model, dropout_rate)
+        self.conv = ConformerConvolution(d_model, kernel_size)
+        self.ffn2 = ConformerFeedForward(d_model)
         self.layer_norm = nn.LayerNorm(d_model)
 
     def forward(self, x, pos_emb, x_len, slf_attn_mask=None, pad_mask=None,
@@ -342,27 +339,25 @@ class RelPositionalEncoding(torch.nn.Module):
 
 
 class ConformerFeedForward(nn.Module):
-    def __init__(self, d_model, dropout_rate=0.1):
+    def __init__(self, d_model):
         super().__init__()
         pre_layer_norm = nn.LayerNorm(d_model)
         linear_expand = nn.Linear(d_model, d_model*4)
         nonlinear = Swish()
-        dropout_pre = nn.Dropout(dropout_rate)
         linear_project = nn.Linear(d_model*4, d_model)
-        dropout_post = nn.Dropout(dropout_rate)
         self.net = nn.Sequential(pre_layer_norm,
                                  linear_expand,
                                  nonlinear,
-                                 dropout_pre,
+                                 nn.Identity(),
                                  linear_project,
-                                 dropout_post)
+                                 nn.Identity())
 
     def forward(self, x):
         return self.net(x) + x
 
 
 class ConformerConvolution(nn.Module):
-    def __init__(self, d_model, kernel_size=33, dropout_rate=0.1):
+    def __init__(self, d_model, kernel_size=33):
         super().__init__()
         self.pre_layer_norm = nn.LayerNorm(d_model)
         self.pointwise_conv1 = nn.Conv1d(d_model, d_model*4, kernel_size=1, bias=False)
@@ -392,8 +387,7 @@ class ConformerConvolution(nn.Module):
 
 
 class EncoderMultiHeadAttention(nn.Module):
-    def __init__(self, n_head, d_model,
-                 residual_dropout=0.1):
+    def __init__(self, n_head, d_model):
         super().__init__()
         self.n_head = n_head
         self.d_k = d_model // n_head
@@ -438,13 +432,11 @@ class ScaledDotProductAttention(nn.Module):
 
 class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
     def __init__(self, n_head, d_model,
-                 residual_dropout=0.1,
                  qkv_split_sizes=None, qkv_shape=None,
                  slice_start_zero=None, slice_start_one=None,
                  slice_end_max=None, slice_axis_one=None,
                  slice_axis_two=None, slice_step_one=None):
-        super().__init__(n_head, d_model,
-                         residual_dropout)
+        super().__init__(n_head, d_model)
         d_k = d_model // n_head
         self.linear_pos = nn.Linear(d_model, n_head * d_k, bias=False)
         self.pos_bias_u = nn.Parameter(torch.FloatTensor(n_head, d_k))
@@ -510,6 +502,9 @@ def load_fireredasr_aed_model(model_path):
     print("model args:", package["args"])
     model = FireRedAsrAed.from_args(package["args"])
     model.load_state_dict(package["model_state_dict"], strict=False)
+    for module in model.modules():
+        if isinstance(module, torch.nn.Dropout):
+            module.p = 0.0
     return model
 
 
@@ -1608,7 +1603,7 @@ for _asset in ("dict.txt", "train_bpe1000.model"):
 _raw_onnx_temp.cleanup()
 
 print('\nExport done!\n')
-if subprocess.call(
+subprocess.run(
     [
         sys.executable,
         str(SCRIPT_DIR / "Inference_FireRedASR_AED_ONNX.py"),
@@ -1616,5 +1611,5 @@ if subprocess.call(
         str(ONNX_DIR),
     ],
     cwd=str(SCRIPT_DIR),
-) != 0:
-    raise RuntimeError("FireRedASR inference failed after export.")
+    check=True,
+)

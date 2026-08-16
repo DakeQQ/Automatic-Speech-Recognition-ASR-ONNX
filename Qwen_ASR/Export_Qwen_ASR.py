@@ -1112,18 +1112,6 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
             self.intermediate_size,
             self.intermediate_size,
         )
-        self.register_buffer(
-            "rotate_half_indices",
-            torch.cat(
-                [
-                    torch.arange(
-                        self.head_dim_half, self.head_dim, dtype=torch.int32
-                    ),
-                    torch.arange(self.head_dim_half, dtype=torch.int32),
-                ]
-            ),
-            persistent=False,
-        )
 
         # RMS norm is emitted as ORT's fused SimplifiedLayerNormalization (default ONNX domain): it computes
         # y = x * rsqrt(mean(x^2) + eps) * scale and reduces in float32 (stash_type=1). Feeding scale = 1/sqrt(N)
@@ -1266,9 +1254,12 @@ class QWEN3_ASR_DECODER_MAIN(torch.nn.Module):
         return simplified_layer_norm(x, scale, eps)
 
     def _rotate_half(self, x: Tensor) -> Tensor:
-        # The sign is pre-applied to the sine table. One int32 Gather exactly
-        # replaces reshape -> flip -> reshape without dynamic shape machinery.
-        return torch.index_select(x, -1, self.rotate_half_indices)
+        # The sign is pre-applied to the sine table.
+        x = onnx_reshape_batch(
+            x, (-1, 1, self.qk_heads, 2, self.head_dim_half)
+        )
+        x = x.flip(-2)
+        return onnx_reshape_batch(x, (-1, 1, self.qk_heads, self.head_dim))
 
     def forward(self, *all_inputs: Tensor) -> Tuple[Tensor, ...]:
         hidden_states  = all_inputs[-4]
@@ -1908,7 +1899,7 @@ with torch.inference_mode():
     print("[SharedMerged] Removed automatic split-graph staging directory.")
 
 print("\nExport complete.\n")
-if subprocess.call(
+subprocess.run(
     [
         sys.executable,
         str(script_dir / "Inference_Qwen_ASR_ONNX.py"),
@@ -1916,5 +1907,5 @@ if subprocess.call(
         str(onnx_folder),
     ],
     cwd=str(script_dir),
-) != 0:
-    raise RuntimeError("Qwen3-ASR inference failed after export.")
+    check=True,
+)

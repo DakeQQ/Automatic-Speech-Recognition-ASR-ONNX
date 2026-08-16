@@ -421,7 +421,7 @@ for _asset in ("chn_jpn_yue_eng_ko_spectok.bpe.model",):
     print(f"[Tokenizer] Copied {_asset} -> {onnx_folder}")
 
 print('\nExport done!\n')
-if subprocess.call(
+subprocess.run(
     [
         sys.executable,
         str(onnx_folder.parent / "Inference_SenseVoice_ONNX.py"),
@@ -429,5 +429,5 @@ if subprocess.call(
         str(onnx_folder),
     ],
     cwd=str(onnx_folder.parent),
-) != 0:
-    raise RuntimeError("SenseVoice inference failed after export.")
+    check=True,
+)

@@ -87,7 +87,6 @@ from subsampling import Conv2dSubsampling  # pyright: ignore[reportMissingImport
 from zipformer import Zipformer2  # pyright: ignore[reportMissingImports]
 from decoder import Decoder  # pyright: ignore[reportMissingImports]
 from joiner import Joiner  # pyright: ignore[reportMissingImports]
-from scaling import ScheduledFloat  # pyright: ignore[reportMissingImports]
 from scaling_converter import convert_scaled_to_non_scaled  # pyright: ignore[reportMissingImports]
 
 # ============================================================================================
@@ -128,9 +127,8 @@ NUM_LAYERS_TOTAL = sum(ARCH["num_encoder_layers"])   # 19
 def build_model():
     """Construct the four sub-modules exactly as train.py.get_model does, then load the
     checkpoint's encoder_embed. / encoder. / decoder. / joiner. sub-state-dicts."""
-    sched = ScheduledFloat((0.0, 0.3), (20000.0, 0.1))
     encoder_embed = Conv2dSubsampling(
-        in_channels=FEATURE_DIM, out_channels=ARCH["encoder_dim"][0], dropout=sched
+        in_channels=FEATURE_DIM, out_channels=ARCH["encoder_dim"][0], dropout=0.0
     )
     encoder = Zipformer2(
         output_downsampling_factor=ARCH["output_downsampling_factor"],
@@ -145,7 +143,7 @@ def build_model():
         num_heads=ARCH["num_heads"],
         feedforward_dim=ARCH["feedforward_dim"],
         cnn_module_kernel=ARCH["cnn_module_kernel"],
-        dropout=sched,
+        dropout=0.0,
         warmup_batches=4000.0,
         causal=True,
         chunk_size=(CHUNK_SIZE,),
@@ -918,7 +916,7 @@ if __name__ == "__main__":
         shutil.copy2(_src, _dst)
         print(f"[Tokenizer] Copied {_asset} -> {onnx_folder}")
     print("\nExport done.\n")
-    if subprocess.call(
+    subprocess.run(
         [
             sys.executable,
             str(onnx_folder.parent / "Inference_X_ASR_ONNX.py"),
@@ -926,5 +924,5 @@ if __name__ == "__main__":
             str(onnx_folder),
         ],
         cwd=str(onnx_folder.parent),
-    ) != 0:
-        raise RuntimeError("X-ASR inference failed after export.")
+        check=True,
+    )

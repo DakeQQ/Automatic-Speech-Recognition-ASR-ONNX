@@ -636,7 +636,7 @@ with torch.inference_mode():
     del CMVN_MEANS
     gc.collect()
 print('\nExport done!\n')
-if subprocess.call(
+subprocess.run(
     [
         sys.executable,
         str(SCRIPT_DIR / "Inference_Paraformer_ONNX.py"),
@@ -644,5 +644,5 @@ if subprocess.call(
         str(ONNX_OUTPUT_DIR),
     ],
     cwd=str(SCRIPT_DIR),
-) != 0:
-    raise RuntimeError("Paraformer inference failed after export.")
+    check=True,
+)

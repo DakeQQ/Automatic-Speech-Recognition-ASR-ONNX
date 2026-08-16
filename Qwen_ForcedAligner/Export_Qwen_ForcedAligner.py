@@ -944,16 +944,6 @@ class FORCED_ALIGNER_DECODER_MAIN(torch.nn.Module):
         self.attention_output_size = int(self.llm.layers[0].self_attn.o_proj.in_features)
         self.intermediate_size = int(self.llm.layers[0].mlp.down_proj.in_features)
         self.mlp_split_sizes = (self.intermediate_size, self.intermediate_size)
-        self.register_buffer(
-            "rotate_half_indices",
-            torch.cat(
-                [
-                    torch.arange(self.head_dim_half, self.head_dim, dtype=torch.int32),
-                    torch.arange(self.head_dim_half, dtype=torch.int32),
-                ]
-            ),
-            persistent=False,
-        )
 
         # RMS norm is emitted as ORT's fused SimplifiedLayerNormalization (default ONNX domain): it computes
         # y = x * rsqrt(mean(x^2) + eps) * scale and reduces in float32 (stash_type=1). Feeding scale = 1/sqrt(N)
@@ -1085,9 +1075,10 @@ class FORCED_ALIGNER_DECODER_MAIN(torch.nn.Module):
         return simplified_layer_norm(x, scale, eps)
 
     def _rotate_half(self, x: Tensor) -> Tensor:
-        # The sign is already folded into sin_rotary_pos_emb. One int32 Gather
-        # exactly replaces reshape -> flip -> reshape without shape construction.
-        return torch.index_select(x, -1, self.rotate_half_indices)
+        # The sign is already folded into sin_rotary_pos_emb.
+        x = x.reshape(1, -1, 1, self.qk_heads, 2, self.head_dim_half)
+        x = x.flip(-2)
+        return x.reshape(1, -1, 1, self.qk_heads, self.head_dim)
 
     def forward(self, hidden_states: Tensor, rotary_cos: Tensor, rotary_sin: Tensor, attention_mask: Tensor) -> Tensor:
         for layer in self.llm.layers:
@@ -1321,7 +1312,7 @@ def export_all() -> None:
 
 if __name__ == "__main__":
     export_all()
-    if subprocess.call(
+    subprocess.run(
         [
             sys.executable,
             str(script_folder / "Inference_Qwen_ForcedAligner_ONNX.py"),
@@ -1329,5 +1320,5 @@ if __name__ == "__main__":
             str(onnx_folder),
         ],
         cwd=str(script_folder),
-    ) != 0:
-        raise RuntimeError("Qwen ForcedAligner inference failed after export.")
+        check=True,
+    )

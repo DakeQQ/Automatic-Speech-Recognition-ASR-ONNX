@@ -1055,7 +1055,7 @@ def export_all():
 
 if __name__ == "__main__":
     export_all()
-    if subprocess.call(
+    subprocess.run(
         [
             sys.executable,
             str(_SCRIPT_DIR / "Inference_Nemotron_ASR_ONNX.py"),
@@ -1063,5 +1063,5 @@ if __name__ == "__main__":
             str(ONNX_FOLDER),
         ],
         cwd=str(_SCRIPT_DIR),
-    ) != 0:
-        raise RuntimeError("Nemotron ASR inference failed after export.")
+        check=True,
+    )
