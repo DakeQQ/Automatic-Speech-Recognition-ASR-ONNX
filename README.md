@@ -34,12 +34,18 @@
 | **Fun-ASR-Nano-2512** | [ModelScope](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512) | - CTC fast head + AR decoder <br> - CTC 快速头 + 自回归解码 |
 | **Qwen3-ASR** | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B) | - Hot-words + language prompt, greedy / beam search <br> - 热词 + 语言提示，贪心/束搜索 |
 | **Audio8-ASR** | [Hugging Face](https://huggingface.co/Audio8/Audio8-ASR-0.1B) | - Automatic recognition: Chinese, English, French, German, Japanese, Korean & Cantonese <br> - 自动识别中文、英语、法语、德语、日语、韩语和粤语 |
+| **ARK-ASR** | [Hugging Face](https://huggingface.co/Audio8/ARK-ASR-0.6B) | - 0.6B multilingual autoregressive ASR <br> - 0.6B 多语种自回归语音识别 |
 | **Mega-ASR** | [GitHub](https://github.com/xzf-thu/Mega-ASR) | - Routes between Qwen3-ASR Base and Mega paths for degraded audio <br> - 根据音频质量在 Qwen3-ASR Base 和 Mega 路径间路由 |
 | **Qwen3 ForcedAligner** | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B) | - Non-autoregressive word-level timestamps <br> - 非自回归词级时间戳 |
 | **X-ASR** | [GitHub](https://github.com/Gilgamesh-J/X-ASR) | - Streaming Zipformer transducer (ZH-EN) <br> - 流式 Zipformer 转录器（中英） |
 | **Nemotron** | [ModelScope](https://modelscope.cn/models/nv-community/nemotron-3.5-asr-streaming-0.6b) | - Streaming Multilingual <br> - 流式多语种 |
 | **Parakeet** | [Hugging Face](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) | - Multilingual FastConformer + TDT decoder <br> - 多语种 FastConformer + TDT 解码器 |
 
+**👥 Multi-talker models · 多人说话模型**
+
+| **Model · 模型** | **Variants & Links · 变体与链接** | **Highlights · 亮点** |
+|:---|:---|:---|
+| **Parakeet MultiTalker Streaming** | [Hugging Face](https://huggingface.co/nvidia/multitalker-parakeet-streaming-0.6b-v1) | - Four-speaker streaming ASR + diarization <br> - 四人流式语音识别 + 说话人分离 |
 
 ---
 
@@ -80,7 +86,27 @@ python <Model>/Optimize_ONNX.py
 python <Model>/Inference_<Model>_ONNX.py
 ```
 
-> Replace `<Model>` with any folder above, e.g. `Audio8_ASR`, `Mega_ASR`, `SenseVoice`. / 将 `<Model>` 替换为上方任一目录，如 `Audio8_ASR`、`Mega_ASR`、`SenseVoice`。
+> Replace `<Model>` with any folder above, e.g. `ARK_ASR`, `Audio8_ASR`, `Mega_ASR`, `SenseVoice`. / 将 `<Model>` 替换为上方任一目录，如 `ARK_ASR`、`Audio8_ASR`、`Mega_ASR`、`SenseVoice`。
+
+### ARK-ASR · ARK 语音识别
+
+> Download [ARK-ASR-0.6B](https://huggingface.co/Audio8/ARK-ASR-0.6B) to `~/Downloads/ARK-ASR-0.6B`, the default path configured by the exporter. / 将 [ARK-ASR-0.6B](https://huggingface.co/Audio8/ARK-ASR-0.6B) 下载到导出脚本默认配置路径 `~/Downloads/ARK-ASR-0.6B`。
+
+```bash
+python ARK_ASR/Export_ARK_ASR.py
+python ARK_ASR/Optimize_ONNX.py
+python ARK_ASR/Inference_ARK_ASR_ONNX.py
+```
+
+### Parakeet MultiTalker Streaming · Parakeet 流式多人语音识别
+
+> Download `multitalker-parakeet-streaming-0.6b-v1.nemo` to `~/Downloads/multitalker-parakeet-streaming-0.6b-v1/`. This pipeline also uses `~/Downloads/diar_streaming_sortformer_4spk-v2.1/diar_streaming_sortformer_4spk-v2.1.nemo` for diarization. / 将 `multitalker-parakeet-streaming-0.6b-v1.nemo` 下载到 `~/Downloads/multitalker-parakeet-streaming-0.6b-v1/`；该流程还使用 `~/Downloads/diar_streaming_sortformer_4spk-v2.1/diar_streaming_sortformer_4spk-v2.1.nemo` 进行说话人分离。
+
+```bash
+python Parakeet/MultiTalker-Streaming/Export_MultiTalker_Streaming_Parakeet_ASR.py
+python Parakeet/MultiTalker-Streaming/Optimize_ONNX.py
+python Parakeet/MultiTalker-Streaming/Inference_MultiTalker_Streaming_Parakeet_ASR_ONNX.py
+```
 
 ## 🧰 Pairs Well With · 推荐搭配
 
