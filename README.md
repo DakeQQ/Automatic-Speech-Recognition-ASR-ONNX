@@ -86,28 +86,6 @@ python <Model>/Optimize_ONNX.py
 python <Model>/Inference_<Model>_ONNX.py
 ```
 
-> Replace `<Model>` with any folder above, e.g. `ARK_ASR`, `Audio8_ASR`, `Mega_ASR`, `SenseVoice`. / 将 `<Model>` 替换为上方任一目录，如 `ARK_ASR`、`Audio8_ASR`、`Mega_ASR`、`SenseVoice`。
-
-### ARK-ASR · ARK 语音识别
-
-> Download [ARK-ASR-0.6B](https://huggingface.co/Audio8/ARK-ASR-0.6B) to `~/Downloads/ARK-ASR-0.6B`, the default path configured by the exporter. / 将 [ARK-ASR-0.6B](https://huggingface.co/Audio8/ARK-ASR-0.6B) 下载到导出脚本默认配置路径 `~/Downloads/ARK-ASR-0.6B`。
-
-```bash
-python ARK_ASR/Export_ARK_ASR.py
-python ARK_ASR/Optimize_ONNX.py
-python ARK_ASR/Inference_ARK_ASR_ONNX.py
-```
-
-### Parakeet MultiTalker Streaming · Parakeet 流式多人语音识别
-
-> Download `multitalker-parakeet-streaming-0.6b-v1.nemo` to `~/Downloads/multitalker-parakeet-streaming-0.6b-v1/`. This pipeline also uses `~/Downloads/diar_streaming_sortformer_4spk-v2.1/diar_streaming_sortformer_4spk-v2.1.nemo` for diarization. / 将 `multitalker-parakeet-streaming-0.6b-v1.nemo` 下载到 `~/Downloads/multitalker-parakeet-streaming-0.6b-v1/`；该流程还使用 `~/Downloads/diar_streaming_sortformer_4spk-v2.1/diar_streaming_sortformer_4spk-v2.1.nemo` 进行说话人分离。
-
-```bash
-python Parakeet/MultiTalker-Streaming/Export_MultiTalker_Streaming_Parakeet_ASR.py
-python Parakeet/MultiTalker-Streaming/Optimize_ONNX.py
-python Parakeet/MultiTalker-Streaming/Inference_MultiTalker_Streaming_Parakeet_ASR_ONNX.py
-```
-
 ## 🧰 Pairs Well With · 推荐搭配
 
 - 🎚️ [Voice Activity Detection (VAD)](https://github.com/DakeQQ/Voice-Activity-Detection-VAD-ONNX) — 语音活动检测
