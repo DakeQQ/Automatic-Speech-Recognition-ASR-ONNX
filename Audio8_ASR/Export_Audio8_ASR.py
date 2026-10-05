@@ -279,6 +279,13 @@ def restore_tied_lm_head(model: nn.Module, config) -> None:
         raise RuntimeError("Audio8 failed to restore the tied embedding/LM-head storage.")
 
 
+def restore_audio_positional_embedding(model: nn.Module) -> None:
+    """Rebuild the non-persistent sinusoid table that Transformers 5.x loading leaves zero-filled."""
+    position = model.audio_encoder.positional_embedding
+    length, channels = position.positional_embedding.shape
+    position.positional_embedding = type(position)(length, channels).positional_embedding.float()
+
+
 def load_audio8_checkpoint(checkpoint: Path):
     """Use the official Auto* contract, with a narrow local-loader fallback.
 
@@ -318,6 +325,7 @@ def load_audio8_checkpoint(checkpoint: Path):
         )
     model = model.cpu().float().eval()
     restore_tied_lm_head(model, config)
+    restore_audio_positional_embedding(model)
     return config, model, processor
 
 
@@ -898,9 +906,8 @@ class AUDIO8_ASR_DECODER_MAIN(nn.Module):
         self.use_fp16_kv = USE_FP16_KV
         self.compute_in_f32 = COMPUTE_IN_F32
         self.total_qkv_heads = self.qk_heads + self.num_kv_heads
-        self.qkv_split_sizes = (
+        self.qk_split_sizes = (
             self.num_heads,
-            self.num_kv_heads,
             self.num_kv_heads,
         )
         self.attention_output_size = int(first_layer.self_attn.o_proj.in_features)
@@ -1123,10 +1130,10 @@ class AUDIO8_ASR_DECODER_MAIN(nn.Module):
             )
             if self.use_fp16_kv and not self.compute_in_f32:
                 query_key = query_key.half()
-                value = value.half()
-            qkv = torch.cat((query_key, value), dim=-2)
-            qkv = qkv.permute(0, 3, 2, 1, 4)
-            query, key, value = torch.split(qkv, self.qkv_split_sizes, dim=1)
+            query, key = torch.split(
+                query_key.transpose(1, 3), self.qk_split_sizes, dim=1
+            )
+            value = value.transpose(1, 3)
             if self.use_fp16_kv:
                 if self.compute_in_f32:
                     key = key.half()
