@@ -111,22 +111,6 @@ F16_NODE_BLOCK_LIST    = None
 F16_OP_BLOCK_LIST      = QUANTIZATION_F16_OP_BLOCK_LIST
 
 
-def _main_nodes_to_exclude(model_path: str) -> list[str] | None:
-    """Keep the tied lm-head floating only for dynamic INT8 Main plans."""
-    if MODEL_PLANS[_MAIN_MODEL].method.upper() != "DYNAMIC":
-        return None
-    model = onnx.load(model_path, load_external_data=False)
-    matches = [
-        node.name
-        for node in model.graph.node
-        if node.op_type in ("MatMul", "Gemm") and "/lm_head" in node.name
-    ]
-    if len(matches) != 1 or not matches[0]:
-        raise RuntimeError(
-            f"Expected one named Audio8-ASR lm-head projection; found {matches}."
-        )
-    return matches
-
 # Configure every reusable component independently. Valid methods are Q2, Q4,
 # Q8, DYNAMIC, F16, and F32. Any omitted Plan option inherits the global default
 # above. Useful Plan options include algo, op_types, axes, block_size,
@@ -148,7 +132,6 @@ MODEL_PLANS: dict[str, Plan] = {
         algo=WEIGHT_ONLY_ALGORITHM,
         external=FORCE_EXTERNAL_DATA,
         optimize=True,
-        nodes_to_exclude=_main_nodes_to_exclude,
         num_heads=0,
         hidden_size=0,
     ),
@@ -693,12 +676,182 @@ def _share_float_embed_with_main(
     }
 
 
+def _share_dynamic_embed_with_main(
+    embed_path: Path,
+    shared_path: Path,
+    main_graph_path: Path,
+) -> dict[str, int]:
+    """Build Embed over Main's shared DynamicQuantizeMatMul lm-head tuple.
+
+    The INT8 weight is [hidden, vocab] with per-column (or scalar) scale and
+    zero point, so a column Gather plus explicit dequantization reproduces the
+    same row-wise approximation the lm-head uses, without a second table.
+    """
+    source_embed_path = Path(ORIGINAL_FOLDER_PATH) / f"{_EMBED_MODEL}.onnx"
+    source_embed = onnx.load(str(source_embed_path), load_external_data=False)
+    _, raw_gather, _, raw_table, _ = _inspect_embed_layout(source_embed)
+    hidden, vocab = (int(dim) for dim in raw_table.dims)
+
+    main_graph = onnx.load(str(main_graph_path), load_external_data=False)
+    shared = onnx.load(str(shared_path), load_external_data=False)
+    lm_nodes = [
+        node
+        for node in main_graph.graph.node
+        if node.domain == "com.microsoft"
+        and node.op_type == "DynamicQuantizeMatMul"
+        and "/lm_head" in node.name
+    ]
+    if len(lm_nodes) != 1:
+        raise RuntimeError(
+            "Expected one DynamicQuantizeMatMul lm-head in the DYNAMIC Main graph; "
+            f"found {[node.name for node in lm_nodes]}."
+        )
+    lm_node = lm_nodes[0]
+    if len(lm_node.input) > 4 and lm_node.input[4]:
+        raise RuntimeError("The tied DYNAMIC lm-head unexpectedly carries a bias.")
+    shared_by_name = {
+        initializer.name: initializer for initializer in shared.graph.initializer
+    }
+    main_by_name = {
+        initializer.name: initializer for initializer in main_graph.graph.initializer
+    }
+
+    def manifest_ref(name: str) -> TensorProto:
+        graph_ref = main_by_name.get(name)
+        ref = shared_by_name.get(name)
+        # Tiny scalars stay inline in the graph instead of the shared blob.
+        if (
+            ref is None
+            and graph_ref is not None
+            and graph_ref.data_location != TensorProto.EXTERNAL
+        ):
+            return graph_ref
+        if (
+            graph_ref is None
+            or ref is None
+            or graph_ref.data_type != ref.data_type
+            or list(graph_ref.dims) != list(ref.dims)
+            or _external_data_map(graph_ref) != _external_data_map(ref)
+        ):
+            raise RuntimeError(
+                f"DYNAMIC lm-head tensor {name!r} is missing from the shared manifest."
+            )
+        return ref
+
+    weight = manifest_ref(lm_node.input[1])
+    scale = manifest_ref(lm_node.input[2])
+    zero_point = (
+        manifest_ref(lm_node.input[3])
+        if len(lm_node.input) > 3 and lm_node.input[3]
+        else None
+    )
+    if (
+        weight.data_type not in (TensorProto.INT8, TensorProto.UINT8)
+        or list(weight.dims) != [hidden, vocab]
+    ):
+        raise RuntimeError(
+            f"DYNAMIC lm-head weight has unexpected type/shape: "
+            f"{weight.data_type}, {list(weight.dims)}."
+        )
+    for ref in (scale, zero_point):
+        if ref is not None and list(ref.dims) not in ([], [vocab]):
+            raise RuntimeError(
+                f"DYNAMIC lm-head {ref.name!r} must be scalar or per-column; "
+                f"got {list(ref.dims)}."
+            )
+    if scale.data_type != TensorProto.FLOAT:
+        raise RuntimeError("DYNAMIC lm-head scale must be FLOAT.")
+
+    ids = raw_gather.input[1]
+    output_name = source_embed.graph.output[0].name
+    axes_name = "shared_dynamic_embed_unsqueeze_axes"
+    nodes = [
+        onnx.helper.make_node(
+            "Gather", [weight.name, ids], ["shared_dynamic_embed_q"],
+            name="shared_dynamic_embed_gather", axis=1,
+        ),
+        onnx.helper.make_node(
+            "Transpose", ["shared_dynamic_embed_q"], ["shared_dynamic_embed_q_bld"],
+            name="shared_dynamic_embed_transpose", perm=[1, 2, 0],
+        ),
+        onnx.helper.make_node(
+            "Cast", ["shared_dynamic_embed_q_bld"], ["shared_dynamic_embed_qf"],
+            name="shared_dynamic_embed_cast", to=TensorProto.FLOAT,
+        ),
+    ]
+
+    def per_token(ref: TensorProto, role: str) -> str:
+        source = ref.name
+        if ref.data_type != TensorProto.FLOAT:
+            nodes.append(onnx.helper.make_node(
+                "Cast", [source], [f"shared_dynamic_embed_{role}_f"],
+                name=f"shared_dynamic_embed_{role}_cast", to=TensorProto.FLOAT,
+            ))
+            source = f"shared_dynamic_embed_{role}_f"
+        if not ref.dims:
+            return source
+        nodes.append(onnx.helper.make_node(
+            "Gather", [source, ids], [f"shared_dynamic_embed_{role}_bl"],
+            name=f"shared_dynamic_embed_{role}_gather", axis=0,
+        ))
+        nodes.append(onnx.helper.make_node(
+            "Unsqueeze", [f"shared_dynamic_embed_{role}_bl", axes_name],
+            [f"shared_dynamic_embed_{role}_bl1"],
+            name=f"shared_dynamic_embed_{role}_unsqueeze",
+        ))
+        return f"shared_dynamic_embed_{role}_bl1"
+
+    centered = "shared_dynamic_embed_qf"
+    if zero_point is not None:
+        zp_name = per_token(zero_point, "zero_point")
+        nodes.append(onnx.helper.make_node(
+            "Sub", [centered, zp_name], ["shared_dynamic_embed_centered"],
+            name="shared_dynamic_embed_sub",
+        ))
+        centered = "shared_dynamic_embed_centered"
+    scale_name = per_token(scale, "scale")
+    nodes.append(onnx.helper.make_node(
+        "Mul", [centered, scale_name], [output_name],
+        name="shared_dynamic_embed_mul",
+    ))
+
+    shared_refs = [ref for ref in (weight, scale, zero_point) if ref is not None]
+    del source_embed.graph.node[:]
+    source_embed.graph.node.extend(nodes)
+    del source_embed.graph.initializer[:]
+    source_embed.graph.initializer.extend(copy.deepcopy(ref) for ref in shared_refs)
+    source_embed.graph.initializer.append(
+        onnx.numpy_helper.from_array(np.array([-1], dtype=np.int64), axes_name)
+    )
+    del source_embed.graph.value_info[:]
+    source_embed.graph.output[0].type.tensor_type.elem_type = TensorProto.FLOAT
+    if not any(
+        opset.domain in ("", "ai.onnx") and opset.version >= 13
+        for opset in source_embed.opset_import
+    ):
+        raise RuntimeError("DYNAMIC tied Embed requires ONNX opset >= 13.")
+    old_private_sidecar = embed_path.with_name(embed_path.name + ".data")
+    had_private_sidecar = old_private_sidecar.exists()
+    Shared_Merged.save_model(source_embed, embed_path)
+    return {
+        "shared_initializer_count": len(shared_refs),
+        "shared_data_bytes": sum(
+            int(_external_data_map(ref).get("length", "0")) for ref in shared_refs
+        ),
+        "removed_external_file_count": int(
+            had_private_sidecar and not old_private_sidecar.exists()
+        ),
+    }
+
+
 def _share_tied_embed_with_main(
     embed_path: Path,
     shared_path: Path,
     main_graph_path: Path,
     main_plan,
 ) -> dict[str, int]:
+    if main_plan.method == "DYNAMIC":
+        return _share_dynamic_embed_with_main(embed_path, shared_path, main_graph_path)
     if main_plan.method in {"Q2", "Q4", "Q8"}:
         return _share_block_quantized_embed_with_main(
             embed_path,
@@ -707,7 +860,7 @@ def _share_tied_embed_with_main(
             main_plan.block_size,
             int(main_plan.method[1:]),
         )
-    if main_plan.method in {"F32", "F16", "DYNAMIC"} or main_plan.uses_float16:
+    if main_plan.method in {"F32", "F16"} or main_plan.uses_float16:
         return _share_float_embed_with_main(embed_path, shared_path, main_graph_path)
     raise RuntimeError(
         f"Tied Audio8-ASR Embed does not support Main method {main_plan.method!r}."
