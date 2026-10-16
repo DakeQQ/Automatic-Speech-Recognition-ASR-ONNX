@@ -42,7 +42,7 @@ ORT_LOG       = False                   # Verbose ORT logging (False = fastest).
 ORT_FP16      = False                   # True only if the graph was converted to fp16.
 MAX_THREADS   = 2                       # Measured optimum on the target i7-1165G7; 0 lets ORT choose automatically.
 DEVICE_ID     = 0
-ORT_Accelerate_Providers = ["CUDAExecutionProvider"]           # e.g. ['CUDAExecutionProvider'] / ['OpenVINOExecutionProvider'] / ['DmlExecutionProvider']
+ORT_Accelerate_Providers = []           # e.g. ['CUDAExecutionProvider'] / ['OpenVINOExecutionProvider'] / ['DmlExecutionProvider']
 CPU_DISABLE_MATMUL_ADD_FUSION = True    # ORT 1.27 wraps rank-3 MatMul+Add in costly Reshape/Gemm/Reshape chains.
 CPU_DISABLE_NCHWC = True                # NCHWc reorders regress mean/tail latency on the target i7-1165G7.
 CPU_EXTRA_DISABLED_OPTIMIZERS = [       # Individually benchmarked on the same CPU / ORT build.
